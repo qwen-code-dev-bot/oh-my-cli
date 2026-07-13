@@ -2,17 +2,17 @@ schema: autonomy.openai/v1
 
 localCommands:
   - name: install
-    commandFrom: product.commands.install
+    commandFrom: commands.install
   - name: build
-    commandFrom: product.commands.build
+    commandFrom: commands.build
   - name: typecheck
-    commandFrom: product.commands.typecheck
+    commandFrom: commands.typecheck
   - name: unit
-    commandFrom: product.commands.unit
+    commandFrom: commands.unit
   - name: integration
-    commandFrom: product.commands.integration
+    commandFrom: commands.integration
   - name: smoke
-    commandFrom: product.commands.smoke
+    commandFrom: commands.smoke
 
 githubChecks:
   required:
