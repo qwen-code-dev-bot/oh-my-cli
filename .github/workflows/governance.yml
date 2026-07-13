@@ -26,7 +26,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$CHANGED_FILES_FILE"
+          git diff --name-only --no-renames -z "$BASE_SHA...$HEAD_SHA" > "$CHANGED_FILES_FILE"
       - name: Enforce protected path policy
         env:
           CHANGED_FILES_FILE: ${{ runner.temp }}/changed-files.txt
@@ -35,7 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           protected_path_changed=false
-          while IFS= read -r path; do
+          while IFS= read -r -d '' path; do
             case "$path" in
               AUTONOMY.md | .autonomy/* | .github/workflows/* | .github/CODEOWNERS)
                 protected_path_changed=true
