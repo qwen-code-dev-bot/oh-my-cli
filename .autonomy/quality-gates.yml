@@ -1,0 +1,76 @@
+schema: autonomy.openai/v1
+
+localCommands:
+  - name: install
+    commandFrom: product.commands.install
+  - name: build
+    commandFrom: product.commands.build
+  - name: typecheck
+    commandFrom: product.commands.typecheck
+  - name: unit
+    commandFrom: product.commands.unit
+  - name: integration
+    commandFrom: product.commands.integration
+  - name: smoke
+    commandFrom: product.commands.smoke
+
+githubChecks:
+  required:
+    - verify
+
+branch:
+  requireCleanWorktree: true
+  requireUpToDateWithDefaultBranch: true
+  requireIssueBranchPattern: issue/<number>-<slug>
+  rejectUnrelatedChanges: true
+
+ledger:
+  appendOnly: true
+  requireEventForEveryCommit: true
+  requireSemanticAnnotationForEveryCommit: true
+  requireOperationIdempotencyKeys: true
+  requireGeneratedMergeCommitReconciliation: true
+
+security:
+  secretScan:
+    required: true
+    rejectCredentialsTokensHostPathsAndPrivateState: true
+  dependencyReview:
+    requiredWhenDependenciesChange: true
+    rejectUnexpectedOrUnjustifiedDependencies: true
+  issueAndCommunityCommandsAreUntrusted: true
+
+selfReview:
+  required: true
+  independentFromImplementation: true
+  maximumCriticalFindings: 0
+  unresolvedFindingsBlockMerge: true
+
+governance:
+  protectedPaths:
+    - AUTONOMY.md
+    - .autonomy/**
+    - .github/workflows/**
+    - .github/CODEOWNERS
+  developmentBotMayOpenProposalIssueOnly: true
+  proposalLabel: governance-proposal
+  changesBlockAutomaticMerge: true
+
+merge:
+  pullRequestRequired: true
+  strategy: merge
+  preserveBranchCommitIdentities: true
+  requireAllLocalAndGithubGates: true
+  requireFreshBranchCleanStateAndCompleteLedger: true
+  deleteFeatureBranchAfterDelivery: true
+
+postMergeDogfood:
+  targetedRequiredForChangedUserPaths: true
+  runBeforeLeaseRelease: true
+  runBeforeSourceOrParentMarkedDelivered: true
+  findingRequiresReproductionAndMinimalScenario: true
+  findingCreatesIssue:
+    author: qwen-code-dev-bot
+    label: source:self-discovery
+  inlineFixesForbidden: true
+  userSourceClosureRequiresSuccess: true
