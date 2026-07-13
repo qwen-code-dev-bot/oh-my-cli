@@ -8,6 +8,12 @@ import { runAgent } from "./agent.js";
 import type { ApprovalMode } from "./approval.js";
 import type { SessionMessage } from "./session.js";
 
+// Handle Ctrl-C gracefully — session is already persisted incrementally
+process.on("SIGINT", () => {
+  process.stderr.write("\nInterrupted. Session saved.\n");
+  process.exit(130);
+});
+
 const program = new Command();
 
 program

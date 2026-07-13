@@ -150,8 +150,8 @@ export function createTools(): ToolDef[] {
           });
           return { content: output || "(no output)" };
         } catch (err: unknown) {
-          const e = err as { killed?: boolean; stdout?: string; stderr?: string; message?: string; status?: number };
-          if (e.killed) {
+          const e = err as { killed?: boolean; code?: string; errno?: number; stdout?: string; stderr?: string; message?: string; status?: number };
+          if (e.killed || e.code === "ETIMEDOUT" || e.errno === -110) {
             return { content: `Error: command timed out after ${timeoutMs / 1000}s`, isError: true };
           }
           const combined = [e.stdout ?? "", e.stderr ?? ""].join("\n").trim();
