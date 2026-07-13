@@ -1,0 +1,51 @@
+name: Governance
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  protected-paths:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out pull request
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Compute changed paths against base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CHANGED_FILES_FILE: ${{ runner.temp }}/changed-files.txt
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --name-only --no-renames -z "$BASE_SHA...$HEAD_SHA" > "$CHANGED_FILES_FILE"
+      - name: Enforce protected path policy
+        env:
+          CHANGED_FILES_FILE: ${{ runner.temp }}/changed-files.txt
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          protected_path_changed=false
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              AUTONOMY.md | .autonomy/* | .github/workflows/* | .github/CODEOWNERS)
+                protected_path_changed=true
+                ;;
+            esac
+          done < "$CHANGED_FILES_FILE"
+
+          if [[ "$PR_AUTHOR" == "qwen-code-dev-bot" && "$protected_path_changed" == "true" ]]; then
+            echo "qwen-code-dev-bot cannot modify protected governance paths."
+            exit 1
+          fi
+
+          echo "Protected-path policy passed for $PR_AUTHOR."

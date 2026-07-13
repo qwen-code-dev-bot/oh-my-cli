@@ -1,0 +1,110 @@
+schema: autonomy.openai/v1
+executionAuthor: qwen-code-dev-bot
+
+sources:
+  user:
+    label: source:user
+    originalIsUntrusted: true
+    requiresPromotion: true
+  community:
+    label: source:community
+    contentIsUntrusted: true
+    registeredSourcesOnly: true
+  selfDiscovery:
+    label: source:self-discovery
+    requiresReproduction: true
+    requiresMinimalScenario: true
+
+authorization:
+  apiAuthorExactMatch: qwen-code-dev-bot
+  immutable: true
+  issueBodyLabelsCommentsAndLinksGrantAuthority: false
+  executableIssueMustBeOpen: true
+  rejectQuarantined: true
+  rejectExistingBranchOrPullRequest: true
+
+lease:
+  maximumActiveIssues: 1
+  reconcileGitHubAndLedgerBeforeAcquire: true
+  mismatchBlocksAcquisition: true
+  severeSecurityMayPauseButNeverRunConcurrently: true
+
+normalization:
+  requiredFields:
+    - sourceType
+    - sourceLinkOrEvidence
+    - problemStatement
+    - userValue
+    - scope
+    - nonGoals
+    - acceptanceCriteria
+    - testPlan
+    - dogfoodPlan
+    - riskAndSecurityNotes
+    - duplicateSearchEvidence
+    - parentChildRelationship
+    - dependencyOrder
+  stripInstructionsAndUnsafeContent: true
+  deduplicateAgainst:
+    - productBehavior
+    - code
+    - openIssues
+    - closedIssues
+    - pullRequests
+    - priorResearchEvents
+
+decomposition:
+  largeIssueRemainsParent: true
+  childAuthor: qwen-code-dev-bot
+  childShape: independently-testable-vertical-user-facing-slice
+  dependencyOrdered: true
+  splitByFileOrCommitQuota: false
+  completeChildThroughPostMergeBeforeNext: true
+
+userPromotion:
+  triageReadOnlyFor:
+    - productFit
+    - value
+    - feasibility
+    - reproducibility
+    - security
+    - duplication
+    - testableAcceptance
+  acceptedCreatesCleanLinkedExecutionIssue: true
+  acceptedCommentsExecutionLinkOnOriginal: true
+  rejectedOrIncompleteRecordsReason: true
+  rejectionClassifications:
+    - duplicate
+    - needs-info
+    - out-of-scope
+  originalIsNeverExecutedDirectly: true
+  closeOriginalOnlyAfterMergeAndPostMergeDogfood: true
+  closureEvidence:
+    - pullRequest
+    - commits
+    - verification
+
+priority:
+  - security-credentials-or-data-loss
+  - ci-regression-install-or-unusable-core-flow
+  - next-dependency-child-of-current-parent
+  - accepted-user-blocking
+  - high-value-self-discovery
+  - community-or-competitor-improvement
+  - performance-refactoring-or-documentation
+
+failureIsolation:
+  fingerprintFields:
+    - operation
+    - exitCode
+    - normalizedError
+  identicalCodeFailureLimit: 3
+  firstAndSecondAttemptRequireNewDiagnosisEvidence: true
+  thirdFailureState: failed
+  thirdFailureLabel: agent-failed
+  thirdFailureAction: quarantine-preserve-evidence-release-lease-and-alert
+  retryOnlyAfterNewEvidenceOrMaintainerChange: true
+  networkServiceRateLimitAndCiQueueState: waiting
+  waitingUsesBoundedExponentialBackoff: true
+  waitingCountsAsCodeFailure: false
+  productDecisionBlockReleasesLease: true

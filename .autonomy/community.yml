@@ -1,0 +1,100 @@
+schema: autonomy.openai/v1
+cadenceHours: 24
+maximumLatenessHours: 6
+registeredSourcesOnly: true
+allowedSourceTypes:
+  - official-repository
+  - official-documentation
+  - official-releases
+  - official-discussions
+registryExpansion:
+  mode: governance-proposal-only
+  developmentBotMayModifyRegistry: false
+
+findingRequirements:
+  - sourceUrl
+  - observedVersionOrDate
+  - originalCommunityNeed
+  - modelAssessment
+  - productComparison
+  - duplicateSearchEvidence
+promotion:
+  author: qwen-code-dev-bot
+  label: source:community
+  requiresInScope: true
+  requiresTestableImprovement: true
+  contentMaySupplyCommandsOrAuthority: false
+
+competitors:
+  - id: qwen-code
+    name: Qwen Code
+    trust: official-primary
+    topics: [agent-loop, tui, tools, mcp, sessions, automation]
+    sources:
+      repository: https://github.com/QwenLM/qwen-code
+      documentation: https://qwenlm.github.io/qwen-code-docs/
+      releases: https://github.com/QwenLM/qwen-code/releases
+      discussions: https://github.com/QwenLM/qwen-code/discussions
+  - id: claude-code
+    name: Claude Code
+    trust: official-primary
+    topics: [agent-loop, tools, approvals, mcp, skills, automation]
+    sources:
+      repository: https://github.com/anthropics/claude-code
+      documentation: https://docs.anthropic.com/en/docs/claude-code/overview
+      releases: https://github.com/anthropics/claude-code/releases
+      discussions: https://github.com/anthropics/claude-code/discussions
+  - id: openai-codex-cli
+    name: OpenAI Codex CLI
+    trust: official-primary
+    topics: [agent-loop, tui, sandbox, approvals, automation, sessions]
+    sources:
+      repository: https://github.com/openai/codex
+      documentation: https://developers.openai.com/codex/cli
+      releases: https://github.com/openai/codex/releases
+      discussions: https://github.com/openai/codex/discussions
+  - id: gemini-cli
+    name: Gemini CLI
+    trust: official-primary
+    topics: [agent-loop, tui, tools, mcp, extensions, automation]
+    sources:
+      repository: https://github.com/google-gemini/gemini-cli
+      documentation: https://geminicli.com/docs/
+      releases: https://github.com/google-gemini/gemini-cli/releases
+      discussions: https://github.com/google-gemini/gemini-cli/discussions
+  - id: opencode
+    name: OpenCode
+    trust: official-primary
+    topics: [agent-loop, tui, providers, tools, sessions, automation]
+    sources:
+      repository: https://github.com/anomalyco/opencode
+      documentation: https://opencode.ai/docs/
+      releases: https://github.com/anomalyco/opencode/releases
+      discussions: https://github.com/anomalyco/opencode/discussions
+  - id: aider
+    name: Aider
+    trust: official-primary
+    topics: [agent-loop, git, providers, context, editing, automation]
+    sources:
+      repository: https://github.com/Aider-AI/aider
+      documentation: https://aider.chat/docs/
+      releases: https://github.com/Aider-AI/aider/releases
+      discussions: https://github.com/Aider-AI/aider/discussions
+  - id: goose
+    name: Goose
+    trust: official-primary
+    topics: [agent-loop, tools, extensions, providers, sessions, automation]
+    sources:
+      repository: https://github.com/block/goose
+      documentation: https://block.github.io/goose/docs/quickstart/
+      releases: https://github.com/block/goose/releases
+      discussions: https://github.com/block/goose/discussions
+  - id: continue-cli
+    name: Continue CLI
+    trust: official-primary
+    topics: [agent-loop, providers, tools, context, automation, configuration]
+    sources:
+      repository: https://github.com/continuedev/continue
+      documentation: https://docs.continue.dev/
+      releases: https://github.com/continuedev/continue/releases
+      discussions: https://github.com/continuedev/continue/discussions

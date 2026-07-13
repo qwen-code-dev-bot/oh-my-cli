@@ -1,0 +1,24 @@
+schema: autonomy.openai/v1
+product:
+  name: oh-my-cli
+  type: cli
+repository:
+  owner: qwen-code-dev-bot
+  name: oh-my-cli
+  defaultBranch: main
+  mergeStrategy: merge
+runtime:
+  node: ">=22"
+  packageManager: npm
+commands:
+  install: npm ci
+  build: npm run build
+  typecheck: npm run typecheck
+  unit: npm test
+  integration: npm run test:integration
+  smoke: npm run smoke
+limits:
+  tickMinutes: 90
+  commitsMin: 1
+  commitsMax: 3
+  loopMinutes: 30
