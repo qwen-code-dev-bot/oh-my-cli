@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.qwen/
+*.tsbuildinfo
+coverage/
+.oh-my-cli/

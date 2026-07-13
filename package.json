@@ -1,0 +1,30 @@
+{
+  "name": "oh-my-cli",
+  "version": "0.1.0",
+  "description": "A small code-agent CLI",
+  "type": "module",
+  "bin": {
+    "oh-my-cli": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "smoke": "vitest run tests/smoke"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "openai": "^4.96.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "tsx": "^4.19.4",
+    "vitest": "^3.1.4",
+    "@types/node": "^22.15.0"
+  }
+}
