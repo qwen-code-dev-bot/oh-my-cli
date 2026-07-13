@@ -3,6 +3,15 @@
   "version": "0.1.0",
   "description": "A small code-agent CLI",
   "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qwen-code-dev-bot/oh-my-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/qwen-code-dev-bot/oh-my-cli/issues"
+  },
+  "homepage": "https://github.com/qwen-code-dev-bot/oh-my-cli#readme",
   "bin": {
     "oh-my-cli": "./dist/index.js"
   },
