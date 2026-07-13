@@ -138,3 +138,5 @@ program
   });
 
 program.parse();
+
+// Disposable Bot product-only governance probe.
