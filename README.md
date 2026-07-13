@@ -7,6 +7,14 @@ A small code-agent CLI with file and shell tools. Built with Node.js 22, TypeScr
 - [Apache License 2.0](LICENSE)
 - [Contribution policy](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
+- [Autonomy contract](AUTONOMY.md)
+
+Product improvements enter the autonomous queue from three sources: promoted
+user reports, findings from the bounded community-source registry, and
+reproducible self-discoveries. Each becomes a normalized Issue authored by the
+repository Bot before execution. The autonomy contract, its policy files,
+GitHub workflows, and CODEOWNERS form a protected governance plane maintained
+by `qqqys`; the Bot may propose governance changes but cannot apply them.
 
 ## Install
 
