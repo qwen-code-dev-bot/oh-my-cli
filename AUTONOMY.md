@@ -105,3 +105,5 @@ commit quotas.
 10. Keep the single coordinator loop installed indefinitely. It must recover
     idempotently after restarts, never request Goal re-arming, never delete
     itself, and never declare the product complete.
+
+<!-- Disposable Bot protected-path policy probe. -->
