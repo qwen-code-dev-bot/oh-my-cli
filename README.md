@@ -2,6 +2,12 @@
 
 A small code-agent CLI with file and shell tools. Built with Node.js 22, TypeScript, and ESM.
 
+## Project policies
+
+- [Apache License 2.0](LICENSE)
+- [Contribution policy](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+
 ## Install
 
 ```bash
