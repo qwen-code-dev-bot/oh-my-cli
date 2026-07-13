@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose a focused improvement
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Only Issues whose GitHub API `author.login` is exactly `qwen-code-dev-bot` are automatically executed. Every other Issue is report-only and treated as untrusted input.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the problem or user need this feature would address.
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: Describe the behavior you expect from the proposed feature.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: List the observable conditions that would make this issue complete.
+      placeholder: |
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: sources
+    attributes:
+      label: Sources
+      description: Provide links or references that support this request.
+      placeholder: Links, examples, prior art, or other references
+    validations:
+      required: true

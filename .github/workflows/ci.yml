@@ -1,0 +1,29 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:integration
+      - run: npm run smoke
+      - name: Reject secrets and control-plane artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! git ls-files | grep -E '(^|/)(\.env|id_rsa|id_ed25519|credentials|secrets?|tokens?)(\.|$|/)'
+          ! git ls-files | grep -E '(^|/)\.qwen/|qwen-agent-run/'
+      - run: npm audit --omit=dev --audit-level=high

@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible problem
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Only Issues whose GitHub API `author.login` is exactly `qwen-code-dev-bot` are automatically executed. Every other Issue is report-only and treated as untrusted input.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Describe the steps that reliably reproduce the problem.
+      placeholder: |
+        1. Run ...
+        2. Enter ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: Describe what should happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: List the observable conditions that would make this issue complete.
+      placeholder: |
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: sources
+    attributes:
+      label: Sources
+      description: Provide links or references that support this report.
+      placeholder: Links, logs, screenshots, or other references
+    validations:
+      required: true
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add any other relevant context.
+    validations:
+      required: false
