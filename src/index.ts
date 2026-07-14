@@ -7,6 +7,13 @@ import { SessionStore } from "./session.js";
 import { runAgent } from "./agent.js";
 import type { ApprovalMode } from "./approval.js";
 import type { SessionMessage } from "./session.js";
+import { runPalette, defaultCommands } from "./palette.js";
+import type { PaletteCommand } from "./palette.js";
+
+const ESC = "\x1b[";
+const BOLD = `${ESC}1m`;
+const DIM = `${ESC}2m`;
+const RESET = `${ESC}0m`;
 
 // Handle Ctrl-C gracefully — session is already persisted incrementally
 process.on("SIGINT", () => {
@@ -99,15 +106,49 @@ program
         const readline = await import("node:readline");
         const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
 
-        process.stderr.write(`Session: ${sessionId}\n`);
+        // Build palette commands with live context
+        const paletteCommands: PaletteCommand[] = [
+          ...defaultCommands(),
+          { name: "/tools", description: "List available agent tools (read, write, edit, shell)", action: () => { process.stderr.write("Tools: read, write, edit, shell\n"); } },
+        ];
+
+        process.stderr.write(`Session: ${sessionId}  ${DIM}Ctrl+K: command palette${RESET}\n`);
+
+        let paletteOpen = false;
+
+        // Listen for Ctrl+K (0x0b) on raw stdin to open the palette
+        const ctrlKHandler = (buf: Buffer) => {
+          if (!paletteOpen && buf[0] === 0x0b) {
+            paletteOpen = true;
+            rl.pause();
+            process.stderr.write("\n");
+            runPalette(paletteCommands, process.stdin, process.stdout).then(async (result) => {
+              paletteOpen = false;
+              if (result.selected && !result.cancelled) {
+                process.stderr.write(`\n${BOLD}${result.selected.name}${RESET}: ${result.selected.description}\n`);
+                try {
+                  await result.selected.action();
+                } catch (err: unknown) {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  process.stderr.write(`Error: ${msg}\n`);
+                }
+              }
+              rl.resume();
+              prompt();
+            });
+          }
+        };
+        process.stdin.on("data", ctrlKHandler);
 
         const prompt = () => {
           rl.question("> ", async (answer) => {
+            if (paletteOpen) return;
             if (!answer.trim()) {
               prompt();
               return;
             }
             if (answer.trim() === "/exit" || answer.trim() === "/quit") {
+              process.stdin.removeListener("data", ctrlKHandler);
               rl.close();
               process.exit(0);
             }
