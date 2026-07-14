@@ -10,6 +10,7 @@ import type { SessionMessage } from "./session.js";
 import { runPalette, defaultCommands } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
 import { runPreflight, formatPreflight } from "./preflight.js";
+import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 
 const ESC = "\x1b[";
 const BOLD = `${ESC}1m`;
@@ -37,8 +38,19 @@ program
   )
   .option("--workspace <dir>", "Workspace directory", process.cwd())
   .option("--preflight", "Run a provider connectivity preflight and exit")
+  .option("--sandbox-info", "Show effective sandbox isolation diagnostic and exit")
   .action(async (opts) => {
     try {
+      if (opts.sandboxInfo) {
+        const diag = collectSandboxDiagnostic(
+          opts.approvalMode,
+          opts.workspace ?? null,
+          Boolean(process.stdin.isTTY),
+        );
+        process.stdout.write(formatDiagnostic(diag) + "\n");
+        process.exit(0);
+      }
+
       if (opts.preflight) {
         const config = loadConfig();
         const result = await runPreflight(config);
