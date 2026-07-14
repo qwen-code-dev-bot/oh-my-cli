@@ -9,6 +9,7 @@ import type { ApprovalMode } from "./approval.js";
 import type { SessionMessage } from "./session.js";
 import { runPalette, defaultCommands } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
+import { runPreflight, formatPreflight } from "./preflight.js";
 
 const ESC = "\x1b[";
 const BOLD = `${ESC}1m`;
@@ -35,8 +36,16 @@ program
     "default",
   )
   .option("--workspace <dir>", "Workspace directory", process.cwd())
+  .option("--preflight", "Run a provider connectivity preflight and exit")
   .action(async (opts) => {
     try {
+      if (opts.preflight) {
+        const config = loadConfig();
+        const result = await runPreflight(config);
+        process.stdout.write(formatPreflight(result) + "\n");
+        process.exit(result.ok ? 0 : 1);
+      }
+
       const config = loadConfig();
       const workspace = new Workspace(opts.workspace);
       const store = new SessionStore();
