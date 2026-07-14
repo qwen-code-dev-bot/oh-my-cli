@@ -1,4 +1,5 @@
 import readline from "node:readline";
+import { analyzeImpact, formatImpact } from "./permission-impact.js";
 
 export type ApprovalMode = "default" | "auto-edit" | "yolo";
 
@@ -17,9 +18,9 @@ export async function promptApproval(toolName: string, args: Record<string, unkn
   }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-  const summary = JSON.stringify(args, null, 2).slice(0, 500);
+  const summary = formatImpact(analyzeImpact(toolName, args));
   return new Promise((resolve) => {
-    rl.question(`\n⚠ Tool "${toolName}" requires approval.\nArgs: ${summary}\nAllow? (y/N) `, (answer) => {
+    rl.question(`\n⚠ Tool "${toolName}" requires approval.\n${summary}\nAllow? (y/N) `, (answer) => {
       rl.close();
       resolve(answer.toLowerCase() === "y");
     });
