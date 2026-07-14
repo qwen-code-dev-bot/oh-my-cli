@@ -11,6 +11,8 @@ import { runPalette, defaultCommands } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
 import { runPreflight, formatPreflight } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
+import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
+import path from "node:path";
 
 const ESC = "\x1b[";
 const BOLD = `${ESC}1m`;
@@ -39,8 +41,18 @@ program
   .option("--workspace <dir>", "Workspace directory", process.cwd())
   .option("--preflight", "Run a provider connectivity preflight and exit")
   .option("--sandbox-info", "Show effective sandbox isolation diagnostic and exit")
+  .option("--health", "Show MCP server and extension health inventory and exit")
+  .option("--settings <path>", "Integrations settings file for --health (default <workspace>/.oh-my-cli/settings.json)")
   .action(async (opts) => {
     try {
+      if (opts.health) {
+        const settingsPath =
+          opts.settings ?? path.join(opts.workspace, ".oh-my-cli", "settings.json");
+        const inventory = await collectHealthInventory(settingsPath);
+        process.stdout.write(formatHealthInventory(inventory) + "\n");
+        process.exit(0);
+      }
+
       if (opts.sandboxInfo) {
         const diag = collectSandboxDiagnostic(
           opts.approvalMode,
