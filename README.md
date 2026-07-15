@@ -63,6 +63,7 @@ Sessions are persisted as JSONL under `~/.oh-my-cli/sessions/`.
 | `--resume <session-id>` | Resume a persisted session |
 | `--approval-mode <mode>` | `default`, `auto-edit`, or `yolo` |
 | `--workspace <dir>` | Workspace directory (default: cwd) |
+| `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 
 ### Approval modes
 
@@ -71,6 +72,35 @@ Sessions are persisted as JSONL under `~/.oh-my-cli/sessions/`.
 - **yolo** — allow all tools without prompting (unsafe).
 
 Read operations never require approval.
+
+### Headless JSON protocol
+
+For CI and automation, pass `--output json` with `-p` to emit a versioned,
+newline-delimited JSON event stream on stdout. The default human-readable output
+is unchanged when the protocol is not selected.
+
+```bash
+oh-my-cli -p "Summarize README.md" --output json
+```
+
+Each line is a self-describing record that parses independently:
+
+```json
+{"protocol":"oh-my-cli.headless","v":1,"seq":0,"ts":"…","type":"start","sessionId":"…","model":"…","prompt":"…"}
+{"protocol":"oh-my-cli.headless","v":1,"seq":1,"ts":"…","type":"assistant","round":0,"final":true,"text":"…","truncated":false}
+{"protocol":"oh-my-cli.headless","v":1,"seq":2,"ts":"…","type":"complete","ok":true,"exitCode":0,"rounds":1,"reason":"completed"}
+```
+
+- **Envelope** — every record carries `protocol` (`oh-my-cli.headless`), `v`
+  (schema version), a monotonic `seq`, an ISO `ts`, and a `type`.
+- **Events** — `start`, `assistant` (one per turn), `tool_start`, `tool_result`
+  (`ok` reflects success), `error` (`stage` is `provider` or `internal`), and a
+  terminal `complete`.
+- **Exit semantics** — the `complete` record's `exitCode` always equals the
+  process exit code (`0` success, `1` failure), so wrappers can compare the
+  terminal record against `$?`.
+- **Safety** — secrets and home paths are redacted and oversized payloads are
+  truncated (with a `truncated` flag); the stream stays clean for machine use.
 
 ## Built-in tools
 
@@ -102,5 +132,6 @@ npm run smoke            # Smoke tests against built binary
 - `src/workspace.ts` — path confinement with symlink escape detection
 - `src/approval.ts` — approval mode logic
 - `src/session.ts` — JSONL session persistence
+- `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests
