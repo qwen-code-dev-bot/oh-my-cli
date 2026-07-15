@@ -13,13 +13,67 @@ export function filterCommands(commands: PaletteCommand[], query: string): Palet
 }
 
 const ESC = "\x1b[";
-const BOLD = `${ESC}1m`;
-const DIM = `${ESC}2m`;
-const RESET = `${ESC}0m`;
 const HIDE_CURSOR = `${ESC}?25l`;
 const SHOW_CURSOR = `${ESC}?25h`;
 const CLEAR_LINE = `${ESC}2K`;
 const MOVE_UP = (n: number) => `${ESC}${n}A`;
+
+export interface PaletteStyle {
+  bold: string;
+  dim: string;
+  reset: string;
+  clearLine: string;
+}
+
+// Color (SGR) codes are conditional; line-clearing control codes are always
+// present so the interactive redraw keeps working when color is disabled.
+export function paletteStyle(color: boolean): PaletteStyle {
+  return {
+    bold: color ? `${ESC}1m` : "",
+    dim: color ? `${ESC}2m` : "",
+    reset: color ? `${ESC}0m` : "",
+    clearLine: CLEAR_LINE,
+  };
+}
+
+export interface PaletteRenderState {
+  query: string;
+  selected: number;
+  maxVisible?: number;
+}
+
+// Pure renderer for the palette body. Extracted from the interactive loop so
+// color suppression is unit-testable without a TTY.
+export function renderPaletteLines(
+  filtered: PaletteCommand[],
+  state: PaletteRenderState,
+  style: PaletteStyle,
+): string[] {
+  const { bold, dim, reset, clearLine } = style;
+  const maxVisible = state.maxVisible ?? 8;
+  const lines: string[] = [];
+  lines.push(`${bold}⌘ Command Palette${reset}  ${dim}↑↓ navigate · Enter run · Esc close${reset}`);
+  lines.push(`  ${dim}> ${reset}${state.query}${clearLine}`);
+  lines.push("");
+
+  if (filtered.length === 0) {
+    lines.push(`  ${dim}No matching commands${reset}`);
+  } else {
+    const start = Math.max(0, state.selected - maxVisible + 1);
+    const end = Math.min(filtered.length, start + maxVisible);
+    for (let i = start; i < end; i++) {
+      const cmd = filtered[i];
+      const marker = i === state.selected ? `${bold}▸ ` : "  ";
+      const nameStyle = i === state.selected ? bold : "";
+      lines.push(`${marker}${nameStyle}${cmd.name}${reset}  ${dim}${cmd.description}${reset}${clearLine}`);
+    }
+    if (filtered.length > maxVisible) {
+      lines.push(`  ${dim}… and ${filtered.length - maxVisible} more${reset}`);
+    }
+  }
+
+  return lines;
+}
 
 export interface PaletteResult {
   selected: PaletteCommand | null;
@@ -30,35 +84,17 @@ export async function runPalette(
   commands: PaletteCommand[],
   stdin: NodeJS.ReadStream,
   stdout: NodeJS.WriteStream,
+  opts: { color?: boolean } = {},
 ): Promise<PaletteResult> {
   return new Promise((resolve) => {
+    const style = paletteStyle(opts.color ?? true);
     let query = "";
     let selected = 0;
     let filtered = filterCommands(commands, query);
     const maxVisible = 8;
 
     function render() {
-      const lines: string[] = [];
-      lines.push(`${BOLD}⌘ Command Palette${RESET}  ${DIM}↑↓ navigate · Enter run · Esc close${RESET}`);
-      lines.push(`  ${DIM}> ${RESET}${query}${CLEAR_LINE}`);
-      lines.push("");
-
-      if (filtered.length === 0) {
-        lines.push(`  ${DIM}No matching commands${RESET}`);
-      } else {
-        const start = Math.max(0, selected - maxVisible + 1);
-        const end = Math.min(filtered.length, start + maxVisible);
-        for (let i = start; i < end; i++) {
-          const cmd = filtered[i];
-          const marker = i === selected ? `${BOLD}▸ ` : "  ";
-          const nameStyle = i === selected ? BOLD : "";
-          lines.push(`${marker}${nameStyle}${cmd.name}${RESET}  ${DIM}${cmd.description}${RESET}${CLEAR_LINE}`);
-        }
-        if (filtered.length > maxVisible) {
-          lines.push(`  ${DIM}… and ${filtered.length - maxVisible} more${RESET}`);
-        }
-      }
-
+      const lines = renderPaletteLines(filtered, { query, selected, maxVisible }, style);
       const totalLines = lines.length;
       stdout.write(`${MOVE_UP(renderedLines)}${lines.join("\n")}\n`);
       renderedLines = totalLines;

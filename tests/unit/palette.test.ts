@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { filterCommands, defaultCommands } from "../../src/palette.js";
+import { filterCommands, defaultCommands, renderPaletteLines, paletteStyle } from "../../src/palette.js";
 import type { PaletteCommand } from "../../src/palette.js";
 
 describe("Palette: filterCommands", () => {
@@ -66,5 +66,29 @@ describe("Palette: defaultCommands", () => {
       expect(cmd.description).toBeTruthy();
       expect(typeof cmd.action).toBe("function");
     }
+  });
+});
+
+describe("Palette: renderPaletteLines color", () => {
+  const commands: PaletteCommand[] = [
+    { name: "/new", description: "Start a new conversation session", action: () => {} },
+    { name: "/exit", description: "Exit the interactive session", action: () => {} },
+  ];
+
+  it("includes SGR color codes when color is enabled", () => {
+    const text = renderPaletteLines(commands, { query: "", selected: 0 }, paletteStyle(true)).join("\n");
+    expect(text).toContain("\x1b[1m");
+    expect(text).toContain("\x1b[2m");
+    expect(text).toContain("\x1b[0m");
+  });
+
+  it("omits SGR color codes when color is disabled but keeps content", () => {
+    const text = renderPaletteLines(commands, { query: "", selected: 0 }, paletteStyle(false)).join("\n");
+    expect(text).not.toContain("\x1b[1m");
+    expect(text).not.toContain("\x1b[2m");
+    expect(text).not.toContain("\x1b[0m");
+    // The command names and descriptions are still rendered.
+    expect(text).toContain("/new");
+    expect(text).toContain("Start a new conversation session");
   });
 });

@@ -76,6 +76,12 @@ without touching other sessions.
 | `--workspace <dir>` | Workspace directory (default: cwd) |
 | `--doctor` | Run read-only installation/platform readiness checks and exit |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
+| `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
+
+Color is enabled by default in the interactive REPL and command palette. Pass
+`--no-color` or set a non-empty `NO_COLOR` environment variable (per
+[no-color.org](https://no-color.org)) for CI-friendly plain output; an empty
+`NO_COLOR` is ignored.
 
 ### Approval modes
 
@@ -167,6 +173,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/tools.ts` — tool definitions (read, write, edit, shell)
 - `src/workspace.ts` — path confinement with symlink escape detection
 - `src/approval.ts` — approval mode logic
+- `src/color.ts` — ANSI color toggle (`--no-color` / `NO_COLOR`) and palette factory
 - `src/session.ts` — JSONL session persistence
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
 - `src/index.ts` — CLI entry point (commander)
