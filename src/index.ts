@@ -14,6 +14,7 @@ import { runPreflight, formatPreflight } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
 import { collectSessionSummaries, formatSessionList } from "./session-summary.js";
+import { collectDoctorReport, formatDoctorReport } from "./doctor.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { redactSecrets } from "./permission-impact.js";
 import path from "node:path";
@@ -48,6 +49,7 @@ program
   .option("--health", "Show MCP server and extension health inventory and exit")
   .option("--settings <path>", "Integrations settings file for --health (default <workspace>/.oh-my-cli/settings.json)")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
+  .option("--doctor", "Run read-only installation and platform readiness checks and exit")
   .option(
     "--output <format>",
     "Output format for -p mode: text (default) or json (versioned NDJSON event stream)",
@@ -60,6 +62,12 @@ program
         const summaries = collectSessionSummaries(store);
         process.stdout.write(formatSessionList(summaries) + "\n");
         process.exit(0);
+      }
+
+      if (opts.doctor) {
+        const report = collectDoctorReport();
+        process.stdout.write(formatDoctorReport(report) + "\n");
+        process.exit(report.ok ? 0 : 1);
       }
 
       if (opts.health) {
