@@ -5,6 +5,9 @@ import type { ApprovalMode } from "./approval.js";
 export interface ToolResult {
   content: string;
   isError?: boolean;
+  // Wall-clock time the tool took to execute, in milliseconds. Populated by
+  // long-running tools (shell) so headless consumers can report elapsed time.
+  elapsedMs?: number;
 }
 
 export interface ToolDef {
@@ -137,32 +140,162 @@ export function createTools(): ToolDef[] {
       category: "mutate-shell",
       execute: async (args, _workspace) => {
         const { command, timeout } = ShellParams.parse(args);
-        const { execSync } = await import("node:child_process");
         const timeoutMs = (timeout ?? 30) * 1000;
-        const maxOutput = 1_048_576; // 1 MiB
-        try {
-          const output = execSync(command, {
-            shell: "/bin/bash",
-            timeout: timeoutMs,
-            maxBuffer: maxOutput,
-            encoding: "utf-8",
-            stdio: ["pipe", "pipe", "pipe"],
-          });
-          return { content: output || "(no output)" };
-        } catch (err: unknown) {
-          const e = err as { killed?: boolean; code?: string; errno?: number; stdout?: string; stderr?: string; message?: string; status?: number };
-          if (e.killed || e.code === "ETIMEDOUT" || e.errno === -110) {
-            return { content: `Error: command timed out after ${timeoutMs / 1000}s`, isError: true };
-          }
-          const combined = [e.stdout ?? "", e.stderr ?? ""].join("\n").trim();
-          return {
-            content: `Exit code ${e.status ?? "unknown"}\n${combined || (e.message ?? "unknown error")}`,
-            isError: true,
-          };
+        // A liveness heartbeat is only useful on an interactive terminal; in
+        // headless use stderr is not a TTY and elapsed time travels in the tool
+        // result instead, so the stream stays clean.
+        const onLiveness = process.stderr.isTTY
+          ? (elapsedMs: number) => process.stderr.write(formatLiveness(elapsedMs) + "\n")
+          : undefined;
+        const run = await runShellCommand({ command, timeoutMs, onLiveness });
+        const elapsedMs = run.elapsedMs;
+        if (run.timedOut) {
+          return { content: `Error: command timed out after ${timeoutMs / 1000}s`, isError: true, elapsedMs };
         }
+        if (run.status === 0) {
+          return { content: run.stdout || "(no output)", elapsedMs };
+        }
+        const combined = [run.stdout, run.stderr].join("\n").trim();
+        return {
+          content: `Exit code ${run.status ?? "unknown"}\n${combined || "unknown error"}`,
+          isError: true,
+          elapsedMs,
+        };
       },
     },
   ];
+}
+
+const DEFAULT_MAX_OUTPUT = 1_048_576; // 1 MiB per stream
+const DEFAULT_LIVENESS_THRESHOLD_MS = 5_000;
+const DEFAULT_LIVENESS_INTERVAL_MS = 5_000;
+
+// A redaction-safe liveness line: it carries only elapsed seconds, never the
+// command, its output, or any host path, so it cannot leak capped or secret
+// content.
+export function formatLiveness(elapsedMs: number): string {
+  const seconds = Math.max(1, Math.round(elapsedMs / 1000));
+  return `… still running (${seconds}s elapsed)`;
+}
+
+export interface ShellRunOptions {
+  command: string;
+  timeoutMs: number;
+  // Per-stream output cap in bytes (default 1 MiB).
+  maxOutput?: number;
+  // Emit the first liveness beat once this much time has passed, then repeat.
+  livenessThresholdMs?: number;
+  livenessIntervalMs?: number;
+  onLiveness?: (elapsedMs: number) => void;
+  now?: () => number;
+}
+
+export interface ShellRunResult {
+  stdout: string;
+  stderr: string;
+  status: number | null;
+  timedOut: boolean;
+  outputTruncated: boolean;
+  elapsedMs: number;
+}
+
+// Runs a bash command without blocking the event loop, so a liveness heartbeat
+// can tick while a long or silent command is in flight. Preserves the prior
+// semantics: a timeout kills the command and each stream is bounded by
+// maxOutput. The liveness interval and timeout are cleared as soon as the
+// command settles, and never fire after resolution.
+export function runShellCommand(opts: ShellRunOptions): Promise<ShellRunResult> {
+  const now = opts.now ?? Date.now;
+  const maxOutput = opts.maxOutput ?? DEFAULT_MAX_OUTPUT;
+  const threshold = opts.livenessThresholdMs ?? DEFAULT_LIVENESS_THRESHOLD_MS;
+  const interval = opts.livenessIntervalMs ?? DEFAULT_LIVENESS_INTERVAL_MS;
+  const start = now();
+
+  return new Promise((resolve) => {
+    void (async () => {
+      const { spawn } = await import("node:child_process");
+      const child = spawn("/bin/bash", ["-c", opts.command], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let stdout = "";
+      let stderr = "";
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let outputTruncated = false;
+      let timedOut = false;
+      let settled = false;
+
+      const append = (target: "stdout" | "stderr", chunk: Buffer | string) => {
+        const buf = typeof chunk === "string" ? Buffer.from(chunk, "utf-8") : chunk;
+        if (target === "stdout") {
+          if (stdoutBytes >= maxOutput) {
+            outputTruncated = true;
+            return;
+          }
+          const remaining = maxOutput - stdoutBytes;
+          if (buf.length <= remaining) {
+            stdout += buf.toString("utf-8");
+            stdoutBytes += buf.length;
+          } else {
+            stdout += buf.subarray(0, remaining).toString("utf-8");
+            stdoutBytes = maxOutput;
+            outputTruncated = true;
+          }
+        } else {
+          if (stderrBytes >= maxOutput) {
+            outputTruncated = true;
+            return;
+          }
+          const remaining = maxOutput - stderrBytes;
+          if (buf.length <= remaining) {
+            stderr += buf.toString("utf-8");
+            stderrBytes += buf.length;
+          } else {
+            stderr += buf.subarray(0, remaining).toString("utf-8");
+            stderrBytes = maxOutput;
+            outputTruncated = true;
+          }
+        }
+      };
+
+      child.stdout?.on("data", (d: Buffer) => append("stdout", d));
+      child.stderr?.on("data", (d: Buffer) => append("stderr", d));
+
+      const livenessTimer = setInterval(() => {
+        const elapsed = now() - start;
+        if (elapsed >= threshold && opts.onLiveness) opts.onLiveness(elapsed);
+      }, interval);
+      livenessTimer.unref?.();
+
+      const killTimer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, opts.timeoutMs);
+      killTimer.unref?.();
+
+      const finish = (status: number | null) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(livenessTimer);
+        clearTimeout(killTimer);
+        resolve({
+          stdout,
+          stderr,
+          status,
+          timedOut,
+          outputTruncated,
+          elapsedMs: Math.max(0, now() - start),
+        });
+      };
+
+      child.on("error", (err: Error) => {
+        append("stderr", String(err.message ?? err));
+        finish(null);
+      });
+      child.on("close", (code: number | null) => finish(code));
+    })();
+  });
 }
 
 function countOccurrences(haystack: string, needle: string): number {
