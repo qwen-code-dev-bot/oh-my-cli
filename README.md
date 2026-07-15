@@ -75,6 +75,9 @@ without touching other sessions.
 | `--approval-mode <mode>` | `default`, `auto-edit`, or `yolo` |
 | `--workspace <dir>` | Workspace directory (default: cwd) |
 | `--doctor` | Run read-only installation/platform readiness checks and exit |
+| `--readiness` | Inspect repository readiness for a blocked task (read-only) and exit |
+| `--expected-branch <name>` | Expected branch for the `--readiness` branch check |
+| `--remote <name>` | Git remote to probe for `--readiness` (default `origin`) |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -231,6 +234,42 @@ Each check is categorized `✓` pass, `⚠` warning, or `✗` failure with actio
 remediation. The command never installs, creates, or edits anything, redacts
 host paths and secrets, and exits `0` when there are no failures (`1` otherwise).
 
+### Repository readiness
+
+When an autonomous task is blocked on a repository prerequisite, run a read-only
+inspection to explain the single blocker with bounded, structured evidence:
+
+```bash
+oh-my-cli --readiness
+# or point it at another checkout / expected branch / remote
+oh-my-cli --readiness --workspace path/to/repo --expected-branch main --remote origin
+```
+
+It checks the working tree (clean vs. uncommitted changes), the branch (on a
+branch, detached, or not the `--expected-branch`), the test command (a `test`
+script in `package.json`), required tools (on `PATH`; `git` by default), and the
+remote (configured and reachable). Each check reports `✓`/`✗` with a redacted
+detail and, when failing, a **safe next action** — a recommendation that is
+never executed. The command inspects repository-local and Git metadata only; it
+never installs, creates, edits, fetches into, or otherwise mutates anything, and
+secrets and host paths stay redacted.
+
+```text
+Repository readiness (oh-my-cli.readiness v1)
+────────────────────────────────────────
+✓ Worktree        clean
+✓ Branch          on "main"
+✓ Test command    vitest run
+✓ Required tools  git available
+✓ Remote          remote "origin" reachable
+
+Ready: no blocker detected.
+```
+
+Add `--output json` for a versioned report (`schema` `oh-my-cli.readiness`) whose
+`blocker` names the first failing check (or `null` when ready). The exit code is a
+documented contract for CI: `0` when ready (no blocker), `1` when blocked.
+
 ## Built-in tools
 
 | Tool | Category | Description |
@@ -282,5 +321,6 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
 - `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`)
 - `src/run-scorecard.ts` — deterministic, privacy-safe comparison of two summaries (`--baseline`/`--candidate`)
+- `src/repo-readiness.ts` — read-only repository-readiness inspection (`--readiness`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests
