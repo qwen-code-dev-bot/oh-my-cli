@@ -12,6 +12,7 @@ import type { PaletteCommand } from "./palette.js";
 import { runPreflight, formatPreflight } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
+import { collectSessionSummaries, formatSessionList } from "./session-summary.js";
 import path from "node:path";
 
 const ESC = "\x1b[";
@@ -43,8 +44,16 @@ program
   .option("--sandbox-info", "Show effective sandbox isolation diagnostic and exit")
   .option("--health", "Show MCP server and extension health inventory and exit")
   .option("--settings <path>", "Integrations settings file for --health (default <workspace>/.oh-my-cli/settings.json)")
+  .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
   .action(async (opts) => {
     try {
+      if (opts.listSessions) {
+        const store = new SessionStore();
+        const summaries = collectSessionSummaries(store);
+        process.stdout.write(formatSessionList(summaries) + "\n");
+        process.exit(0);
+      }
+
       if (opts.health) {
         const settingsPath =
           opts.settings ?? path.join(opts.workspace, ".oh-my-cli", "settings.json");
@@ -91,6 +100,11 @@ program
         }
       } else {
         sessionId = store.newId();
+        store.writeMeta(sessionId, {
+          model: config.model,
+          workspace: workspace.root,
+          createdAt: Date.now(),
+        });
       }
 
       const onMessage = (msg: SessionMessage) => {
