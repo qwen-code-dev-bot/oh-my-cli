@@ -16,6 +16,14 @@ import { collectHealthInventory, formatHealthInventory } from "./health-inventor
 import { collectSessionSummaries, formatSessionList } from "./session-summary.js";
 import { collectDoctorReport, formatDoctorReport } from "./doctor.js";
 import { collectRepoReadiness, formatRepoReadiness } from "./repo-readiness.js";
+import {
+  readRecoveryCheckpoint,
+  readEvidenceFile,
+  currentRepoHead,
+  evaluateRecovery,
+  formatRecoveryPlan,
+} from "./run-recovery.js";
+import type { RecoveryContext } from "./run-recovery.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary } from "./run-summary.js";
@@ -59,6 +67,10 @@ program
   .option("--readiness", "Inspect repository readiness for a blocked task (read-only) and exit")
   .option("--expected-branch <name>", "Expected branch for the --readiness branch check")
   .option("--remote <name>", "Git remote to probe for --readiness (default origin)", "origin")
+  .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
+  .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
+  .option("--task-identity <id>", "Current task identity to match against the --recover checkpoint")
+  .option("--evidence <file>", "Current evidence file (JSON stepId -> digest) for --recover")
   .option(
     "--output <format>",
     "Output format for -p mode: text (default) or json (versioned NDJSON event stream)",
@@ -146,6 +158,47 @@ program
           process.stdout.write(formatRepoReadiness(report) + "\n");
         }
         process.exit(report.ready ? 0 : 1);
+      }
+
+      // Recovery mode: decide whether an interrupted task can safely resume from
+      // a durable checkpoint, offline (no provider config needed). Exits 0 when
+      // resume is safe, 1 when the checkpoint is refused, 2 on a usage/input error.
+      if (opts.recover) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        if (!opts.checkpoint) {
+          process.stderr.write("Error: --recover requires --checkpoint <file>\n");
+          process.exit(2);
+        }
+        if (!opts.taskIdentity) {
+          process.stderr.write("Error: --recover requires --task-identity <id>\n");
+          process.exit(2);
+        }
+        let checkpoint: ReturnType<typeof readRecoveryCheckpoint>;
+        let evidence: Record<string, string>;
+        try {
+          checkpoint = readRecoveryCheckpoint(opts.checkpoint);
+          evidence = opts.evidence ? readEvidenceFile(opts.evidence) : {};
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        const context: RecoveryContext = {
+          taskIdentity: redactSecrets(String(opts.taskIdentity)).text,
+          repoHead: currentRepoHead(opts.workspace),
+          evidence,
+        };
+        const plan = evaluateRecovery(checkpoint, context);
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(plan) + "\n");
+        } else {
+          process.stdout.write(formatRecoveryPlan(plan) + "\n");
+        }
+        process.exit(plan.decision === "resume" ? 0 : 1);
       }
 
       if (opts.health) {

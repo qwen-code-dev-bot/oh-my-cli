@@ -85,6 +85,10 @@ without touching other sessions.
 | `--candidate <file>` | Candidate run-summary file to compare in scorecard mode |
 | `--max-elapsed-ratio <n>` | Scorecard regression threshold: fractional elapsed-time increase tolerated (default `0.25`) |
 | `--max-failure-delta <n>` | Scorecard regression threshold: tool-failure increase tolerated (default `0`) |
+| `--recover` | Resume an interrupted task from a recovery checkpoint (read-only) and exit |
+| `--checkpoint <file>` | Recovery checkpoint file for `--recover` |
+| `--task-identity <id>` | Current task identity to match against the `--recover` checkpoint |
+| `--evidence <file>` | Current evidence file (JSON `stepId -> digest`) for `--recover` |
 
 Color is enabled by default in the interactive REPL and command palette. Pass
 `--no-color` or set a non-empty `NO_COLOR` environment variable (per
@@ -219,6 +223,52 @@ scorecard. The exit code is a documented contract for CI:
 - `2` — a usage or input error (missing/only one file, malformed or
   version-incompatible summaries, or an invalid threshold).
 
+### Run recovery
+
+An interrupted unattended run can otherwise require a full restart, repeating
+work that already finished. `--recover` implements one bounded recovery path: it
+resumes from a durable checkpoint and reports which steps are **proven complete
+and safe to skip**, so a completed step is never executed twice.
+
+A checkpoint records only **identities and content digests** — never raw
+evidence, prompts, secrets, or host paths. Completion is proven by matching the
+durable evidence digest of each completed step, **never by parsing log text**.
+The check fails closed: a stale (repository head moved), ambiguous (different
+task identity), or tampered (a completed step's evidence changed) checkpoint is
+refused without any mutation.
+
+```bash
+# A checkpoint written after step "build" completed, before the run was interrupted
+oh-my-cli --recover \
+  --checkpoint checkpoint.json \
+  --task-identity deploy-task \
+  --evidence evidence.json \
+  --workspace path/to/repo
+```
+
+```text
+Run recovery (oh-my-cli.recovery v1)
+────────────────────────────────────────
+decision:  resume
+reason:    all completed-step evidence verified; safe to skip the proven steps
+task:      deploy-task
+repo head: 3a61045b781f27e95b496ede6dfd23d0b63a6b4b
+completed: 1 step(s) safe to skip:
+  - build
+```
+
+The checkpoint stores the task identity, the repository head, and each completed
+step's id and evidence digest; the evidence file is a flat JSON object of
+`stepId -> digest` for the artifacts present now. Add `--output json` for a
+versioned plan (`schema` `oh-my-cli.recovery`) whose `completed` array lists the
+steps to skip. The exit code is a documented contract:
+
+- `0` — `resume`: task identity and repository head match and every completed
+  step's evidence still verifies; the listed steps are safe to skip.
+- `1` — `refuse`: the checkpoint is stale, ambiguous, or tampered; do not resume.
+- `2` — a usage or input error (missing `--checkpoint`/`--task-identity`, or a
+  malformed/incompatible checkpoint or evidence file).
+
 ### Readiness doctor
 
 After installing, run a read-only health check to catch runtime, resolution,
@@ -321,6 +371,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
 - `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`)
 - `src/run-scorecard.ts` — deterministic, privacy-safe comparison of two summaries (`--baseline`/`--candidate`)
+- `src/run-recovery.ts` — bounded run recovery from a durable checkpoint (`--recover`)
 - `src/repo-readiness.ts` — read-only repository-readiness inspection (`--readiness`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests
