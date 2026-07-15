@@ -17,12 +17,8 @@ import { collectSessionSummaries, formatSessionList } from "./session-summary.js
 import { collectDoctorReport, formatDoctorReport } from "./doctor.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { redactSecrets } from "./permission-impact.js";
+import { colorEnabled, createColorPalette } from "./color.js";
 import path from "node:path";
-
-const ESC = "\x1b[";
-const BOLD = `${ESC}1m`;
-const DIM = `${ESC}2m`;
-const RESET = `${ESC}0m`;
 
 // Handle Ctrl-C gracefully — session is already persisted incrementally
 process.on("SIGINT", () => {
@@ -55,6 +51,7 @@ program
     "Output format for -p mode: text (default) or json (versioned NDJSON event stream)",
     "text",
   )
+  .option("--no-color", "Disable ANSI color output (also honors the NO_COLOR env var)")
   .action(async (opts) => {
     try {
       if (opts.listSessions) {
@@ -224,6 +221,9 @@ program
           process.exit(1);
         }
 
+        const useColor = colorEnabled({ noColor: opts.color === false, env: process.env });
+        const { bold: BOLD, dim: DIM, reset: RESET } = createColorPalette(useColor);
+
         const readline = await import("node:readline");
         const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
 
@@ -243,7 +243,7 @@ program
             paletteOpen = true;
             rl.pause();
             process.stderr.write("\n");
-            runPalette(paletteCommands, process.stdin, process.stdout).then(async (result) => {
+            runPalette(paletteCommands, process.stdin, process.stdout, { color: useColor }).then(async (result) => {
               paletteOpen = false;
               if (result.selected && !result.cancelled) {
                 process.stderr.write(`\n${BOLD}${result.selected.name}${RESET}: ${result.selected.description}\n`);
