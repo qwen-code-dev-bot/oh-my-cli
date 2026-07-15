@@ -29,6 +29,7 @@ import {
   cleanWorktreeLease,
   formatWorktreeLeaseResult,
 } from "./worktree-lease.js";
+import { evaluateCommandPolicy, formatCommandPolicyDecision } from "./command-policy.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary } from "./run-summary.js";
@@ -80,6 +81,12 @@ program
   .option("--clean-worktree", "Clean a leased git worktree after verified completion and exit")
   .option("--agent-identity <id>", "Stable agent identity for a leased worktree (with --create-worktree/--clean-worktree)")
   .option("--worktree-root <dir>", "Directory where leased worktrees live (default <workspace>/.oh-my-cli/worktrees)")
+  .option("--command-policy <command>", "Evaluate one shell command against the offline command policy and exit")
+  .option(
+    "--provenance <source>",
+    "Command provenance for --command-policy: builtin, repository, or issue",
+    "repository",
+  )
   .option(
     "--output <format>",
     "Output format for -p mode: text (default) or json (versioned NDJSON event stream)",
@@ -148,6 +155,34 @@ program
         const report = collectDoctorReport();
         process.stdout.write(formatDoctorReport(report) + "\n");
         process.exit(report.ok ? 0 : 1);
+      }
+
+      // Command-policy mode: evaluate one shell command against the offline,
+      // deterministic policy (no provider config needed). Exits 0 when allowed,
+      // 1 when denied, and 2 on a usage error.
+      if (opts.commandPolicy !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const provenance = String(opts.provenance ?? "repository");
+        if (provenance !== "builtin" && provenance !== "repository" && provenance !== "issue") {
+          process.stderr.write(
+            `Error: invalid provenance "${provenance}" (expected builtin, repository, or issue)\n`,
+          );
+          process.exit(2);
+        }
+        const decision = evaluateCommandPolicy(String(opts.commandPolicy), {
+          provenance,
+          workspace: opts.workspace,
+        });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(decision) + "\n");
+        } else {
+          process.stdout.write(formatCommandPolicyDecision(decision) + "\n");
+        }
+        process.exit(decision.allowed ? 0 : 1);
       }
 
       if (opts.readiness) {

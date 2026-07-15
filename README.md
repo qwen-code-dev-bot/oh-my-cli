@@ -93,6 +93,8 @@ without touching other sessions.
 | `--clean-worktree` | Clean a leased git worktree after verified completion and exit |
 | `--agent-identity <id>` | Stable agent identity for a leased worktree (with `--create-worktree`/`--clean-worktree`) |
 | `--worktree-root <dir>` | Directory where leased worktrees live (default `<workspace>/.oh-my-cli/worktrees`) |
+| `--command-policy <command>` | Evaluate one shell command against the offline command policy and exit |
+| `--provenance <source>` | Command provenance for `--command-policy`: `builtin`, `repository` (default), or `issue` |
 
 Color is enabled by default in the interactive REPL and command palette. Pass
 `--no-color` or set a non-empty `NO_COLOR` environment variable (per
@@ -331,6 +333,55 @@ redacted. The exit code is a documented contract:
 - `2` — a usage error (missing identities, both `--create-worktree` and
   `--clean-worktree`, invalid `--output`) or an unexpected git failure.
 
+### Command policy
+
+The shell tool runs an arbitrary `/bin/bash -c <command>`. Before any shell
+command executes, a deterministic, offline **command policy** classifies what it
+will do and denies a small set of known-dangerous shapes — naming the violated
+rule — without running it. The same gate protects interactive runs and is
+applied **before** approval, so a denial cannot be bypassed by `--approval-mode
+yolo`; commands that pass keep the existing approval/yolo behavior unchanged.
+
+The policy distinguishes trusted **builtin** commands from **repository**/**issue**
+-provided ones (provenance). Only untrusted provenance is denied. It always
+classifies network use, writes, credential access, destructive Git, and path
+escape, and it denies:
+
+- `destructive_git` — force push / `--delete` / `--mirror` / `+`/`:` refspecs,
+  `reset --hard`, `clean -f/-d`, `branch -D`, `checkout` discard, `filter-branch`.
+- `credential_access` — reading `~/.ssh`, `id_rsa`, `.env`, `*.pem`, `*.key`,
+  `~/.aws/credentials`, `/etc/shadow`, …, or printing secret env vars.
+- `path_escape` — writes (or `>`/`>>` redirects) that resolve outside the workspace.
+- `destructive_removal` — `rm -r/-R` aimed at `/`, `~`, `$HOME`, `.`, or `..`.
+- `device_overwrite` — `dd of=/dev/…`, `mkfs`/`fdisk`/`parted`, redirects onto a device.
+
+It is a bounded quote/substitution-aware tokenizer over the compiled command
+string (not a general shell parser): it descends into `$(...)`, backticks, and
+subshells, sees through `sudo`/`env`/`VAR=val` wrappers, and ignores
+dangerous-looking text inside quotes (`echo "rm -rf /"` is allowed). Evaluate any
+command offline with `--command-policy`:
+
+```bash
+oh-my-cli --command-policy "git push --force"
+oh-my-cli --command-policy "cat ~/.ssh/id_rsa" --output json
+```
+
+```text
+Command policy (oh-my-cli.command-policy v1)
+  decision:     deny
+  provenance:   repository
+  command:      git push --force
+  classify:     network=no write=no credential=no destructive-git=yes path-escape=no
+  violations:
+    - destructive_git: git push --force / --delete / refspec rewrites remote history
+```
+
+The exit code is a documented contract:
+
+- `0` — allowed.
+- `1` — denied (one or more violations).
+- `2` — a usage error (invalid `--provenance` or `--output`).
+
 ### Readiness doctor
 
 After installing, run a read-only health check to catch runtime, resolution,
@@ -428,6 +479,8 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/tools.ts` — tool definitions (read, write, edit, shell)
 - `src/workspace.ts` — path confinement with symlink escape detection
 - `src/approval.ts` — approval mode logic
+- `src/command-policy.ts` — deterministic, offline shell-command classification and denial (`--command-policy`)
+- `src/permission-impact.ts` — redacted permission-impact preview for the approval prompt
 - `src/color.ts` — ANSI color toggle (`--no-color` / `NO_COLOR`) and palette factory
 - `src/session.ts` — JSONL session persistence
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
