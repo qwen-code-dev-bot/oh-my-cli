@@ -15,6 +15,7 @@ import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
 import { collectSessionSummaries, formatSessionList } from "./session-summary.js";
 import { collectDoctorReport, formatDoctorReport } from "./doctor.js";
+import { collectRepoReadiness, formatRepoReadiness } from "./repo-readiness.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary } from "./run-summary.js";
@@ -55,6 +56,9 @@ program
   .option("--settings <path>", "Integrations settings file for --health (default <workspace>/.oh-my-cli/settings.json)")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
   .option("--doctor", "Run read-only installation and platform readiness checks and exit")
+  .option("--readiness", "Inspect repository readiness for a blocked task (read-only) and exit")
+  .option("--expected-branch <name>", "Expected branch for the --readiness branch check")
+  .option("--remote <name>", "Git remote to probe for --readiness (default origin)", "origin")
   .option(
     "--output <format>",
     "Output format for -p mode: text (default) or json (versioned NDJSON event stream)",
@@ -123,6 +127,25 @@ program
         const report = collectDoctorReport();
         process.stdout.write(formatDoctorReport(report) + "\n");
         process.exit(report.ok ? 0 : 1);
+      }
+
+      if (opts.readiness) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(1);
+        }
+        const report = collectRepoReadiness({
+          workspace: opts.workspace,
+          expectedBranch: opts.expectedBranch,
+          remote: opts.remote,
+        });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatRepoReadiness(report) + "\n");
+        }
+        process.exit(report.ready ? 0 : 1);
       }
 
       if (opts.health) {
