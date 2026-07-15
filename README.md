@@ -87,8 +87,12 @@ without touching other sessions.
 | `--max-failure-delta <n>` | Scorecard regression threshold: tool-failure increase tolerated (default `0`) |
 | `--recover` | Resume an interrupted task from a recovery checkpoint (read-only) and exit |
 | `--checkpoint <file>` | Recovery checkpoint file for `--recover` |
-| `--task-identity <id>` | Current task identity to match against the `--recover` checkpoint |
+| `--task-identity <id>` | Stable task identity (used by `--recover` and worktree leases) |
 | `--evidence <file>` | Current evidence file (JSON `stepId -> digest`) for `--recover` |
+| `--create-worktree` | Create a leased git worktree for a mutating delegated agent and exit |
+| `--clean-worktree` | Clean a leased git worktree after verified completion and exit |
+| `--agent-identity <id>` | Stable agent identity for a leased worktree (with `--create-worktree`/`--clean-worktree`) |
+| `--worktree-root <dir>` | Directory where leased worktrees live (default `<workspace>/.oh-my-cli/worktrees`) |
 
 Color is enabled by default in the interactive REPL and command palette. Pass
 `--no-color` or set a non-empty `NO_COLOR` environment variable (per
@@ -269,6 +273,64 @@ steps to skip. The exit code is a documented contract:
 - `2` — a usage or input error (missing `--checkpoint`/`--task-identity`, or a
   malformed/incompatible checkpoint or evidence file).
 
+### Leased worktrees
+
+Two mutating agents in one workspace can silently overwrite or corrupt each
+other's work. `--create-worktree` carves out one **leased git worktree** per
+mutating agent so they run in isolation, and `--clean-worktree` removes a lease
+again only after its work is verified complete. The lease identity (branch +
+worktree path) is derived deterministically from the repository, the
+`--task-identity`, and the `--agent-identity`, so the same task+agent always maps
+to the same lease (idempotent across interruption) while distinct agents never
+collide.
+
+```bash
+# Give each mutating agent its own isolated worktree for one task
+oh-my-cli --create-worktree --workspace path/to/repo \
+  --task-identity deploy-task --agent-identity worker-1
+oh-my-cli --create-worktree --workspace path/to/repo \
+  --task-identity deploy-task --agent-identity worker-2
+
+# After the agent's branch is merged, clean its lease
+oh-my-cli --clean-worktree --workspace path/to/repo \
+  --task-identity deploy-task --agent-identity worker-1
+```
+
+```text
+Worktree lease (oh-my-cli.worktree-lease v1)
+────────────────────────────────────────
+action:   create
+result:   ok
+status:   created
+lease:    d0a3e7bc65723c0e
+branch:   lease/wt-d0a3e7bc65723c0e
+worktree: ~/code/repo/.oh-my-cli/worktrees/d0a3e7bc65723c0e
+base:     3a61045b781f
+task:     deploy-task
+agent:    worker-1
+```
+
+Creation is fail-closed and refuses **before any mutation** when the target is
+not a repository, the parent worktree is dirty, the identity is ambiguous
+(missing `--task-identity`/`--agent-identity`, or a repository with no commit to
+base from), or the lease already exists in a partial/conflicting state. Cleanup
+**never deletes work**: it refuses a worktree with uncommitted changes or a
+branch with unmerged commits, uses only non-forcing git commands, and never
+touches the parent worktree. There is no automatic merge and no forced removal.
+Both operations are idempotent — re-creating an existing lease returns it, and
+cleaning an absent lease is a no-op. Leased worktrees live under
+`<workspace>/.oh-my-cli/worktrees` (git-ignored) by default; pass
+`--worktree-root` to keep them elsewhere. Add `--output json` for a versioned
+record (`schema` `oh-my-cli.worktree-lease`); host home paths and secrets stay
+redacted. The exit code is a documented contract:
+
+- `0` — success: the lease was created or cleaned, or the request was an
+  idempotent no-op.
+- `1` — a safety refusal: non-repository, dirty parent, ambiguous target,
+  already-leased, uncommitted changes, or unmerged commits.
+- `2` — a usage error (missing identities, both `--create-worktree` and
+  `--clean-worktree`, invalid `--output`) or an unexpected git failure.
+
 ### Readiness doctor
 
 After installing, run a read-only health check to catch runtime, resolution,
@@ -373,5 +435,6 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/run-scorecard.ts` — deterministic, privacy-safe comparison of two summaries (`--baseline`/`--candidate`)
 - `src/run-recovery.ts` — bounded run recovery from a durable checkpoint (`--recover`)
 - `src/repo-readiness.ts` — read-only repository-readiness inspection (`--readiness`)
+- `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests
