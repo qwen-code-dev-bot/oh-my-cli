@@ -5,6 +5,7 @@ import { loadConfig } from "./config.js";
 import { Workspace } from "./workspace.js";
 import { SessionStore } from "./session.js";
 import { runAgent } from "./agent.js";
+import type { AgentResult } from "./agent.js";
 import type { ApprovalMode } from "./approval.js";
 import type { SessionMessage } from "./session.js";
 import { runPalette, defaultCommands } from "./palette.js";
@@ -13,6 +14,8 @@ import { runPreflight, formatPreflight } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
 import { collectSessionSummaries, formatSessionList } from "./session-summary.js";
+import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
+import { redactSecrets } from "./permission-impact.js";
 import path from "node:path";
 
 const ESC = "\x1b[";
@@ -45,6 +48,11 @@ program
   .option("--health", "Show MCP server and extension health inventory and exit")
   .option("--settings <path>", "Integrations settings file for --health (default <workspace>/.oh-my-cli/settings.json)")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
+  .option(
+    "--output <format>",
+    "Output format for -p mode: text (default) or json (versioned NDJSON event stream)",
+    "text",
+  )
   .action(async (opts) => {
     try {
       if (opts.listSessions) {
@@ -113,6 +121,45 @@ program
 
       if (opts.prompt) {
         // Non-interactive mode
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(1);
+        }
+
+        if (format === "json") {
+          // Headless protocol: a versioned NDJSON event stream on stdout. The
+          // terminal `complete` record's exitCode matches the process exit code.
+          const writer = new HeadlessWriter(process.stdout);
+          writer.emit(startEvent({ sessionId, model: config.model, prompt: opts.prompt }));
+          const sink = createHeadlessSink(writer);
+          let result: AgentResult;
+          try {
+            result = await runAgent(opts.prompt, existingMessages, {
+              config,
+              workspace,
+              approvalMode,
+              sessionId,
+              onMessage,
+              sink,
+            });
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            writer.emit({ type: "error", stage: "internal", message: redactSecrets(msg).text });
+            writer.emit({ type: "complete", ok: false, exitCode: 1, rounds: 0, reason: "error" });
+            process.exit(1);
+          }
+          const exitCode = result.ok ? 0 : 1;
+          writer.emit({
+            type: "complete",
+            ok: result.ok,
+            exitCode,
+            rounds: result.rounds,
+            reason: result.reason,
+          });
+          process.exit(exitCode);
+        }
+
         await runAgent(opts.prompt, existingMessages, {
           config,
           workspace,

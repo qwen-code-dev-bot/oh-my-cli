@@ -15,13 +15,49 @@ export interface AgentOptions {
   approvalMode: ApprovalMode;
   sessionId: string;
   onMessage: (msg: SessionMessage) => void;
+  sink?: AgentSink;
+}
+
+// Output sink for the agent loop. The default console sink reproduces the
+// existing terminal behaviour; the headless sink (see headless-protocol.ts)
+// renders the same lifecycle as a versioned JSON event stream.
+export interface AgentSink {
+  assistantDelta(delta: string): void;
+  assistantTurn(text: string, round: number, opts: { final: boolean }): void;
+  toolStart(info: { id: string; name: string; round: number }): void;
+  toolResult(info: { id: string; name: string; result: ToolResult; round: number }): void;
+  providerError(message: string): void;
+}
+
+export function createConsoleSink(): AgentSink {
+  return {
+    assistantDelta: (delta) => {
+      process.stdout.write(delta);
+    },
+    assistantTurn: (_text, _round, opts) => {
+      if (opts.final) process.stdout.write("\n");
+    },
+    toolStart: () => {},
+    toolResult: () => {},
+    providerError: (message) => {
+      process.stderr.write(`\nProvider error: ${message}\n`);
+    },
+  };
+}
+
+export interface AgentResult {
+  text: string;
+  ok: boolean;
+  reason: "completed" | "provider_error" | "max_rounds";
+  rounds: number;
 }
 
 export async function runAgent(
   userPrompt: string,
   existingMessages: SessionMessage[],
   opts: AgentOptions,
-): Promise<string> {
+): Promise<AgentResult> {
+  const sink = opts.sink ?? createConsoleSink();
   const tools = createTools();
   const toolMap = new Map(tools.map((t) => [t.name, t]));
   const schemas = toolSchemasForOpenAI(tools);
@@ -51,26 +87,27 @@ export async function runAgent(
       for await (const event of streamChat(opts.config, messages, { tools: schemas })) {
         if (event.type === "text") {
           assistantText += event.delta;
-          process.stdout.write(event.delta);
+          sink.assistantDelta(event.delta);
         } else if (event.type === "tool_call") {
           assistantToolCalls.push({ id: event.id, name: event.name, arguments: event.arguments });
         }
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      const errMsg = `\nProvider error: ${msg}`;
-      process.stderr.write(errMsg + "\n");
-      return assistantText || errMsg;
+      sink.providerError(msg);
+      return { text: assistantText, ok: false, reason: "provider_error", rounds: round };
     }
 
-    if (assistantToolCalls.length === 0) {
+    const final = assistantToolCalls.length === 0;
+    sink.assistantTurn(assistantText, round, { final });
+
+    if (final) {
       // Final answer
       finalText = assistantText;
       const assistantMsg: SessionMessage = { role: "assistant", content: assistantText };
       messages.push(assistantMsg);
       opts.onMessage(assistantMsg);
-      process.stdout.write("\n");
-      break;
+      return { text: finalText, ok: true, reason: "completed", rounds: round + 1 };
     }
 
     // Record assistant message with tool calls
@@ -88,40 +125,9 @@ export async function runAgent(
 
     // Execute each tool call
     for (const tc of assistantToolCalls) {
-      const tool = toolMap.get(tc.name);
-      let result: ToolResult;
-
-      if (!tool) {
-        result = { content: `Error: unknown tool "${tc.name}"`, isError: true };
-      } else {
-        // Check approval
-        if (needsApproval(opts.approvalMode, tool.category)) {
-          let parsed: Record<string, unknown> = {};
-          try {
-            parsed = JSON.parse(tc.arguments);
-          } catch { /* ignore */ }
-          const approved = await promptApproval(tc.name, parsed);
-          if (!approved) {
-            result = { content: "Tool execution denied by user", isError: true };
-            const toolMsg: SessionMessage = {
-              role: "tool",
-              content: result.content,
-              tool_call_id: tc.id,
-            };
-            messages.push(toolMsg);
-            opts.onMessage(toolMsg);
-            continue;
-          }
-        }
-
-        try {
-          const parsed = JSON.parse(tc.arguments);
-          result = await tool.execute(parsed, opts.workspace);
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          result = { content: `Tool error: ${msg}`, isError: true };
-        }
-      }
+      sink.toolStart({ id: tc.id, name: tc.name, round });
+      const result = await executeToolCall(tc, toolMap, opts.approvalMode, opts.workspace);
+      sink.toolResult({ id: tc.id, name: tc.name, result, round });
 
       const toolMsg: SessionMessage = {
         role: "tool",
@@ -133,5 +139,39 @@ export async function runAgent(
     }
   }
 
-  return finalText;
+  return { text: finalText, ok: false, reason: "max_rounds", rounds: MAX_ROUNDS };
+}
+
+// Resolve a single tool call to its result, applying approval gating and
+// uniform error handling. Approval is sought only when required; a denial or an
+// unknown tool yields an error result rather than throwing.
+async function executeToolCall(
+  tc: { id: string; name: string; arguments: string },
+  toolMap: Map<string, ToolDef>,
+  approvalMode: ApprovalMode,
+  workspace: Workspace,
+): Promise<ToolResult> {
+  const tool = toolMap.get(tc.name);
+  if (!tool) {
+    return { content: `Error: unknown tool "${tc.name}"`, isError: true };
+  }
+
+  if (needsApproval(approvalMode, tool.category)) {
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(tc.arguments);
+    } catch { /* ignore */ }
+    const approved = await promptApproval(tc.name, parsed);
+    if (!approved) {
+      return { content: "Tool execution denied by user", isError: true };
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(tc.arguments);
+    return await tool.execute(parsed, workspace);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { content: `Tool error: ${msg}`, isError: true };
+  }
 }
