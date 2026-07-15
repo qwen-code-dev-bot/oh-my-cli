@@ -34,7 +34,7 @@ export async function createFakeServer(): Promise<FakeServer> {
             : { type: "text" as const, content: "Hello from fake provider" };
 
           if (parsed.stream) {
-            sendStreamedResponse(res, response);
+            sendStreamedResponse(res, response, Boolean(parsed.stream_options?.include_usage));
           } else {
             sendNonStreamedResponse(res, response);
           }
@@ -67,7 +67,7 @@ export async function createFakeServer(): Promise<FakeServer> {
   };
 }
 
-function sendStreamedResponse(res: http.ServerResponse, response: FakeResponse) {
+function sendStreamedResponse(res: http.ServerResponse, response: FakeResponse, includeUsage: boolean) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -169,6 +169,18 @@ function sendStreamedResponse(res: http.ServerResponse, response: FakeResponse) 
       }],
     };
     res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+  }
+
+  if (includeUsage) {
+    // A trailing usage chunk (empty choices) mirrors OpenAI's include_usage
+    // behaviour. Values are fixed so multi-round token totals are deterministic.
+    const usageChunk = {
+      id,
+      object: "chat.completion.chunk",
+      choices: [],
+      usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 },
+    };
+    res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
   }
 
   res.write("data: [DONE]\n\n");

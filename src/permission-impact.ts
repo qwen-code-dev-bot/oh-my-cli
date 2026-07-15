@@ -152,7 +152,7 @@ function isOversized(v: unknown): boolean {
 
 function pathList(v: unknown): string[] {
   const p = strArg(v);
-  return p ? [redactPath(p)] : [];
+  return p ? [redactHomePath(p)] : [];
 }
 
 function collapseCommand(cmd: string): { text: string; collapsed: boolean } {
@@ -171,7 +171,9 @@ function detectsNetwork(cmd: string): boolean {
   return NET_MULTI.some((m) => lower.includes(m));
 }
 
-function redactPath(p: string): string {
+// Collapse a leading home directory to ~ so an absolute path can be shared
+// (e.g. in a run summary) without leaking the host's home location.
+export function redactHomePath(p: string): string {
   const home = process.env.HOME ?? process.env.USERPROFILE;
   if (home && p.startsWith(home)) {
     return "~" + p.slice(home.length);
