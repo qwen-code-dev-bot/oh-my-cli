@@ -133,6 +133,37 @@ describe("Integration: headless JSON protocol", () => {
     }
   });
 
+  it("reports elapsed wall-clock time for a shell tool result", async () => {
+    server.setResponses([
+      {
+        type: "tool_calls",
+        toolCalls: [{
+          id: "call_sleep",
+          name: "shell",
+          arguments: JSON.stringify({ command: "sleep 0.3" }),
+        }],
+      },
+      { type: "text", content: "Done sleeping" },
+    ]);
+
+    const r = await runCli(
+      ["-p", "Sleep briefly", "--output", "json", "--approval-mode", "yolo", "--workspace", tmpDir],
+      baseEnv,
+    );
+
+    expect(r.code).toBe(0);
+    const recs = parseHeadlessStream(r.stdout);
+    const result = recs.find((x) => x.type === "tool_result");
+    expect(result).toBeDefined();
+    if (result?.type === "tool_result") {
+      expect(result.name).toBe("shell");
+      expect(result.ok).toBe(true);
+      // Elapsed time is available to headless consumers and reflects real time.
+      expect(typeof result.elapsedMs).toBe("number");
+      expect(result.elapsedMs).toBeGreaterThanOrEqual(200);
+    }
+  });
+
   it("keeps default output unchanged when the protocol is not selected", async () => {
     server.setResponses([{ type: "text", content: "Plain text answer" }]);
 

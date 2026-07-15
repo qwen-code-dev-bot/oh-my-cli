@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createTools } from "../../src/tools.js";
+import { createTools, runShellCommand, formatLiveness } from "../../src/tools.js";
 import { Workspace } from "../../src/workspace.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -110,6 +110,86 @@ describe("Tools", () => {
       const result = await toolMap.get("shell")!.execute({ command: "sleep 10", timeout: 1 }, workspace);
       expect(result.isError).toBe(true);
       expect(result.content).toContain("timed out");
+    });
+
+    it("reports elapsed wall-clock time on the result", async () => {
+      const result = await toolMap.get("shell")!.execute({ command: "sleep 0.2" }, workspace);
+      expect(result.isError).toBeUndefined();
+      expect(typeof result.elapsedMs).toBe("number");
+      expect(result.elapsedMs).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  describe("formatLiveness", () => {
+    it("renders a redaction-safe elapsed line (min 1s)", () => {
+      expect(formatLiveness(0)).toBe("… still running (1s elapsed)");
+      expect(formatLiveness(7_400)).toBe("… still running (7s elapsed)");
+      expect(formatLiveness(12_600)).toBe("… still running (13s elapsed)");
+    });
+
+    it("never includes command text, output, or paths", () => {
+      const line = formatLiveness(9_000);
+      expect(line).not.toMatch(/password|\/home|secret/i);
+      expect(line).toContain("elapsed");
+    });
+  });
+
+  describe("runShellCommand", () => {
+    it("captures stdout and exit status for a fast command", async () => {
+      const beats: number[] = [];
+      const r = await runShellCommand({
+        command: "echo hi",
+        timeoutMs: 5_000,
+        onLiveness: (e) => beats.push(e),
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("hi");
+      expect(r.timedOut).toBe(false);
+      expect(r.outputTruncated).toBe(false);
+      // A fast command never crosses the (default 5s) liveness threshold.
+      expect(beats.length).toBe(0);
+    });
+
+    it("emits periodic liveness beats for a slow command", async () => {
+      const beats: number[] = [];
+      const r = await runShellCommand({
+        command: "sleep 0.3",
+        timeoutMs: 5_000,
+        livenessThresholdMs: 50,
+        livenessIntervalMs: 50,
+        onLiveness: (e) => beats.push(e),
+      });
+      expect(r.status).toBe(0);
+      expect(beats.length).toBeGreaterThanOrEqual(2);
+      // Elapsed is monotonic and every beat is at/after the threshold.
+      expect(beats[0]).toBeGreaterThanOrEqual(50);
+      for (let i = 1; i < beats.length; i++) {
+        expect(beats[i]).toBeGreaterThanOrEqual(beats[i - 1]);
+      }
+    });
+
+    it("kills the command and flags timedOut when the timeout fires", async () => {
+      const r = await runShellCommand({ command: "sleep 5", timeoutMs: 150 });
+      expect(r.timedOut).toBe(true);
+      expect(r.status).toBeNull();
+      expect(r.elapsedMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it("bounds each stream to the output cap", async () => {
+      const r = await runShellCommand({
+        command: "printf 'a%.0s' {1..5000}",
+        timeoutMs: 5_000,
+        maxOutput: 100,
+      });
+      expect(r.status).toBe(0);
+      expect(r.outputTruncated).toBe(true);
+      expect(Buffer.byteLength(r.stdout, "utf-8")).toBeLessThanOrEqual(100);
+    });
+
+    it("preserves a non-zero exit code without flagging a timeout", async () => {
+      const r = await runShellCommand({ command: "exit 3", timeoutMs: 5_000 });
+      expect(r.status).toBe(3);
+      expect(r.timedOut).toBe(false);
     });
   });
 });

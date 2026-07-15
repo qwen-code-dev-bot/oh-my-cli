@@ -146,6 +146,14 @@ host paths and secrets, and exits `0` when there are no failures (`1` otherwise)
 
 File operations are confined to the workspace directory. Symlink escapes are detected and rejected.
 
+A long-running or silent shell command (a build, install, or test that emits no
+output) need not look stuck: after ~5s the CLI prints a periodic
+`… still running (Ns elapsed)` heartbeat to the terminal in interactive mode,
+and reports the elapsed wall-clock time in the headless `tool_result` event
+(`--output json`) so non-interactive consumers see progress too. The heartbeat
+carries only elapsed seconds — never command output, secrets, or host paths —
+and the existing timeout and 1 MiB output cap are unchanged.
+
 ## Development
 
 ```bash

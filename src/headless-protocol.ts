@@ -30,6 +30,9 @@ export type HeadlessEvent =
       truncated: boolean;
       bytes: number;
       content: string;
+      // Wall-clock execution time in milliseconds when the tool reports it
+      // (e.g. shell); null for tools that do not measure elapsed time.
+      elapsedMs: number | null;
     }
   | { type: "error"; stage: "provider" | "internal"; message: string }
   | { type: "complete"; ok: boolean; exitCode: number; rounds: number; reason: string };
@@ -125,6 +128,7 @@ export function createHeadlessSink(writer: HeadlessWriter): AgentSink {
         truncated: s.truncated,
         bytes: s.bytes,
         content: s.text,
+        elapsedMs: typeof result.elapsedMs === "number" ? result.elapsedMs : null,
       });
     },
     providerError: (message) => {
