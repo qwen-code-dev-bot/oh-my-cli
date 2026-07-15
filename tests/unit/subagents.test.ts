@@ -1,0 +1,319 @@
+import { describe, it, expect } from "vitest";
+import {
+  SubagentManager,
+  formatSubagentView,
+  countByState,
+  TERMINAL_SUBAGENT_STATES,
+} from "../../src/subagents.js";
+import type { SubagentRecord } from "../../src/subagents.js";
+
+// A deferred promise: lets a test hold a worker in the running state until the
+// test chooses to resolve or reject it, so races are deterministic without
+// real timers.
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+// Let any already-resolved promise callbacks (the settle .then) run.
+async function flush(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+describe("SubagentManager: state transitions", () => {
+  it("runs a worker to completion", async () => {
+    const mgr = new SubagentManager();
+    const id = mgr.spawn(async () => "done");
+    // Promoted to running synchronously on spawn.
+    expect(mgr.get(id)?.state).toBe("running");
+    await flush();
+    const rec = mgr.get(id)!;
+    expect(rec.state).toBe("completed");
+    expect(rec.result).toBe("done");
+    expect(rec.startedAt).not.toBeNull();
+    expect(rec.finishedAt).not.toBeNull();
+  });
+
+  it("captures a worker failure without throwing", async () => {
+    const mgr = new SubagentManager();
+    const id = mgr.spawn(async () => {
+      throw new Error("boom");
+    });
+    await flush();
+    const rec = mgr.get(id)!;
+    expect(rec.state).toBe("failed");
+    expect(rec.error).toBe("boom");
+    expect(rec.result).toBeUndefined();
+  });
+
+  it("normalizes a non-Error rejection to a string message", async () => {
+    const mgr = new SubagentManager();
+    const id = mgr.spawn(async () => {
+      throw "stringly-typed";
+    });
+    await flush();
+    expect(mgr.get(id)?.error).toBe("stringly-typed");
+  });
+
+  it("cancels a queued child before it ever runs", async () => {
+    const mgr = new SubagentManager({ maxConcurrent: 1 });
+    const blocker = deferred<string>();
+    const first = mgr.spawn(() => blocker.promise);
+    let ran = false;
+    const second = mgr.spawn(async () => {
+      ran = true;
+      return "should not happen";
+    });
+    // First occupies the only slot; second is queued.
+    expect(mgr.get(first)?.state).toBe("running");
+    expect(mgr.get(second)?.state).toBe("queued");
+
+    expect(mgr.cancel(second)).toBe(true);
+    expect(mgr.get(second)?.state).toBe("cancelled");
+
+    // Free the slot; the cancelled child must not be promoted.
+    blocker.resolve("ok");
+    await flush();
+    expect(ran).toBe(false);
+    expect(mgr.get(second)?.state).toBe("cancelled");
+    expect(mgr.get(first)?.state).toBe("completed");
+  });
+
+  it("cancels a running child and fires its abort signal", async () => {
+    const mgr = new SubagentManager();
+    let aborted = false;
+    const d = deferred<string>();
+    const id = mgr.spawn((signal) => {
+      signal.addEventListener("abort", () => {
+        aborted = true;
+      });
+      return d.promise;
+    });
+    expect(mgr.get(id)?.state).toBe("running");
+
+    expect(mgr.cancel(id)).toBe(true);
+    expect(aborted).toBe(true);
+    expect(mgr.get(id)?.state).toBe("cancelled");
+  });
+
+  it("drops late output from a cancelled running child", async () => {
+    const mgr = new SubagentManager();
+    const d = deferred<string>();
+    const id = mgr.spawn(() => d.promise);
+    expect(mgr.get(id)?.state).toBe("running");
+
+    mgr.cancel(id);
+    expect(mgr.get(id)?.state).toBe("cancelled");
+
+    // The worker resolves AFTER cancellation; the result must be dropped.
+    d.resolve("late result");
+    await flush();
+    const rec = mgr.get(id)!;
+    expect(rec.state).toBe("cancelled");
+    expect(rec.result).toBeUndefined();
+  });
+
+  it("drops a late failure from a cancelled running child", async () => {
+    const mgr = new SubagentManager();
+    const d = deferred<string>();
+    const id = mgr.spawn(() => d.promise);
+    mgr.cancel(id);
+    d.reject(new Error("late failure"));
+    await flush();
+    const rec = mgr.get(id)!;
+    expect(rec.state).toBe("cancelled");
+    expect(rec.error).toBeUndefined();
+  });
+
+  it("returns false when cancelling an unknown or terminal id", async () => {
+    const mgr = new SubagentManager();
+    const id = mgr.spawn(async () => "done");
+    await flush();
+    expect(mgr.get(id)?.state).toBe("completed");
+    expect(mgr.cancel(id)).toBe(false);
+    expect(mgr.cancel("sub-999")).toBe(false);
+  });
+});
+
+describe("SubagentManager: bounded concurrency", () => {
+  it("keeps children queued until a slot frees, then promotes in order", async () => {
+    const mgr = new SubagentManager({ maxConcurrent: 1 });
+    const a = deferred<string>();
+    const b = deferred<string>();
+    const idA = mgr.spawn(() => a.promise, { label: "A" });
+    const idB = mgr.spawn(() => b.promise, { label: "B" });
+    const idC = mgr.spawn(async () => "C", { label: "C" });
+
+    expect(mgr.get(idA)?.state).toBe("running");
+    expect(mgr.get(idB)?.state).toBe("queued");
+    expect(mgr.get(idC)?.state).toBe("queued");
+
+    // Free A → B (next in insertion order) is promoted, not C.
+    a.resolve("A done");
+    await flush();
+    expect(mgr.get(idA)?.state).toBe("completed");
+    expect(mgr.get(idB)?.state).toBe("running");
+    expect(mgr.get(idC)?.state).toBe("queued");
+
+    // Free B → C runs and completes.
+    b.resolve("B done");
+    await flush();
+    expect(mgr.get(idB)?.state).toBe("completed");
+    expect(mgr.get(idC)?.state).toBe("completed");
+  });
+
+  it("promotes a queued child when a running sibling is cancelled", async () => {
+    const mgr = new SubagentManager({ maxConcurrent: 1 });
+    const a = deferred<string>();
+    const idA = mgr.spawn(() => a.promise);
+    const idB = mgr.spawn(async () => "B");
+    expect(mgr.get(idB)?.state).toBe("queued");
+
+    mgr.cancel(idA);
+    await flush();
+    expect(mgr.get(idA)?.state).toBe("cancelled");
+    expect(mgr.get(idB)?.state).toBe("completed");
+  });
+
+  it("runs up to maxConcurrent children at once", async () => {
+    const mgr = new SubagentManager({ maxConcurrent: 2 });
+    const d1 = deferred<string>();
+    const d2 = deferred<string>();
+    const d3 = deferred<string>();
+    const id1 = mgr.spawn(() => d1.promise);
+    const id2 = mgr.spawn(() => d2.promise);
+    const id3 = mgr.spawn(() => d3.promise);
+
+    expect(mgr.get(id1)?.state).toBe("running");
+    expect(mgr.get(id2)?.state).toBe("running");
+    expect(mgr.get(id3)?.state).toBe("queued");
+    expect(mgr.counts().running).toBe(2);
+
+    d1.resolve("1");
+    d2.resolve("2");
+    d3.resolve("3");
+    await flush();
+    expect(mgr.counts().completed).toBe(3);
+  });
+});
+
+describe("SubagentManager: ids and validation", () => {
+  it("assigns stable, sequential ids and preserves them across reads", () => {
+    const mgr = new SubagentManager({ maxConcurrent: 1 });
+    const d = deferred<string>();
+    const id1 = mgr.spawn(() => d.promise);
+    const id2 = mgr.spawn(async () => "x");
+    expect(id1).toBe("sub-001");
+    expect(id2).toBe("sub-002");
+    // Id is stable regardless of state churn.
+    expect(mgr.get(id1)?.id).toBe("sub-001");
+    d.resolve("done");
+  });
+
+  it("falls back to the id as label when none is given", () => {
+    const mgr = new SubagentManager();
+    const id = mgr.spawn(async () => "x");
+    expect(mgr.get(id)?.label).toBe(id);
+  });
+
+  it("throws on a non-positive maxConcurrent", () => {
+    expect(() => new SubagentManager({ maxConcurrent: 0 })).toThrow(/positive integer/);
+    expect(() => new SubagentManager({ maxConcurrent: -1 })).toThrow(/positive integer/);
+    expect(() => new SubagentManager({ maxConcurrent: 1.5 })).toThrow(/positive integer/);
+  });
+
+  it("throws when spawn is given a non-function worker", () => {
+    const mgr = new SubagentManager();
+    // Intentional misuse to verify the guard.
+    expect(() => mgr.spawn(undefined as never)).toThrow(/worker must be a function/);
+  });
+});
+
+describe("formatSubagentView", () => {
+  it("renders an empty view", () => {
+    const out = formatSubagentView([]);
+    expect(out).toContain("Subagents");
+    expect(out).toContain("No active or recent subagents.");
+  });
+
+  it("renders each state with its symbol and a summary line", () => {
+    const records: SubagentRecord[] = [
+      { id: "sub-001", label: "alpha", state: "running", startedAt: 0, finishedAt: null },
+      { id: "sub-002", label: "beta", state: "queued", startedAt: null, finishedAt: null },
+      { id: "sub-003", label: "gamma", state: "completed", startedAt: 0, finishedAt: 1500, result: "ok" },
+      { id: "sub-004", label: "delta", state: "failed", startedAt: 0, finishedAt: 2000, error: "bad" },
+      { id: "sub-005", label: "epsilon", state: "cancelled", startedAt: 0, finishedAt: 500 },
+    ];
+    const out = formatSubagentView(records);
+    expect(out).toContain("⟳ sub-001 running alpha");
+    expect(out).toContain("… sub-002 queued beta");
+    expect(out).toContain("✓ sub-003 completed gamma — ok (1.5s)");
+    expect(out).toContain("✗ sub-004 failed delta — bad (2.0s)");
+    expect(out).toContain("⊘ sub-005 cancelled epsilon (0.5s)");
+    expect(out).toMatch(/Summary: 1 running, 1 queued, 1 completed, 1 failed, 1 cancelled \(5 total\)/);
+  });
+
+  it("shows only the first line of a multi-line result", () => {
+    const records: SubagentRecord[] = [
+      { id: "sub-001", label: "x", state: "completed", startedAt: 0, finishedAt: 10, result: "first\nsecond\nthird" },
+    ];
+    const out = formatSubagentView(records);
+    expect(out).toContain("— first");
+    expect(out).not.toContain("second");
+  });
+
+  it("redacts secret-like values in labels and results", () => {
+    const token = ["ghp", "_", "a".repeat(24)].join("");
+    const records: SubagentRecord[] = [
+      { id: "sub-001", label: `deploy ${token}`, state: "completed", startedAt: 0, finishedAt: 10, result: `token=${token}` },
+    ];
+    const out = formatSubagentView(records);
+    expect(out).not.toContain(token);
+    expect(out).toContain("[REDACTED]");
+  });
+
+  it("redacts secret-like error messages", () => {
+    const password = ["super", "secret", "pw"].join("");
+    const records: SubagentRecord[] = [
+      { id: "sub-001", label: "x", state: "failed", startedAt: 0, finishedAt: 10, error: `--password ${password}` },
+    ];
+    const out = formatSubagentView(records);
+    expect(out).not.toContain(password);
+    expect(out).toContain("[REDACTED]");
+  });
+});
+
+describe("countByState", () => {
+  it("counts records by state and exposes every state key", () => {
+    const records: SubagentRecord[] = [
+      { id: "a", label: "a", state: "running", startedAt: 0, finishedAt: null },
+      { id: "b", label: "b", state: "running", startedAt: 0, finishedAt: null },
+      { id: "c", label: "c", state: "completed", startedAt: 0, finishedAt: 1 },
+    ];
+    const counts = countByState(records);
+    expect(counts.running).toBe(2);
+    expect(counts.completed).toBe(1);
+    expect(counts.queued).toBe(0);
+    expect(counts.failed).toBe(0);
+    expect(counts.cancelled).toBe(0);
+  });
+
+  it("treats an empty list as all-zero counts", () => {
+    const counts = countByState([]);
+    for (const state of ["queued", "running", "completed", "failed", "cancelled"] as const) {
+      expect(counts[state]).toBe(0);
+    }
+  });
+});
+
+describe("TERMINAL_SUBAGENT_STATES", () => {
+  it("contains exactly the three terminal states", () => {
+    expect([...TERMINAL_SUBAGENT_STATES].sort()).toEqual(["cancelled", "completed", "failed"]);
+  });
+});
