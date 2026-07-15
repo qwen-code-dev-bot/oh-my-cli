@@ -24,6 +24,11 @@ import {
   formatRecoveryPlan,
 } from "./run-recovery.js";
 import type { RecoveryContext } from "./run-recovery.js";
+import {
+  createWorktreeLease,
+  cleanWorktreeLease,
+  formatWorktreeLeaseResult,
+} from "./worktree-lease.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary } from "./run-summary.js";
@@ -69,8 +74,12 @@ program
   .option("--remote <name>", "Git remote to probe for --readiness (default origin)", "origin")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
-  .option("--task-identity <id>", "Current task identity to match against the --recover checkpoint")
+  .option("--task-identity <id>", "Stable task identity (used by --recover and worktree leases)")
   .option("--evidence <file>", "Current evidence file (JSON stepId -> digest) for --recover")
+  .option("--create-worktree", "Create a leased git worktree for a mutating delegated agent and exit")
+  .option("--clean-worktree", "Clean a leased git worktree after verified completion and exit")
+  .option("--agent-identity <id>", "Stable agent identity for a leased worktree (with --create-worktree/--clean-worktree)")
+  .option("--worktree-root <dir>", "Directory where leased worktrees live (default <workspace>/.oh-my-cli/worktrees)")
   .option(
     "--output <format>",
     "Output format for -p mode: text (default) or json (versioned NDJSON event stream)",
@@ -199,6 +208,47 @@ program
           process.stdout.write(formatRecoveryPlan(plan) + "\n");
         }
         process.exit(plan.decision === "resume" ? 0 : 1);
+      }
+
+      // Leased-worktree mode: create or clean one isolated git worktree per
+      // mutating delegated agent, offline (no provider config needed). Exits 0
+      // on success (including idempotent no-ops), 1 on a safety refusal, and 2
+      // on a usage error or unexpected git failure.
+      if (opts.createWorktree || opts.cleanWorktree) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        if (opts.createWorktree && opts.cleanWorktree) {
+          process.stderr.write("Error: choose one of --create-worktree or --clean-worktree\n");
+          process.exit(2);
+        }
+        if (!opts.taskIdentity) {
+          process.stderr.write("Error: worktree lease requires --task-identity <id>\n");
+          process.exit(2);
+        }
+        if (!opts.agentIdentity) {
+          process.stderr.write("Error: worktree lease requires --agent-identity <id>\n");
+          process.exit(2);
+        }
+        const leaseOpts = {
+          repo: opts.workspace,
+          taskIdentity: String(opts.taskIdentity),
+          agentIdentity: String(opts.agentIdentity),
+          worktreeRoot: opts.worktreeRoot,
+        };
+        const result = opts.createWorktree
+          ? createWorktreeLease(leaseOpts)
+          : cleanWorktreeLease(leaseOpts);
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(result) + "\n");
+        } else {
+          process.stdout.write(
+            formatWorktreeLeaseResult(result, opts.createWorktree ? "create" : "clean") + "\n",
+          );
+        }
+        process.exit(result.ok ? 0 : result.reason === "git_error" ? 2 : 1);
       }
 
       if (opts.health) {

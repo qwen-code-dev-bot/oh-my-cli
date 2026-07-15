@@ -1,0 +1,432 @@
+// Leased git worktrees: one isolated workspace per mutating delegated agent.
+//
+// Two mutating agents in one workspace can silently overwrite or corrupt each
+// other's work, so the shared-workspace guard refuses them. This module is the
+// safe alternative it points at: it carves out a *leased* git worktree for one
+// mutating agent and removes it again only after the agent's work is verified
+// complete. The lease identity (branch + worktree path) is derived
+// deterministically from the repository, the task, and the agent, so the same
+// task+agent always maps to the same lease (collision-safe and idempotent),
+// while different agents never collide.
+//
+// Safety is fail-closed and never destructive:
+//   - Creation refuses a non-repository, a dirty parent worktree, an ambiguous
+//     target (missing identity, or a repository with no commit to base from),
+//     or an already-leased identity — before any mutation.
+//   - Cleanup refuses to remove a worktree with uncommitted changes or a branch
+//     with unmerged commits; it uses only non-forcing git commands and never
+//     touches the parent worktree. There is no automatic merge and no forced
+//     removal in this slice.
+//   - Both operations are idempotent across interruption: re-creating an
+//     existing lease returns it, and cleaning an absent lease is a no-op.
+// All emitted evidence is redacted (host home paths collapsed, secrets
+// removed) so credentials and private paths never reach the output.
+
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { redactSecrets, redactHomePath } from "./permission-impact.js";
+
+export const WORKTREE_LEASE_SCHEMA = "oh-my-cli.worktree-lease";
+export const WORKTREE_LEASE_VERSION = 1;
+
+/** Options shared by lease creation and cleanup. */
+export interface WorktreeLeaseOptions {
+  /** The parent repository workspace the lease is carved from. */
+  repo: string;
+  /** Stable identity of the task the agent is performing. */
+  taskIdentity: string;
+  /** Stable identity of the mutating agent the lease is for. */
+  agentIdentity: string;
+  /**
+   * Where leased worktrees live. Defaults to `<repo>/.oh-my-cli/worktrees`,
+   * which is git-ignored. Override to keep worktrees outside the working tree.
+   */
+  worktreeRoot?: string;
+}
+
+/** Redacted, durable evidence describing a lease. */
+export interface WorktreeLease {
+  schema: typeof WORKTREE_LEASE_SCHEMA;
+  v: typeof WORKTREE_LEASE_VERSION;
+  /** Collision-safe id derived from repository + task + agent. */
+  leaseId: string;
+  /** The lease branch, `lease/wt-<leaseId>`. */
+  branch: string;
+  /** Home-collapsed absolute path to the leased worktree. */
+  worktreePath: string;
+  /** Commit the lease branch was based on ("" when the lease is absent). */
+  baseSha: string;
+  /** Redacted task identity. */
+  taskIdentity: string;
+  /** Redacted agent identity. */
+  agentIdentity: string;
+}
+
+/** Why a lease creation was refused before any mutation. */
+export type WorktreeCreateRefusalReason =
+  | "non_repository"
+  | "dirty"
+  | "ambiguous"
+  | "already_leased"
+  | "git_error";
+
+/** Why a lease cleanup was refused (the lease is retained safely). */
+export type WorktreeCleanRefusalReason =
+  | "non_repository"
+  | "ambiguous"
+  | "uncommitted_changes"
+  | "unmerged_commits"
+  | "git_error";
+
+export type WorktreeCreateResult =
+  | { ok: true; lease: WorktreeLease; created: boolean }
+  | { ok: false; reason: WorktreeCreateRefusalReason; message: string };
+
+export type WorktreeCleanResult =
+  | { ok: true; lease: WorktreeLease; cleaned: boolean }
+  | { ok: false; reason: WorktreeCleanRefusalReason; message: string };
+
+function redact(text: string): string {
+  return redactSecrets(text).text;
+}
+
+// --- identity (pure) --------------------------------------------------------
+
+export interface LeaseIdentityInput {
+  /** Canonical repository key (the git common directory's real path). */
+  repoKey: string;
+  taskIdentity: string;
+  agentIdentity: string;
+}
+
+export interface LeaseIdentity {
+  /** 16 hex chars; stable for one (repo, task, agent), unique across them. */
+  leaseId: string;
+  branch: string;
+}
+
+/**
+ * Derive a collision-safe lease identity. The same (repository, task, agent)
+ * always yields the same lease, while any difference in those inputs yields a
+ * different lease — so distinct agents never share a branch or worktree, and a
+ * repeated request is naturally idempotent.
+ */
+export function deriveLeaseIdentity(input: LeaseIdentityInput): LeaseIdentity {
+  const digest = createHash("sha256")
+    .update([input.repoKey, input.taskIdentity, input.agentIdentity].join("\u0000"), "utf8")
+    .digest("hex");
+  const leaseId = digest.slice(0, 16);
+  return { leaseId, branch: `lease/wt-${leaseId}` };
+}
+
+// --- git helpers ------------------------------------------------------------
+
+interface GitResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+}
+
+function git(cwd: string, args: string[], timeoutMs = 15_000): GitResult {
+  try {
+    const stdout = execFileSync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: timeoutMs,
+      maxBuffer: 1 << 20,
+    });
+    return { ok: true, stdout, stderr: "" };
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string };
+    return { ok: false, stdout: e.stdout ?? "", stderr: e.stderr ?? "" };
+  }
+}
+
+function safeRealpath(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+function pathExists(p: string): boolean {
+  try {
+    fs.statSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Canonical repository identity: the shared git common directory's real path,
+// or null when the path is not in a repository. Equal keys mean one repository,
+// so a lease derived from any of its worktrees resolves to the same identity.
+function repoCommonDir(repo: string): string | null {
+  const r = git(repo, ["rev-parse", "--git-common-dir"]);
+  const out = r.stdout.trim();
+  if (!r.ok || !out) return null;
+  const abs = path.isAbsolute(out) ? out : path.resolve(repo, out);
+  return safeRealpath(abs);
+}
+
+// The main worktree root that anchors the default lease directory.
+function defaultWorktreeRoot(commonDir: string): string {
+  const anchor = path.basename(commonDir) === ".git" ? path.dirname(commonDir) : commonDir;
+  return path.join(anchor, ".oh-my-cli", "worktrees");
+}
+
+function branchRefExists(repo: string, branch: string): boolean {
+  return git(repo, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).ok;
+}
+
+function worktreeRegistered(repo: string, worktreePath: string): boolean {
+  const out = git(repo, ["worktree", "list", "--porcelain"]).stdout;
+  const target = safeRealpath(worktreePath);
+  for (const line of out.split("\n")) {
+    if (!line.startsWith("worktree ")) continue;
+    const listed = line.slice("worktree ".length).trim();
+    if (listed === worktreePath || safeRealpath(listed) === target) return true;
+  }
+  return false;
+}
+
+function dirtyCount(cwd: string): number {
+  return git(cwd, ["status", "--porcelain"])
+    .stdout.split("\n")
+    .filter((line) => line.trim().length > 0).length;
+}
+
+function buildLease(parts: {
+  identity: LeaseIdentity;
+  worktreePath: string;
+  baseSha: string;
+  taskIdentity: string;
+  agentIdentity: string;
+}): WorktreeLease {
+  return {
+    schema: WORKTREE_LEASE_SCHEMA,
+    v: WORKTREE_LEASE_VERSION,
+    leaseId: parts.identity.leaseId,
+    branch: parts.identity.branch,
+    worktreePath: redactHomePath(parts.worktreePath),
+    baseSha: parts.baseSha,
+    taskIdentity: redact(parts.taskIdentity),
+    agentIdentity: redact(parts.agentIdentity),
+  };
+}
+
+// --- lifecycle --------------------------------------------------------------
+
+/**
+ * Create a leased worktree for one mutating agent, or return the existing lease
+ * idempotently. Refuses — before any mutation — a non-repository, a dirty parent
+ * worktree, an ambiguous target, or an already-leased identity in a partial or
+ * conflicting state.
+ */
+export function createWorktreeLease(opts: WorktreeLeaseOptions): WorktreeCreateResult {
+  const repo = path.resolve(opts.repo);
+  const task = (opts.taskIdentity ?? "").trim();
+  const agent = (opts.agentIdentity ?? "").trim();
+  if (!task || !agent) {
+    return {
+      ok: false,
+      reason: "ambiguous",
+      message: "both --task-identity and --agent-identity are required to derive a lease",
+    };
+  }
+
+  const commonDir = repoCommonDir(repo);
+  if (commonDir === null) {
+    return { ok: false, reason: "non_repository", message: "target is not a git repository" };
+  }
+
+  const baseSha = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
+  if (!baseSha) {
+    return {
+      ok: false,
+      reason: "ambiguous",
+      message: "repository has no commit to base a lease on",
+    };
+  }
+
+  const dirty = dirtyCount(repo);
+  if (dirty > 0) {
+    return {
+      ok: false,
+      reason: "dirty",
+      message: `parent worktree has ${dirty} uncommitted change(s); commit or stash before leasing`,
+    };
+  }
+
+  const identity = deriveLeaseIdentity({ repoKey: commonDir, taskIdentity: task, agentIdentity: agent });
+  const worktreeRoot = path.resolve(opts.worktreeRoot ?? defaultWorktreeRoot(commonDir));
+  const worktreePath = path.join(worktreeRoot, identity.leaseId);
+
+  // Reconcile any stale admin entries left by an interrupted create.
+  git(repo, ["worktree", "prune"]);
+
+  const wtListed = worktreeRegistered(repo, worktreePath);
+  const branchExists = branchRefExists(repo, identity.branch);
+
+  if (wtListed && branchExists) {
+    // The lease already exists and is intact — idempotent re-create.
+    return {
+      ok: true,
+      created: false,
+      lease: buildLease({ identity, worktreePath, baseSha, taskIdentity: task, agentIdentity: agent }),
+    };
+  }
+  if (wtListed || branchExists || pathExists(worktreePath)) {
+    // A partial or conflicting lease occupies this identity. Do not guess or
+    // force; require an explicit clean first.
+    return {
+      ok: false,
+      reason: "already_leased",
+      message: `lease ${identity.branch} already exists in a partial or conflicting state; clean it before re-creating`,
+    };
+  }
+
+  fs.mkdirSync(worktreeRoot, { recursive: true });
+  const add = git(repo, ["worktree", "add", "-b", identity.branch, worktreePath, "HEAD"]);
+  if (!add.ok) {
+    return {
+      ok: false,
+      reason: "git_error",
+      message: redact(`git worktree add failed: ${add.stderr.trim() || "unknown error"}`),
+    };
+  }
+
+  return {
+    ok: true,
+    created: true,
+    lease: buildLease({ identity, worktreePath, baseSha, taskIdentity: task, agentIdentity: agent }),
+  };
+}
+
+/**
+ * Clean a leased worktree after the agent's work is verified complete. Refuses
+ * to remove a worktree with uncommitted changes or a branch with unmerged
+ * commits; otherwise removes the worktree and deletes the branch with
+ * non-forcing git commands. Idempotent: cleaning an absent lease is a no-op.
+ * The parent worktree is never touched.
+ */
+export function cleanWorktreeLease(opts: WorktreeLeaseOptions): WorktreeCleanResult {
+  const repo = path.resolve(opts.repo);
+  const task = (opts.taskIdentity ?? "").trim();
+  const agent = (opts.agentIdentity ?? "").trim();
+  if (!task || !agent) {
+    return {
+      ok: false,
+      reason: "ambiguous",
+      message: "both --task-identity and --agent-identity are required to locate a lease",
+    };
+  }
+
+  const commonDir = repoCommonDir(repo);
+  if (commonDir === null) {
+    return { ok: false, reason: "non_repository", message: "target is not a git repository" };
+  }
+
+  const identity = deriveLeaseIdentity({ repoKey: commonDir, taskIdentity: task, agentIdentity: agent });
+  const worktreeRoot = path.resolve(opts.worktreeRoot ?? defaultWorktreeRoot(commonDir));
+  const worktreePath = path.join(worktreeRoot, identity.leaseId);
+
+  const wtListed = worktreeRegistered(repo, worktreePath);
+  const branchExists = branchRefExists(repo, identity.branch);
+  const baseSha = git(repo, ["rev-parse", "--verify", "--quiet", identity.branch]).stdout.trim();
+  const lease = buildLease({ identity, worktreePath, baseSha, taskIdentity: task, agentIdentity: agent });
+
+  if (!wtListed && !branchExists) {
+    // Already clean — idempotent no-op.
+    return { ok: true, cleaned: false, lease };
+  }
+
+  // Never remove a worktree holding uncommitted work.
+  if (wtListed && dirtyCount(worktreePath) > 0) {
+    return {
+      ok: false,
+      reason: "uncommitted_changes",
+      message: "lease worktree has uncommitted changes; commit or discard them before cleaning",
+    };
+  }
+
+  // Never delete a branch whose commits are not yet merged into the parent.
+  if (branchExists) {
+    const parentHead = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
+    const merged =
+      parentHead !== "" &&
+      git(repo, ["merge-base", "--is-ancestor", identity.branch, parentHead]).ok;
+    if (!merged) {
+      return {
+        ok: false,
+        reason: "unmerged_commits",
+        message: `lease branch ${identity.branch} has unmerged commits; merge it before cleaning`,
+      };
+    }
+  }
+
+  // Safe, non-forcing removal. The worktree (if any) goes first so the branch is
+  // no longer checked out when we delete it.
+  if (wtListed) {
+    const rm = git(repo, ["worktree", "remove", worktreePath]);
+    if (!rm.ok) {
+      return {
+        ok: false,
+        reason: "git_error",
+        message: redact(`git worktree remove failed: ${rm.stderr.trim() || "unknown error"}`),
+      };
+    }
+  }
+  if (branchExists) {
+    const del = git(repo, ["branch", "-d", identity.branch]);
+    if (!del.ok) {
+      return {
+        ok: false,
+        reason: "git_error",
+        message: redact(`git branch -d failed: ${del.stderr.trim() || "unknown error"}`),
+      };
+    }
+  }
+
+  return { ok: true, cleaned: true, lease };
+}
+
+// --- formatting -------------------------------------------------------------
+
+/** A concise, redacted, human-readable lease result. */
+export function formatWorktreeLeaseResult(
+  result: WorktreeCreateResult | WorktreeCleanResult,
+  action: "create" | "clean",
+): string {
+  const lines: string[] = [];
+  lines.push(`Worktree lease (${WORKTREE_LEASE_SCHEMA} v${WORKTREE_LEASE_VERSION})`);
+  lines.push("─".repeat(40));
+  lines.push(`action:   ${action}`);
+  if (result.ok) {
+    const status =
+      action === "create"
+        ? (result as Extract<WorktreeCreateResult, { ok: true }>).created
+          ? "created"
+          : "already present (idempotent)"
+        : (result as Extract<WorktreeCleanResult, { ok: true }>).cleaned
+          ? "cleaned"
+          : "already absent (idempotent)";
+    lines.push("result:   ok");
+    lines.push(`status:   ${status}`);
+    const lease = result.lease;
+    lines.push(`lease:    ${lease.leaseId}`);
+    lines.push(`branch:   ${lease.branch}`);
+    lines.push(`worktree: ${lease.worktreePath}`);
+    if (lease.baseSha) lines.push(`base:     ${lease.baseSha.slice(0, 12)}`);
+    lines.push(`task:     ${lease.taskIdentity}`);
+    lines.push(`agent:    ${lease.agentIdentity}`);
+  } else {
+    lines.push("result:   refused");
+    lines.push(`reason:   ${result.reason}`);
+    lines.push(`detail:   ${redact(result.message)}`);
+  }
+  return lines.join("\n");
+}
