@@ -9,6 +9,15 @@
 // overwrite or masquerade as a successful (or failed) outcome.
 
 import { redactSecrets } from "./permission-impact.js";
+import {
+  evaluateWorkspaceGuard,
+  SharedWorkspaceLaunchError,
+  workspaceIdentity,
+} from "./workspace-guard.js";
+import type { WorkspaceIdentity, WorkspaceMode } from "./workspace-guard.js";
+
+export { SharedWorkspaceLaunchError };
+export type { WorkspaceMode };
 
 export type SubagentState =
   | "queued"
@@ -29,6 +38,8 @@ export interface SubagentRecord {
   state: SubagentState;
   startedAt: number | null;
   finishedAt: number | null;
+  /** The child's declared workspace mode, when one was provided at launch. */
+  mode?: WorkspaceMode;
   /** Present only when state is "completed". */
   result?: string;
   /** Present only when state is "failed". */
@@ -45,11 +56,28 @@ export interface SubagentManagerOptions {
   maxConcurrent?: number;
   /** Injectable clock for deterministic tests. Defaults to Date.now. */
   clock?: () => number;
+  /**
+   * The parent's workspace root. When set, a mutating child that would share
+   * this workspace (same directory, symlink alias, or linked git worktree) is
+   * refused at launch; read-only children may still run in parallel.
+   */
+  parentWorkspace?: string;
 }
 
 export interface SubagentLaunchOptions {
   /** Optional human-readable label; falls back to the stable id. */
   label?: string;
+  /**
+   * The child's intended workspace path. Defaults to the parent workspace when
+   * the manager was configured with one.
+   */
+  workspace?: string;
+  /**
+   * Whether the child may mutate its workspace. Defaults to "mutating" — the
+   * conservative default the shared-workspace guard applies to. Declare
+   * "read-only" for parallel investigation that never writes.
+   */
+  mode?: WorkspaceMode;
 }
 
 const DEFAULT_MAX_CONCURRENT = 4;
@@ -61,6 +89,7 @@ interface Entry {
   state: SubagentState;
   startedAt: number | null;
   finishedAt: number | null;
+  mode?: WorkspaceMode;
   result?: string;
   error?: string;
   worker: SubagentWorker;
@@ -95,6 +124,7 @@ function toRecord(entry: Entry): SubagentRecord {
     startedAt: entry.startedAt,
     finishedAt: entry.finishedAt,
   };
+  if (entry.mode !== undefined) record.mode = entry.mode;
   if (entry.state === "completed" && entry.result !== undefined) record.result = entry.result;
   if (entry.state === "failed" && entry.error !== undefined) record.error = entry.error;
   return record;
@@ -104,6 +134,8 @@ export class SubagentManager {
   private readonly entries = new Map<string, Entry>();
   private readonly maxConcurrent: number;
   private readonly clock: () => number;
+  private readonly parentWorkspace?: string;
+  private readonly parentIdentity?: WorkspaceIdentity;
   private seq = 0;
 
   constructor(opts: SubagentManagerOptions = {}) {
@@ -113,15 +145,35 @@ export class SubagentManager {
     }
     this.maxConcurrent = max;
     this.clock = opts.clock ?? (() => Date.now());
+    if (opts.parentWorkspace !== undefined) {
+      this.parentWorkspace = opts.parentWorkspace;
+      this.parentIdentity = workspaceIdentity(opts.parentWorkspace);
+    }
   }
 
   /**
    * Register a child. It enters the queued state and is promoted to running as
    * soon as a concurrency slot is free. Returns the child's stable id.
+   *
+   * When the manager was configured with a parent workspace, a mutating child
+   * that would share that workspace is refused here — before any id is assigned
+   * or the worker runs — by throwing {@link SharedWorkspaceLaunchError}. This is
+   * the safety boundary that keeps two writers out of one workspace.
    */
   spawn(worker: SubagentWorker, opts: SubagentLaunchOptions = {}): string {
     if (typeof worker !== "function") {
       throw new Error("worker must be a function");
+    }
+    const mode: WorkspaceMode = opts.mode ?? "mutating";
+    if (this.parentIdentity) {
+      const decision = evaluateWorkspaceGuard({
+        parentIdentity: this.parentIdentity,
+        childWorkspace: opts.workspace ?? this.parentWorkspace!,
+        mode,
+      });
+      if (!decision.allowed) {
+        throw new SharedWorkspaceLaunchError(decision.message);
+      }
     }
     const id = `sub-${String(++this.seq).padStart(3, "0")}`;
     const label = opts.label && opts.label.trim() ? opts.label.trim() : id;
@@ -131,6 +183,7 @@ export class SubagentManager {
       state: "queued",
       startedAt: null,
       finishedAt: null,
+      mode: opts.mode,
       worker,
       controller: new AbortController(),
       generation: 0,
@@ -283,7 +336,8 @@ function formatSubagentLine(record: SubagentRecord): string {
     detail = ` — ${redactSecrets(firstLine(record.error)).text}`;
   }
   const duration = durationText(record);
-  return `${symbol} ${record.id} ${record.state} ${label}${detail}${duration}`;
+  const modeTag = record.mode ? `[${record.mode}] ` : "";
+  return `${symbol} ${record.id} ${record.state} ${modeTag}${label}${detail}${duration}`;
 }
 
 function durationText(record: SubagentRecord): string {
