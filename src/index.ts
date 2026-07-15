@@ -110,6 +110,17 @@ program
 
       if (opts.resume) {
         sessionId = opts.resume;
+        // Heal an interrupted or corrupt checkpoint before loading. Recovery is
+        // scoped to this session and never touches sibling sessions.
+        const recovery = store.recover(sessionId);
+        if (recovery.action === "quarantined") {
+          const where = recovery.quarantinePath
+            ? path.basename(recovery.quarantinePath)
+            : "a sidecar file";
+          process.stderr.write(
+            `Warning: session ${sessionId} had a corrupt checkpoint; it was preserved as ${where} and isolated. Starting fresh.\n`,
+          );
+        }
         existingMessages = store.load(sessionId);
         if (existingMessages.length === 0) {
           process.stderr.write(`Warning: session ${sessionId} is empty or not found\n`);
@@ -125,6 +136,12 @@ program
 
       const onMessage = (msg: SessionMessage) => {
         store.append(sessionId, msg);
+      };
+
+      // Atomically seal the session after a non-interactive run so the canonical
+      // checkpoint is always complete (no trailing partial) and crash-safe.
+      const sealSession = () => {
+        store.checkpoint(sessionId, store.load(sessionId), store.readMeta(sessionId));
       };
 
       if (opts.prompt) {
@@ -157,6 +174,7 @@ program
             writer.emit({ type: "complete", ok: false, exitCode: 1, rounds: 0, reason: "error" });
             process.exit(1);
           }
+          sealSession();
           const exitCode = result.ok ? 0 : 1;
           writer.emit({
             type: "complete",
@@ -175,6 +193,7 @@ program
           sessionId,
           onMessage,
         });
+        sealSession();
       } else if (opts.resume) {
         // Resume mode: need a new prompt from stdin
         if (process.stdin.isTTY) {

@@ -53,7 +53,14 @@ oh-my-cli
 oh-my-cli --resume <session-id>
 ```
 
-Sessions are persisted as JSONL under `~/.oh-my-cli/sessions/`.
+Sessions are persisted as JSONL under `~/.oh-my-cli/sessions/`. Each
+non-interactive run seals the session with an atomic checkpoint (a temp file
+renamed over the canonical one), so an interrupted write leaves either the
+previous or the new complete checkpoint — never a half-written file. On
+`--resume`, the checkpoint is recovered automatically: a complete one left by an
+interrupted write is promoted, a partial one is discarded, and a corrupt one is
+quarantined alongside the session (preserved, never deleted) with a warning —
+without touching other sessions.
 
 ### Options
 
