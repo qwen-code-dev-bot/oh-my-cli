@@ -78,6 +78,10 @@ without touching other sessions.
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
+| `--baseline <file>` | Baseline run-summary file to compare in scorecard mode |
+| `--candidate <file>` | Candidate run-summary file to compare in scorecard mode |
+| `--max-elapsed-ratio <n>` | Scorecard regression threshold: fractional elapsed-time increase tolerated (default `0.25`) |
+| `--max-failure-delta <n>` | Scorecard regression threshold: tool-failure increase tolerated (default `0`) |
 
 Color is enabled by default in the interactive REPL and command palette. Pass
 `--no-color` or set a non-empty `NO_COLOR` environment variable (per
@@ -166,6 +170,52 @@ preserves the process exit code, so a wrapper can compare the summary against
 `$?`. Distinct tool names are capped (overflow rolls into `__other__`) to keep
 the summary bounded regardless of how many tools a run touched.
 
+### Run scorecard
+
+To compare two unattended runs, save each run's summary and diff them with
+`--baseline` / `--candidate`. The scorecard is **deterministic and evidence-based**:
+it reports the stable deltas (outcome, elapsed time, retry/failure counts, and
+completed work) between a baseline and a candidate, and never invents a universal
+quality score. Like the summary, it is metadata only — no prompts, secrets, host
+paths, session ids, or tool payloads appear in the output.
+
+```bash
+# Save a run's summary as evidence (text block or the JSON `summary` event both work)
+oh-my-cli -p "Run the build" --output json --summary | tee baseline.ndjson
+# … later, after a change …
+oh-my-cli -p "Run the build" --output json --summary | tee candidate.ndjson
+
+oh-my-cli --baseline baseline.ndjson --candidate candidate.ndjson
+```
+
+```text
+Run scorecard (oh-my-cli.scorecard v1)
+  outcome:        success -> failure  [REGRESSION]
+  reason:         completed -> error
+  elapsed ms:     2000 -> 5200 (+3200, up)  [REGRESSION]
+  rounds:         1 -> 4 (+3, up)
+  tool calls:     1 -> 6 (+5, up)
+  tool failures:  0 -> 2 (+2, up)  [REGRESSION]
+  completed work: 1 -> 4 (+3, up)
+  tokens total:   10 -> 40 (+30, up)
+  thresholds:     elapsed ratio <= 0.25, failure delta <= 0
+Result: REGRESSION (exit 1)
+  - outcome regressed (success -> failure)
+  - tool failures rose more than 0 above baseline
+  - elapsed time rose more than 25% above baseline
+```
+
+Inputs may be a bare summary object or a headless NDJSON stream (the `summary`
+event is extracted automatically). Add `--output json` for a machine-readable
+scorecard. The exit code is a documented contract for CI:
+
+- `0` — no documented regression threshold was crossed.
+- `1` — a regression was flagged: the outcome regressed (`success` → `failure`),
+  tool failures rose above `--max-failure-delta` (default `0`), or elapsed time
+  rose above `--max-elapsed-ratio` (default `0.25`, i.e. +25%).
+- `2` — a usage or input error (missing/only one file, malformed or
+  version-incompatible summaries, or an invalid threshold).
+
 ### Readiness doctor
 
 After installing, run a read-only health check to catch runtime, resolution,
@@ -231,5 +281,6 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/session.ts` — JSONL session persistence
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
 - `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`)
+- `src/run-scorecard.ts` — deterministic, privacy-safe comparison of two summaries (`--baseline`/`--candidate`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests

@@ -18,6 +18,14 @@ import { collectDoctorReport, formatDoctorReport } from "./doctor.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary } from "./run-summary.js";
+import {
+  readRunSummaryFile,
+  compareRunSummaries,
+  formatScorecard,
+  parseScorecardThresholds,
+} from "./run-scorecard.js";
+import type { RegressionThresholds } from "./run-scorecard.js";
+import type { RunSummary } from "./run-summary.js";
 import { colorEnabled, createColorPalette } from "./color.js";
 import path from "node:path";
 
@@ -54,8 +62,56 @@ program
   )
   .option("--no-color", "Disable ANSI color output (also honors the NO_COLOR env var)")
   .option("--summary", "Print a privacy-safe execution summary for the run (unattended use)")
+  .option("--baseline <file>", "Baseline run-summary file to compare in scorecard mode")
+  .option("--candidate <file>", "Candidate run-summary file to compare in scorecard mode")
+  .option(
+    "--max-elapsed-ratio <n>",
+    "Scorecard regression threshold: fractional elapsed-time increase tolerated (default 0.25)",
+    "0.25",
+  )
+  .option(
+    "--max-failure-delta <n>",
+    "Scorecard regression threshold: tool-failure increase tolerated (default 0)",
+    "0",
+  )
   .action(async (opts) => {
     try {
+      // Scorecard mode: compare two saved run summaries offline (no provider
+      // config needed). Exits 0 when no documented regression threshold is
+      // crossed, 1 on a regression, and 2 on a usage/input error.
+      if (opts.baseline !== undefined || opts.candidate !== undefined) {
+        if (!opts.baseline || !opts.candidate) {
+          process.stderr.write(
+            "Error: comparing run summaries requires both --baseline <file> and --candidate <file>\n",
+          );
+          process.exit(2);
+        }
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let thresholds: RegressionThresholds;
+        let baseline: RunSummary;
+        let candidate: RunSummary;
+        try {
+          thresholds = parseScorecardThresholds(opts.maxElapsedRatio, opts.maxFailureDelta);
+          baseline = readRunSummaryFile(opts.baseline, "baseline");
+          candidate = readRunSummaryFile(opts.candidate, "candidate");
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        const scorecard = compareRunSummaries(baseline, candidate, thresholds);
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(scorecard) + "\n");
+        } else {
+          process.stdout.write(formatScorecard(scorecard) + "\n");
+        }
+        process.exit(scorecard.regression ? 1 : 0);
+      }
+
       if (opts.listSessions) {
         const store = new SessionStore();
         const summaries = collectSessionSummaries(store);
