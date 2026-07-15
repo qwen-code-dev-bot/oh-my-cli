@@ -63,6 +63,7 @@ Sessions are persisted as JSONL under `~/.oh-my-cli/sessions/`.
 | `--resume <session-id>` | Resume a persisted session |
 | `--approval-mode <mode>` | `default`, `auto-edit`, or `yolo` |
 | `--workspace <dir>` | Workspace directory (default: cwd) |
+| `--doctor` | Run read-only installation/platform readiness checks and exit |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 
 ### Approval modes
@@ -101,6 +102,21 @@ Each line is a self-describing record that parses independently:
   terminal record against `$?`.
 - **Safety** — secrets and home paths are redacted and oversized payloads are
   truncated (with a `truncated` flag); the stream stays clean for machine use.
+
+### Readiness doctor
+
+After installing, run a read-only health check to catch runtime, resolution,
+state-directory, and platform problems before a real task does:
+
+```bash
+oh-my-cli --doctor
+```
+
+It verifies the Node runtime version, that the CLI entry is present, that the
+state directory is writable (or creatable), and that the platform is supported.
+Each check is categorized `✓` pass, `⚠` warning, or `✗` failure with actionable
+remediation. The command never installs, creates, or edits anything, redacts
+host paths and secrets, and exits `0` when there are no failures (`1` otherwise).
 
 ## Built-in tools
 
