@@ -60,4 +60,78 @@ describe("SessionStore", () => {
     expect(messages[0].tool_calls?.length).toBe(1);
     expect(messages[1].tool_call_id).toBe("c1");
   });
+
+  it("writes and reads metadata without surfacing it as a message", () => {
+    const id = store.newId();
+    store.writeMeta(id, { model: "fake-model", workspace: "/srv/proj", createdAt: 123 });
+    store.append(id, { role: "user", content: "hello" });
+
+    const meta = store.readMeta(id);
+    expect(meta).not.toBeNull();
+    expect(meta!.model).toBe("fake-model");
+    expect(meta!.workspace).toBe("/srv/proj");
+    expect(meta!.createdAt).toBe(123);
+
+    // The metadata line must not appear as a conversation message.
+    const messages = store.load(id);
+    expect(messages.length).toBe(1);
+    expect(messages[0].role).toBe("user");
+  });
+
+  it("returns null metadata for a session created before metadata existed", () => {
+    const id = store.newId();
+    store.append(id, { role: "user", content: "legacy" });
+    expect(store.readMeta(id)).toBeNull();
+  });
+
+  it("returns null metadata when the metadata line is corrupt", () => {
+    const id = "bad-meta";
+    fs.writeFileSync(
+      path.join(tmpDir, `${id}.jsonl`),
+      '{"meta":true,"model":' + "\n" + JSON.stringify({ role: "user", content: "x" }) + "\n",
+    );
+    expect(store.readMeta(id)).toBeNull();
+  });
+
+  it("lists session ids and ignores non-jsonl files", () => {
+    const id = store.newId();
+    store.append(id, { role: "user", content: "x" });
+    fs.writeFileSync(path.join(tmpDir, "README.md"), "not a session");
+    fs.writeFileSync(path.join(tmpDir, `${id}.meta.json`), "{}");
+
+    const ids = store.listIds();
+    expect(ids).toEqual([id]);
+  });
+
+  it("flags mid-file corruption but recovers valid lines", () => {
+    const id = "corrupt-mid";
+    fs.writeFileSync(
+      path.join(tmpDir, `${id}.jsonl`),
+      JSON.stringify({ role: "user", content: "a" }) + "\n" +
+        "{not json}\n" +
+        JSON.stringify({ role: "assistant", content: "b" }) + "\n",
+    );
+    const diag = store.loadWithDiagnostics(id);
+    expect(diag.corrupt).toBe(true);
+    expect(diag.messages.length).toBe(2);
+    expect(diag.badLines).toBe(1);
+  });
+
+  it("treats a single trailing incomplete line as benign", () => {
+    const id = "trailing";
+    fs.writeFileSync(
+      path.join(tmpDir, `${id}.jsonl`),
+      JSON.stringify({ role: "user", content: "a" }) + "\n" + '{"role":"assistant","con' + "\n",
+    );
+    const diag = store.loadWithDiagnostics(id);
+    expect(diag.corrupt).toBe(false);
+    expect(diag.messages.length).toBe(1);
+  });
+
+  it("reports a missing session as empty and not corrupt", () => {
+    const diag = store.loadWithDiagnostics("does-not-exist");
+    expect(diag.messages.length).toBe(0);
+    expect(diag.corrupt).toBe(false);
+    expect(diag.meta).toBeNull();
+  });
 });
