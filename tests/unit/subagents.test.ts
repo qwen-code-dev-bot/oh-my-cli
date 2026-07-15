@@ -1,9 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   SubagentManager,
   formatSubagentView,
   countByState,
   TERMINAL_SUBAGENT_STATES,
+  SharedWorkspaceLaunchError,
 } from "../../src/subagents.js";
 import type { SubagentRecord } from "../../src/subagents.js";
 
@@ -315,5 +319,96 @@ describe("countByState", () => {
 describe("TERMINAL_SUBAGENT_STATES", () => {
   it("contains exactly the three terminal states", () => {
     expect([...TERMINAL_SUBAGENT_STATES].sort()).toEqual(["cancelled", "completed", "failed"]);
+  });
+});
+
+describe("SubagentManager: shared-workspace guard", () => {
+  const dirs: string[] = [];
+  const ws = (): string => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), "sub-ws-"));
+    dirs.push(d);
+    return d;
+  };
+
+  afterEach(() => {
+    while (dirs.length) fs.rmSync(dirs.pop()!, { recursive: true, force: true });
+  });
+
+  it("does nothing when no parent workspace is configured (backward compatible)", async () => {
+    const mgr = new SubagentManager();
+    const id = mgr.spawn(async () => "ok", { mode: "mutating", workspace: ws() });
+    await flush();
+    expect(mgr.get(id)?.state).toBe("completed");
+  });
+
+  it("refuses a mutating child that shares the parent workspace before its worker runs", () => {
+    const parent = ws();
+    const mgr = new SubagentManager({ parentWorkspace: parent });
+    let ran = false;
+    expect(() =>
+      mgr.spawn(
+        async () => {
+          ran = true;
+          return "x";
+        },
+        { mode: "mutating", workspace: parent },
+      ),
+    ).toThrow(SharedWorkspaceLaunchError);
+    expect(ran).toBe(false);
+    // The launch was refused: no child was ever registered.
+    expect(mgr.list()).toHaveLength(0);
+  });
+
+  it("defaults an unspecified child to mutating and refuses it in the shared workspace", () => {
+    const parent = ws();
+    const mgr = new SubagentManager({ parentWorkspace: parent });
+    // No mode/workspace ⇒ inherits the parent workspace and defaults to mutating.
+    expect(() => mgr.spawn(async () => "x")).toThrow(/Refusing to launch a mutating delegated agent/);
+  });
+
+  it("allows a read-only child in the shared workspace and reports its mode", async () => {
+    const parent = ws();
+    const mgr = new SubagentManager({ parentWorkspace: parent });
+    const id = mgr.spawn(async () => "inspected", {
+      mode: "read-only",
+      workspace: parent,
+      label: "scan",
+    });
+    await flush();
+    const rec = mgr.get(id)!;
+    expect(rec.state).toBe("completed");
+    expect(rec.mode).toBe("read-only");
+    expect(formatSubagentView(mgr.list())).toContain("[read-only] scan");
+  });
+
+  it("allows a mutating child in a genuinely different workspace", async () => {
+    const parent = ws();
+    const other = ws();
+    const mgr = new SubagentManager({ parentWorkspace: parent });
+    const id = mgr.spawn(async () => "wrote", { mode: "mutating", workspace: other });
+    await flush();
+    expect(mgr.get(id)?.state).toBe("completed");
+  });
+
+  it("refuses two simultaneous mutating launches into the parent workspace", () => {
+    const parent = ws();
+    const mgr = new SubagentManager({ parentWorkspace: parent, maxConcurrent: 2 });
+    expect(() => mgr.spawn(async () => "a", { mode: "mutating", workspace: parent })).toThrow(
+      SharedWorkspaceLaunchError,
+    );
+    expect(() => mgr.spawn(async () => "b", { mode: "mutating", workspace: parent })).toThrow(
+      SharedWorkspaceLaunchError,
+    );
+    expect(mgr.list()).toHaveLength(0);
+  });
+
+  it("keeps cancellation working for an allowed read-only child", () => {
+    const parent = ws();
+    const mgr = new SubagentManager({ parentWorkspace: parent });
+    const d = deferred<string>();
+    const id = mgr.spawn(() => d.promise, { mode: "read-only", workspace: parent });
+    expect(mgr.get(id)?.state).toBe("running");
+    expect(mgr.cancel(id)).toBe(true);
+    expect(mgr.get(id)?.state).toBe("cancelled");
   });
 });
