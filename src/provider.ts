@@ -14,7 +14,17 @@ export interface StreamedToolCall {
   arguments: string;
 }
 
-export type StreamEvent = StreamedText | StreamedToolCall;
+// Token usage for a single completion, emitted last when the provider reports it
+// (we request `stream_options.include_usage`). Absent when the provider does not
+// surface usage, in which case callers treat totals as unavailable.
+export interface StreamedUsage {
+  type: "usage";
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export type StreamEvent = StreamedText | StreamedToolCall | StreamedUsage;
 
 export interface ProviderOptions {
   tools?: Array<{
@@ -37,6 +47,9 @@ export async function* streamChat(
     model: config.model,
     messages: messages.map(toOpenAIMessage),
     stream: true,
+    // Ask for a trailing usage chunk so the run summary can report token totals
+    // when the provider supports it. Providers that ignore this simply omit it.
+    stream_options: { include_usage: true },
   };
   if (options?.tools?.length) {
     params.tools = options.tools;
@@ -47,8 +60,13 @@ export async function* streamChat(
   );
 
   const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+  let usage: OpenAI.CompletionUsage | undefined;
 
   for await (const chunk of stream) {
+    // The usage chunk (when present) arrives last and carries an empty choices
+    // array, so capture it before the per-choice handling below.
+    if (chunk.usage) usage = chunk.usage;
+
     const choice = chunk.choices?.[0];
     if (!choice) continue;
 
@@ -79,6 +97,15 @@ export async function* streamChat(
       }
       toolCalls.clear();
     }
+  }
+
+  if (usage) {
+    yield {
+      type: "usage",
+      promptTokens: usage.prompt_tokens ?? 0,
+      completionTokens: usage.completion_tokens ?? 0,
+      totalTokens: usage.total_tokens ?? 0,
+    };
   }
 }
 

@@ -66,4 +66,20 @@ describe("Provider: streamed text", () => {
     const textEvents = events.filter((e) => e.type === "text");
     expect(textEvents.length).toBe(0);
   });
+
+  it("requests usage and yields token totals when the provider reports them", async () => {
+    server.setResponse({ type: "text", content: "hi" });
+
+    const events: Array<Record<string, unknown>> = [];
+    for await (const event of streamChat(config, [{ role: "user", content: "x" }])) {
+      events.push(event as Record<string, unknown>);
+    }
+
+    const lastReq = server.requests[server.requests.length - 1].body as Record<string, unknown>;
+    expect(lastReq.stream_options).toEqual({ include_usage: true });
+
+    const usage = events.find((e) => e.type === "usage");
+    expect(usage).toBeDefined();
+    expect(usage).toMatchObject({ promptTokens: 5, completionTokens: 5, totalTokens: 10 });
+  });
 });

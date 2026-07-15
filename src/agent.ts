@@ -50,6 +50,15 @@ export interface AgentResult {
   ok: boolean;
   reason: "completed" | "provider_error" | "max_rounds";
   rounds: number;
+  // Bounded per-tool activity counts for the whole run. Each tool execution is
+  // counted exactly once (no double-counted retries).
+  stats: {
+    toolCalls: Record<string, number>;
+    toolFailures: Record<string, number>;
+  };
+  // Aggregated token totals across all rounds, or null when the provider never
+  // reported usage.
+  tokens: { prompt: number; completion: number; total: number } | null;
 }
 
 export async function runAgent(
@@ -79,6 +88,19 @@ export async function runAgent(
 
   let finalText = "";
 
+  const toolCalls: Record<string, number> = {};
+  const toolFailures: Record<string, number> = {};
+  const tokens = { prompt: 0, completion: 0, total: 0 };
+  let hasUsage = false;
+  const bump = (map: Record<string, number>, name: string) => {
+    map[name] = (map[name] ?? 0) + 1;
+  };
+  const statsSnapshot = () => ({
+    toolCalls: { ...toolCalls },
+    toolFailures: { ...toolFailures },
+  });
+  const tokensSnapshot = () => (hasUsage ? { ...tokens } : null);
+
   for (let round = 0; round < MAX_ROUNDS; round++) {
     let assistantText = "";
     const assistantToolCalls: Array<{ id: string; name: string; arguments: string }> = [];
@@ -90,12 +112,24 @@ export async function runAgent(
           sink.assistantDelta(event.delta);
         } else if (event.type === "tool_call") {
           assistantToolCalls.push({ id: event.id, name: event.name, arguments: event.arguments });
+        } else if (event.type === "usage") {
+          hasUsage = true;
+          tokens.prompt += event.promptTokens;
+          tokens.completion += event.completionTokens;
+          tokens.total += event.totalTokens;
         }
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       sink.providerError(msg);
-      return { text: assistantText, ok: false, reason: "provider_error", rounds: round };
+      return {
+        text: assistantText,
+        ok: false,
+        reason: "provider_error",
+        rounds: round,
+        stats: statsSnapshot(),
+        tokens: tokensSnapshot(),
+      };
     }
 
     const final = assistantToolCalls.length === 0;
@@ -107,7 +141,14 @@ export async function runAgent(
       const assistantMsg: SessionMessage = { role: "assistant", content: assistantText };
       messages.push(assistantMsg);
       opts.onMessage(assistantMsg);
-      return { text: finalText, ok: true, reason: "completed", rounds: round + 1 };
+      return {
+        text: finalText,
+        ok: true,
+        reason: "completed",
+        rounds: round + 1,
+        stats: statsSnapshot(),
+        tokens: tokensSnapshot(),
+      };
     }
 
     // Record assistant message with tool calls
@@ -128,6 +169,8 @@ export async function runAgent(
       sink.toolStart({ id: tc.id, name: tc.name, round });
       const result = await executeToolCall(tc, toolMap, opts.approvalMode, opts.workspace);
       sink.toolResult({ id: tc.id, name: tc.name, result, round });
+      bump(toolCalls, tc.name);
+      if (result.isError) bump(toolFailures, tc.name);
 
       const toolMsg: SessionMessage = {
         role: "tool",
@@ -139,7 +182,14 @@ export async function runAgent(
     }
   }
 
-  return { text: finalText, ok: false, reason: "max_rounds", rounds: MAX_ROUNDS };
+  return {
+    text: finalText,
+    ok: false,
+    reason: "max_rounds",
+    rounds: MAX_ROUNDS,
+    stats: statsSnapshot(),
+    tokens: tokensSnapshot(),
+  };
 }
 
 // Resolve a single tool call to its result, applying approval gating and

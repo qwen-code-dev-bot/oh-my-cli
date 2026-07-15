@@ -1,5 +1,6 @@
 import type { AgentSink } from "./agent.js";
 import type { ToolResult } from "./tools.js";
+import type { RunSummary } from "./run-summary.js";
 import { redactSecrets } from "./permission-impact.js";
 
 // A stable, versioned newline-delimited JSON protocol for core run lifecycle
@@ -35,6 +36,9 @@ export type HeadlessEvent =
       elapsedMs: number | null;
     }
   | { type: "error"; stage: "provider" | "internal"; message: string }
+  // Opt-in (`--summary`) privacy-safe run summary, emitted just before the
+  // terminal `complete`. Carries only metadata, never prompt/tool/file content.
+  | { type: "summary"; summary: RunSummary }
   | { type: "complete"; ok: boolean; exitCode: number; rounds: number; reason: string };
 
 export type HeadlessRecord = HeadlessEvent & {

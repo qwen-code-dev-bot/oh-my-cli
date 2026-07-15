@@ -77,6 +77,7 @@ without touching other sessions.
 | `--doctor` | Run read-only installation/platform readiness checks and exit |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
+| `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
 
 Color is enabled by default in the interactive REPL and command palette. Pass
 `--no-color` or set a non-empty `NO_COLOR` environment variable (per
@@ -119,6 +120,51 @@ Each line is a self-describing record that parses independently:
   terminal record against `$?`.
 - **Safety** — secrets and home paths are redacted and oversized payloads are
   truncated (with a `truncated` flag); the stream stays clean for machine use.
+
+### Run summary
+
+For unattended runs, pass `--summary` to append a privacy-safe execution summary
+after the run. It is opt-in: interactive sessions and plain `-p` runs are
+unchanged unless you request it. The summary is **metadata only** — outcome,
+exit code, classified reason, elapsed time, rounds, bounded tool-call/failure
+counts, and token totals — and never carries prompt, tool, or file content.
+Secret-shaped strings are redacted and the host home directory is collapsed to
+`~`, so the session log path stays private.
+
+In text mode the summary prints a short block after the run:
+
+```bash
+oh-my-cli -p "Run the build" --summary
+# …
+# Run summary (oh-my-cli.summary v1)
+# outcome:   success
+# exit code: 0
+# reason:    completed
+# elapsed:   2.0s
+# rounds:    1
+# tool calls: 1 (shell×1)
+# tokens:    prompt 5, completion 5, total 10
+# evidence:  session 01J… (~/.oh-my-cli/sessions/01J….jsonl)
+```
+
+In `--output json` mode the same data arrives as a versioned `summary` event
+emitted just before the terminal `complete`, so CI can retain it as run evidence:
+
+```bash
+oh-my-cli -p "Run the build" --output json --summary \
+  | tee run.ndjson \
+  | grep '"type":"summary"'   # keep the evidence line for the job log
+```
+
+```json
+{"protocol":"oh-my-cli.headless","v":1,"seq":3,"ts":"…","type":"summary","summary":{"schema":"oh-my-cli.summary","v":1,"outcome":"success","exitCode":0,"reason":"completed","elapsedMs":2000,"rounds":1,"toolCalls":{"total":1,"byName":{"shell":1}},"toolFailures":{"total":0,"byName":{}},"tokens":{"prompt":5,"completion":5,"total":10},"evidence":{"sessionId":"01J…","sessionPath":"~/.oh-my-cli/sessions/01J….jsonl"}}}
+```
+
+The `outcome` is `success` or `failure`; on failure the `reason` classifies the
+terminal state (`provider_error`, `max_rounds`, or `error`) and the `exitCode`
+preserves the process exit code, so a wrapper can compare the summary against
+`$?`. Distinct tool names are capped (overflow rolls into `__other__`) to keep
+the summary bounded regardless of how many tools a run touched.
 
 ### Readiness doctor
 
@@ -184,5 +230,6 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/color.ts` — ANSI color toggle (`--no-color` / `NO_COLOR`) and palette factory
 - `src/session.ts` — JSONL session persistence
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
+- `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests

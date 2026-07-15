@@ -16,7 +16,8 @@ import { collectHealthInventory, formatHealthInventory } from "./health-inventor
 import { collectSessionSummaries, formatSessionList } from "./session-summary.js";
 import { collectDoctorReport, formatDoctorReport } from "./doctor.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
-import { redactSecrets } from "./permission-impact.js";
+import { redactSecrets, redactHomePath } from "./permission-impact.js";
+import { buildRunSummary, formatRunSummary } from "./run-summary.js";
 import { colorEnabled, createColorPalette } from "./color.js";
 import path from "node:path";
 
@@ -52,6 +53,7 @@ program
     "text",
   )
   .option("--no-color", "Disable ANSI color output (also honors the NO_COLOR env var)")
+  .option("--summary", "Print a privacy-safe execution summary for the run (unattended use)")
   .action(async (opts) => {
     try {
       if (opts.listSessions) {
@@ -149,12 +151,17 @@ program
           process.exit(1);
         }
 
+        // The run summary (opt-in) points at the session log as its evidence,
+        // with the host home directory collapsed to ~ so the path stays private.
+        const evidencePath = () => redactHomePath(store.filePath(sessionId));
+
         if (format === "json") {
           // Headless protocol: a versioned NDJSON event stream on stdout. The
           // terminal `complete` record's exitCode matches the process exit code.
           const writer = new HeadlessWriter(process.stdout);
           writer.emit(startEvent({ sessionId, model: config.model, prompt: opts.prompt }));
           const sink = createHeadlessSink(writer);
+          const startedAt = Date.now();
           let result: AgentResult;
           try {
             result = await runAgent(opts.prompt, existingMessages, {
@@ -168,11 +175,45 @@ program
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
             writer.emit({ type: "error", stage: "internal", message: redactSecrets(msg).text });
+            if (opts.summary) {
+              writer.emit({
+                type: "summary",
+                summary: buildRunSummary({
+                  ok: false,
+                  exitCode: 1,
+                  reason: "error",
+                  elapsedMs: Date.now() - startedAt,
+                  rounds: 0,
+                  toolCalls: {},
+                  toolFailures: {},
+                  tokens: null,
+                  sessionId,
+                  sessionPath: evidencePath(),
+                }),
+              });
+            }
             writer.emit({ type: "complete", ok: false, exitCode: 1, rounds: 0, reason: "error" });
             process.exit(1);
           }
           sealSession();
           const exitCode = result.ok ? 0 : 1;
+          if (opts.summary) {
+            writer.emit({
+              type: "summary",
+              summary: buildRunSummary({
+                ok: result.ok,
+                exitCode,
+                reason: result.reason,
+                elapsedMs: Date.now() - startedAt,
+                rounds: result.rounds,
+                toolCalls: result.stats.toolCalls,
+                toolFailures: result.stats.toolFailures,
+                tokens: result.tokens,
+                sessionId,
+                sessionPath: evidencePath(),
+              }),
+            });
+          }
           writer.emit({
             type: "complete",
             ok: result.ok,
@@ -183,7 +224,8 @@ program
           process.exit(exitCode);
         }
 
-        await runAgent(opts.prompt, existingMessages, {
+        const startedAt = Date.now();
+        const result = await runAgent(opts.prompt, existingMessages, {
           config,
           workspace,
           approvalMode,
@@ -191,6 +233,21 @@ program
           onMessage,
         });
         sealSession();
+        if (opts.summary) {
+          const summary = buildRunSummary({
+            ok: result.ok,
+            exitCode: result.ok ? 0 : 1,
+            reason: result.reason,
+            elapsedMs: Date.now() - startedAt,
+            rounds: result.rounds,
+            toolCalls: result.stats.toolCalls,
+            toolFailures: result.stats.toolFailures,
+            tokens: result.tokens,
+            sessionId,
+            sessionPath: evidencePath(),
+          });
+          process.stdout.write("\n" + formatRunSummary(summary) + "\n");
+        }
       } else if (opts.resume) {
         // Resume mode: need a new prompt from stdin
         if (process.stdin.isTTY) {
