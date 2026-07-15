@@ -23,6 +23,10 @@ npm install
 npm run build
 ```
 
+New here? Follow [docs/FIRST-RUN.md](docs/FIRST-RUN.md) for a verified path from
+install through your first successful task, including a setup `--doctor` check
+and troubleshooting.
+
 ## Configuration
 
 Set these environment variables:
@@ -145,6 +149,15 @@ npm test                 # Unit tests
 npm run test:integration # Integration tests (fake provider, no network)
 npm run smoke            # Smoke tests against built binary
 ```
+
+`npm run smoke` also runs the first-run documentation check, which executes
+every `oh-my-cli` command documented in [docs/FIRST-RUN.md](docs/FIRST-RUN.md)
+and fails if the documented syntax goes stale.
+
+## Releasing
+
+Before cutting a release, follow [docs/RELEASE.md](docs/RELEASE.md): it records
+supported platforms, artifact verification, and rollback evidence.
 
 ## Architecture
 
