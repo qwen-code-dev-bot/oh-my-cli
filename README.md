@@ -81,6 +81,7 @@ without touching other sessions.
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
+| `--budget <usd>` | Spend budget in USD; stop before further provider calls once the estimated cost reaches it (also honors `OMC_SPEND_BUDGET_USD`) |
 | `--baseline <file>` | Baseline run-summary file to compare in scorecard mode |
 | `--candidate <file>` | Candidate run-summary file to compare in scorecard mode |
 | `--max-elapsed-ratio <n>` | Scorecard regression threshold: fractional elapsed-time increase tolerated (default `0.25`) |
@@ -149,7 +150,8 @@ Each line is a self-describing record that parses independently:
 - **Envelope** — every record carries `protocol` (`oh-my-cli.headless`), `v`
   (schema version), a monotonic `seq`, an ISO `ts`, and a `type`.
 - **Events** — `start`, `assistant` (one per turn), `tool_start`, `tool_result`
-  (`ok` reflects success), `error` (`stage` is `provider` or `internal`), and a
+  (`ok` reflects success), `usage` (cumulative tokens and cost estimate per
+  round, with budget state), `error` (`stage` is `provider` or `internal`), and a
   terminal `complete`.
 - **Exit semantics** — the `complete` record's `exitCode` always equals the
   process exit code (`0` success, `1` failure), so wrappers can compare the
@@ -163,9 +165,9 @@ For unattended runs, pass `--summary` to append a privacy-safe execution summary
 after the run. It is opt-in: interactive sessions and plain `-p` runs are
 unchanged unless you request it. The summary is **metadata only** — outcome,
 exit code, classified reason, elapsed time, rounds, bounded tool-call/failure
-counts, and token totals — and never carries prompt, tool, or file content.
-Secret-shaped strings are redacted and the host home directory is collapsed to
-`~`, so the session log path stays private.
+counts, token totals, and a cost estimate — and never carries prompt, tool, or
+file content. Secret-shaped strings are redacted and the host home directory is
+collapsed to `~`, so the session log path stays private.
 
 In text mode the summary prints a short block after the run:
 
@@ -180,6 +182,7 @@ oh-my-cli -p "Run the build" --summary
 # rounds:    1
 # tool calls: 1 (shell×1)
 # tokens:    prompt 5, completion 5, total 10
+# est. cost: $0.000090 (estimate, not billing)
 # evidence:  session 01J… (~/.oh-my-cli/sessions/01J….jsonl)
 ```
 
@@ -193,14 +196,40 @@ oh-my-cli -p "Run the build" --output json --summary \
 ```
 
 ```json
-{"protocol":"oh-my-cli.headless","v":1,"seq":3,"ts":"…","type":"summary","summary":{"schema":"oh-my-cli.summary","v":1,"outcome":"success","exitCode":0,"reason":"completed","elapsedMs":2000,"rounds":1,"toolCalls":{"total":1,"byName":{"shell":1}},"toolFailures":{"total":0,"byName":{}},"tokens":{"prompt":5,"completion":5,"total":10},"evidence":{"sessionId":"01J…","sessionPath":"~/.oh-my-cli/sessions/01J….jsonl"}}}
+{"protocol":"oh-my-cli.headless","v":1,"seq":3,"ts":"…","type":"summary","summary":{"schema":"oh-my-cli.summary","v":1,"outcome":"success","exitCode":0,"reason":"completed","elapsedMs":2000,"rounds":1,"toolCalls":{"total":1,"byName":{"shell":1}},"toolFailures":{"total":0,"byName":{}},"tokens":{"prompt":5,"completion":5,"total":10},"estimatedCostUsd":0.00009,"evidence":{"sessionId":"01J…","sessionPath":"~/.oh-my-cli/sessions/01J….jsonl"}}}
 ```
 
 The `outcome` is `success` or `failure`; on failure the `reason` classifies the
-terminal state (`provider_error`, `max_rounds`, or `error`) and the `exitCode`
-preserves the process exit code, so a wrapper can compare the summary against
-`$?`. Distinct tool names are capped (overflow rolls into `__other__`) to keep
-the summary bounded regardless of how many tools a run touched.
+terminal state (`provider_error`, `max_rounds`, `budget_reached`, or `error`) and
+the `exitCode` preserves the process exit code, so a wrapper can compare the
+summary against `$?`. Distinct tool names are capped (overflow rolls into
+`__other__`) to keep the summary bounded regardless of how many tools a run
+touched.
+
+### Provider cost and spend budget
+
+Token usage is surfaced as it accrues: in `--output json` mode a `usage` event
+is emitted once per round with cumulative prompt/completion/total tokens, a cost
+estimate, and the budget state, and the run summary carries the same estimated
+cost. The cost is an **estimate from a bundled price table, never authoritative
+billing** — models not in the table fall back to a conservative rate and are
+flagged as unknown (`costKnown: false`), so an unlisted model is over-counted
+rather than under-counted.
+
+To cap an unattended run, pass a spend budget in USD with `--budget` (or the
+`OMC_SPEND_BUDGET_USD` environment variable; the flag takes precedence). Once the
+running estimate reaches the cap, the loop **stops before issuing further
+provider calls** — no additional billable calls are made — and the run ends with
+reason `budget_reached` (exit `1` in headless mode; an actionable
+`Spend budget reached …` line is printed to stderr otherwise). The budget is
+checked before each call, so the first call always runs and the estimate is
+cumulative across rounds. An invalid budget (non-positive or non-numeric) fails
+fast before any provider call.
+
+```bash
+# Cap a run at half a cent; it stops before spending more
+oh-my-cli -p "Refactor the parser" --budget 0.005 --output json --summary
+```
 
 ### Run scorecard
 
@@ -547,7 +576,8 @@ supported platforms, artifact verification, and rollback evidence.
 
 - `src/config.ts` — environment variable validation (zod)
 - `src/provider.ts` — OpenAI-compatible streaming client with text + tool-call aggregation
-- `src/agent.ts` — agent loop with 30-round hard cap
+- `src/agent.ts` — agent loop with 30-round hard cap and spend-budget gate
+- `src/cost.ts` — bundled model price table, token→USD cost estimate, and budget parsing (`--budget`)
 - `src/tools.ts` — tool definitions (read, write, edit, shell)
 - `src/workspace.ts` — path confinement with symlink escape detection
 - `src/approval.ts` — approval mode logic

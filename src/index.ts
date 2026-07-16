@@ -44,6 +44,7 @@ import { evaluateCommandPolicy, formatCommandPolicyDecision } from "./command-po
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary } from "./run-summary.js";
+import { parseBudgetUsd } from "./cost.js";
 import {
   readRunSummaryFile,
   compareRunSummaries,
@@ -109,6 +110,10 @@ program
   )
   .option("--no-color", "Disable ANSI color output (also honors the NO_COLOR env var)")
   .option("--summary", "Print a privacy-safe execution summary for the run (unattended use)")
+  .option(
+    "--budget <usd>",
+    "Spend budget in USD; stop before further provider calls once the estimated cost reaches it (also honors OMC_SPEND_BUDGET_USD)",
+  )
   .option("--baseline <file>", "Baseline run-summary file to compare in scorecard mode")
   .option("--candidate <file>", "Candidate run-summary file to compare in scorecard mode")
   .option(
@@ -405,6 +410,17 @@ program
         process.exit(1);
       }
 
+      // Optional spend budget (flag overrides env). Invalid values fail fast with
+      // an actionable message rather than silently disabling enforcement.
+      let budgetUsd: number | null = null;
+      try {
+        budgetUsd = parseBudgetUsd(opts.budget ?? process.env.OMC_SPEND_BUDGET_USD);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`${msg}\n`);
+        process.exit(1);
+      }
+
       let sessionId: string;
       let existingMessages: SessionMessage[] = [];
 
@@ -472,6 +488,7 @@ program
               sessionId,
               onMessage,
               sink,
+              budgetUsd,
             });
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -510,6 +527,7 @@ program
                 toolCalls: result.stats.toolCalls,
                 toolFailures: result.stats.toolFailures,
                 tokens: result.tokens,
+                estimatedCostUsd: result.estimatedCostUsd,
                 sessionId,
                 sessionPath: evidencePath(),
               }),
@@ -532,6 +550,7 @@ program
           approvalMode,
           sessionId,
           onMessage,
+          budgetUsd,
         });
         sealSession();
         if (opts.summary) {
@@ -544,6 +563,7 @@ program
             toolCalls: result.stats.toolCalls,
             toolFailures: result.stats.toolFailures,
             tokens: result.tokens,
+            estimatedCostUsd: result.estimatedCostUsd,
             sessionId,
             sessionPath: evidencePath(),
           });
@@ -566,6 +586,7 @@ program
               approvalMode,
               sessionId,
               onMessage,
+              budgetUsd,
             });
           });
         } else {
@@ -639,6 +660,7 @@ program
                 approvalMode,
                 sessionId,
                 onMessage,
+                budgetUsd,
               });
             } catch (err: unknown) {
               const msg = err instanceof Error ? err.message : String(err);

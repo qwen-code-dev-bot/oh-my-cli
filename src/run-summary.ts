@@ -5,6 +5,8 @@
 // and carries only metadata: never prompts, file contents, secrets, or raw tool
 // payloads. The schema is stable and deterministic so CI can retain and diff it.
 
+import { formatCostUsd } from "./cost.js";
+
 export const RUN_SUMMARY_SCHEMA = "oh-my-cli.summary";
 export const RUN_SUMMARY_VERSION = 1;
 
@@ -40,6 +42,9 @@ export interface RunSummary {
   // Token totals across the whole run, or null when the provider did not report
   // usage ("token totals when available").
   tokens: RunSummaryTokens | null;
+  // Estimated provider cost (USD) across the run, or null when usage was not
+  // reported. An estimate from a bundled price table, not authoritative billing.
+  estimatedCostUsd: number | null;
   evidence: {
     sessionId: string;
     // Host paths are redacted (home directory collapsed to ~) before they reach
@@ -57,6 +62,8 @@ export interface BuildRunSummaryInput {
   toolCalls: Record<string, number>;
   toolFailures: Record<string, number>;
   tokens: RunSummaryTokens | null;
+  // Optional estimated provider cost (USD); defaults to null when omitted.
+  estimatedCostUsd?: number | null;
   sessionId: string;
   sessionPath: string | null;
 }
@@ -106,6 +113,12 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummary {
           total: Math.max(0, Math.floor(input.tokens.total)),
         }
       : null,
+    estimatedCostUsd:
+      typeof input.estimatedCostUsd === "number" &&
+      Number.isFinite(input.estimatedCostUsd) &&
+      input.estimatedCostUsd >= 0
+        ? input.estimatedCostUsd
+        : null,
     evidence: {
       sessionId: input.sessionId,
       sessionPath: input.sessionPath,
@@ -139,6 +152,11 @@ export function formatRunSummary(summary: RunSummary): string {
     summary.tokens
       ? `  tokens:    prompt ${summary.tokens.prompt}, completion ${summary.tokens.completion}, total ${summary.tokens.total}`
       : `  tokens:    n/a`,
+  );
+  lines.push(
+    summary.estimatedCostUsd != null
+      ? `  est. cost: ${formatCostUsd(summary.estimatedCostUsd)} (estimate, not billing)`
+      : `  est. cost: n/a`,
   );
   const where = summary.evidence.sessionPath
     ? `session ${summary.evidence.sessionId} (${summary.evidence.sessionPath})`

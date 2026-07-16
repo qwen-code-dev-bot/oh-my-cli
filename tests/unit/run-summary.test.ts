@@ -104,6 +104,25 @@ describe("buildRunSummary", () => {
     expect(s.toolCalls.byName).toEqual({ shell: 2 });
     expect(s.tokens).toEqual({ prompt: 0, completion: 2, total: 1 });
   });
+
+  it("includes an estimated cost when provided and null when omitted or invalid", () => {
+    const base = {
+      ok: true,
+      exitCode: 0,
+      reason: "completed",
+      elapsedMs: 1,
+      rounds: 1,
+      toolCalls: {},
+      toolFailures: {},
+      tokens: { prompt: 5, completion: 5, total: 10 },
+      sessionId: "s",
+      sessionPath: null,
+    };
+    expect(buildRunSummary({ ...base, estimatedCostUsd: 0.0012 }).estimatedCostUsd).toBeCloseTo(0.0012, 9);
+    expect(buildRunSummary({ ...base }).estimatedCostUsd).toBeNull();
+    expect(buildRunSummary({ ...base, estimatedCostUsd: -1 }).estimatedCostUsd).toBeNull();
+    expect(buildRunSummary({ ...base, estimatedCostUsd: Number.NaN }).estimatedCostUsd).toBeNull();
+  });
 });
 
 describe("formatRunSummary", () => {
@@ -150,6 +169,43 @@ describe("formatRunSummary", () => {
     expect(text).toContain("tokens:    n/a");
     expect(text).toContain("evidence:  session sess-2");
     expect(text).not.toContain(" (~");
+  });
+
+  it("renders the estimated cost line, labeled as an estimate", () => {
+    const text = formatRunSummary(
+      buildRunSummary({
+        ok: true,
+        exitCode: 0,
+        reason: "completed",
+        elapsedMs: 1,
+        rounds: 1,
+        toolCalls: {},
+        toolFailures: {},
+        tokens: { prompt: 5, completion: 5, total: 10 },
+        estimatedCostUsd: 0.0012,
+        sessionId: "s",
+        sessionPath: null,
+      }),
+    );
+    expect(text).toContain("est. cost: $0.001200 (estimate, not billing)");
+  });
+
+  it("shows n/a cost when no estimate is available", () => {
+    const text = formatRunSummary(
+      buildRunSummary({
+        ok: true,
+        exitCode: 0,
+        reason: "completed",
+        elapsedMs: 1,
+        rounds: 1,
+        toolCalls: {},
+        toolFailures: {},
+        tokens: null,
+        sessionId: "s",
+        sessionPath: null,
+      }),
+    );
+    expect(text).toContain("est. cost: n/a");
   });
 
   it("never emits secret-shaped content even if a session id contained one", () => {
