@@ -6,6 +6,7 @@ import { streamChat } from "./provider.js";
 import type { Workspace } from "./workspace.js";
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
+import { evaluateCommandPolicy, policyDenialMessage } from "./command-policy.js";
 
 const MAX_ROUNDS = 30;
 
@@ -204,6 +205,24 @@ async function executeToolCall(
   const tool = toolMap.get(tc.name);
   if (!tool) {
     return { content: `Error: unknown tool "${tc.name}"`, isError: true };
+  }
+
+  // Deterministic command policy runs before approval and regardless of mode,
+  // so a known-dangerous shape is denied even under yolo. Commands that pass
+  // keep the existing approval/yolo behaviour unchanged.
+  if (tool.category === "mutate-shell") {
+    let command = "";
+    try {
+      const parsed = JSON.parse(tc.arguments);
+      if (typeof parsed.command === "string") command = parsed.command;
+    } catch { /* ignore */ }
+    const decision = evaluateCommandPolicy(command, {
+      provenance: "repository",
+      workspace: workspace.root,
+    });
+    if (!decision.allowed) {
+      return { content: policyDenialMessage(decision), isError: true };
+    }
   }
 
   if (needsApproval(approvalMode, tool.category)) {
