@@ -173,6 +173,48 @@ describe("createHeadlessSink: schema for every event", () => {
     sink.assistantDelta("i");
     expect(out.records().length).toBe(0);
   });
+
+  it("emits a usage record with cumulative tokens, cost, and budget state", () => {
+    const out = new FakeOut();
+    const sink = createHeadlessSink(new HeadlessWriter(out));
+    sink.usage({
+      round: 1,
+      tokens: { prompt: 10, completion: 6, total: 16 },
+      estimatedCostUsd: 0.0012,
+      costKnown: true,
+      budgetUsd: 0.001,
+      budgetReached: true,
+    });
+    const u = out.records()[0];
+    expect(u.type).toBe("usage");
+    if (u.type !== "usage") throw new Error("unreachable");
+    expect(u.round).toBe(1);
+    expect(u.promptTokens).toBe(10);
+    expect(u.completionTokens).toBe(6);
+    expect(u.totalTokens).toBe(16);
+    expect(u.estimatedCostUsd).toBeCloseTo(0.0012, 9);
+    expect(u.costKnown).toBe(true);
+    expect(u.budgetUsd).toBeCloseTo(0.001, 9);
+    expect(u.budgetReached).toBe(true);
+  });
+
+  it("reports no budget when none is set", () => {
+    const out = new FakeOut();
+    const sink = createHeadlessSink(new HeadlessWriter(out));
+    sink.usage({
+      round: 0,
+      tokens: { prompt: 5, completion: 5, total: 10 },
+      estimatedCostUsd: 0.00009,
+      costKnown: false,
+      budgetUsd: null,
+      budgetReached: false,
+    });
+    const u = out.records()[0];
+    if (u.type !== "usage") throw new Error("unreachable");
+    expect(u.budgetUsd).toBeNull();
+    expect(u.budgetReached).toBe(false);
+    expect(u.costKnown).toBe(false);
+  });
 });
 
 describe("parseHeadlessLine (strict)", () => {

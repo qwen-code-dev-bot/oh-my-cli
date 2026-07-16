@@ -40,6 +40,8 @@ const RUN_SUMMARY_Z = z.object({
       total: z.number().int().nonnegative(),
     })
     .nullable(),
+  // Added after v1; older summaries omit it, so default to null on read.
+  estimatedCostUsd: z.number().nonnegative().nullable().default(null),
   evidence: z.object({
     sessionId: z.string(),
     sessionPath: z.string().nullable(),

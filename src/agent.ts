@@ -7,6 +7,7 @@ import type { Workspace } from "./workspace.js";
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
 import { evaluateCommandPolicy, policyDenialMessage } from "./command-policy.js";
+import { estimateCostUsd, lookupModelPrice, formatCostUsd } from "./cost.js";
 
 const MAX_ROUNDS = 30;
 
@@ -17,6 +18,22 @@ export interface AgentOptions {
   sessionId: string;
   onMessage: (msg: SessionMessage) => void;
   sink?: AgentSink;
+  // Optional spend budget in USD. When the running cost estimate reaches this
+  // cap, the loop stops before issuing further provider calls. Null disables it.
+  budgetUsd?: number | null;
+}
+
+// Cumulative usage and cost reported after each round. `estimatedCostUsd` is an
+// estimate (never authoritative billing); `costKnown` reports whether the model
+// price was found in the bundled table. `budgetReached` is true once the running
+// estimate has met or exceeded `budgetUsd`.
+export interface AgentUsage {
+  round: number;
+  tokens: { prompt: number; completion: number; total: number };
+  estimatedCostUsd: number;
+  costKnown: boolean;
+  budgetUsd: number | null;
+  budgetReached: boolean;
 }
 
 // Output sink for the agent loop. The default console sink reproduces the
@@ -28,6 +45,8 @@ export interface AgentSink {
   toolStart(info: { id: string; name: string; round: number }): void;
   toolResult(info: { id: string; name: string; result: ToolResult; round: number }): void;
   providerError(message: string): void;
+  // Cumulative token usage and cost estimate, reported once per round.
+  usage(info: AgentUsage): void;
 }
 
 export function createConsoleSink(): AgentSink {
@@ -43,13 +62,22 @@ export function createConsoleSink(): AgentSink {
     providerError: (message) => {
       process.stderr.write(`\nProvider error: ${message}\n`);
     },
+    usage: (info) => {
+      // Keep normal output uncluttered; surface only the actionable budget stop.
+      if (info.budgetReached && info.budgetUsd !== null) {
+        process.stderr.write(
+          `\nSpend budget reached: estimated ${formatCostUsd(info.estimatedCostUsd)} ` +
+            `>= ${formatCostUsd(info.budgetUsd)}; stopping before further provider calls.\n`,
+        );
+      }
+    },
   };
 }
 
 export interface AgentResult {
   text: string;
   ok: boolean;
-  reason: "completed" | "provider_error" | "max_rounds";
+  reason: "completed" | "provider_error" | "max_rounds" | "budget_reached";
   rounds: number;
   // Bounded per-tool activity counts for the whole run. Each tool execution is
   // counted exactly once (no double-counted retries).
@@ -60,6 +88,12 @@ export interface AgentResult {
   // Aggregated token totals across all rounds, or null when the provider never
   // reported usage.
   tokens: { prompt: number; completion: number; total: number } | null;
+  // Estimated provider cost (USD) across the run, or null when the provider
+  // never reported usage. An estimate, not authoritative billing.
+  estimatedCostUsd: number | null;
+  // Whether the model price was found in the bundled table (false ⇒ the
+  // conservative fallback rate was used).
+  costKnown: boolean;
 }
 
 export async function runAgent(
@@ -93,6 +127,11 @@ export async function runAgent(
   const toolFailures: Record<string, number> = {};
   const tokens = { prompt: 0, completion: 0, total: 0 };
   let hasUsage = false;
+  // Running cost estimate (USD) across the run. Recomputed from cumulative
+  // tokens each round; null in snapshots until the provider reports usage.
+  let costUsd = 0;
+  const costKnown = lookupModelPrice(opts.config.model).known;
+  const budgetUsd = opts.budgetUsd ?? null;
   const bump = (map: Record<string, number>, name: string) => {
     map[name] = (map[name] ?? 0) + 1;
   };
@@ -101,8 +140,25 @@ export async function runAgent(
     toolFailures: { ...toolFailures },
   });
   const tokensSnapshot = () => (hasUsage ? { ...tokens } : null);
+  const costSnapshot = () => (hasUsage ? costUsd : null);
+  const budgetReached = () => budgetUsd !== null && costUsd >= budgetUsd;
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
+    // Spend budget gate: once the running estimate has reached the cap, stop
+    // before issuing a new provider call so no further billable calls are made.
+    if (budgetReached()) {
+      return {
+        text: finalText,
+        ok: false,
+        reason: "budget_reached",
+        rounds: round,
+        stats: statsSnapshot(),
+        tokens: tokensSnapshot(),
+        estimatedCostUsd: costSnapshot(),
+        costKnown,
+      };
+    }
+
     let assistantText = "";
     const assistantToolCalls: Array<{ id: string; name: string; arguments: string }> = [];
 
@@ -130,8 +186,26 @@ export async function runAgent(
         rounds: round,
         stats: statsSnapshot(),
         tokens: tokensSnapshot(),
+        estimatedCostUsd: costSnapshot(),
+        costKnown,
       };
     }
+
+    // Refresh the running cost estimate from cumulative tokens and report usage.
+    if (hasUsage) {
+      costUsd = estimateCostUsd(opts.config.model, {
+        prompt: tokens.prompt,
+        completion: tokens.completion,
+      }).usd;
+    }
+    sink.usage({
+      round,
+      tokens: { ...tokens },
+      estimatedCostUsd: costUsd,
+      costKnown,
+      budgetUsd,
+      budgetReached: budgetReached(),
+    });
 
     const final = assistantToolCalls.length === 0;
     sink.assistantTurn(assistantText, round, { final });
@@ -149,6 +223,8 @@ export async function runAgent(
         rounds: round + 1,
         stats: statsSnapshot(),
         tokens: tokensSnapshot(),
+        estimatedCostUsd: costSnapshot(),
+        costKnown,
       };
     }
 
@@ -190,6 +266,8 @@ export async function runAgent(
     rounds: MAX_ROUNDS,
     stats: statsSnapshot(),
     tokens: tokensSnapshot(),
+    estimatedCostUsd: costSnapshot(),
+    costKnown,
   };
 }
 

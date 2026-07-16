@@ -36,6 +36,21 @@ export type HeadlessEvent =
       elapsedMs: number | null;
     }
   | { type: "error"; stage: "provider" | "internal"; message: string }
+  // Cumulative token usage and estimated cost, emitted once per round. The cost
+  // is an estimate (never authoritative billing); `costKnown` reports whether the
+  // model price was in the bundled table. `budgetReached` is true once the
+  // running estimate has met or exceeded `budgetUsd` (null when no budget).
+  | {
+      type: "usage";
+      round: number;
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+      estimatedCostUsd: number;
+      costKnown: boolean;
+      budgetUsd: number | null;
+      budgetReached: boolean;
+    }
   // Opt-in (`--summary`) privacy-safe run summary, emitted just before the
   // terminal `complete`. Carries only metadata, never prompt/tool/file content.
   | { type: "summary"; summary: RunSummary }
@@ -137,6 +152,19 @@ export function createHeadlessSink(writer: HeadlessWriter): AgentSink {
     },
     providerError: (message) => {
       writer.emit({ type: "error", stage: "provider", message: redactSecrets(message ?? "").text });
+    },
+    usage: (info) => {
+      writer.emit({
+        type: "usage",
+        round: info.round,
+        promptTokens: info.tokens.prompt,
+        completionTokens: info.tokens.completion,
+        totalTokens: info.tokens.total,
+        estimatedCostUsd: info.estimatedCostUsd,
+        costKnown: info.costKnown,
+        budgetUsd: info.budgetUsd,
+        budgetReached: info.budgetReached,
+      });
     },
   };
 }
