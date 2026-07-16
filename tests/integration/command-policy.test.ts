@@ -84,6 +84,27 @@ describe("Integration: --command-policy diagnostic mode", () => {
     const r = await runCli(["--command-policy", "echo hi", "--output", "yaml"], {});
     expect(r.code).toBe(2);
   });
+
+  it("neutralizes spoofing Unicode in the diagnostic preview", async () => {
+    const rlo = String.fromCodePoint(0x202e); // right-to-left override
+    const zwsp = String.fromCodePoint(0x200b); // zero-width space
+    const r = await runCli(
+      ["--command-policy", "echo " + rlo + zwsp + "hi", "--workspace", tmpDir],
+      {},
+    );
+    expect(r.code).toBe(0);
+    expect(r.stdout).not.toContain(rlo);
+    expect(r.stdout).not.toContain(zwsp);
+    expect(r.stdout).toContain("[U+202E]");
+    expect(r.stdout).toContain("[U+200B]");
+  });
+
+  it("leaves an ordinary command preview unchanged", async () => {
+    const r = await runCli(["--command-policy", "echo hello", "--workspace", tmpDir], {});
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("echo hello");
+    expect(r.stdout).not.toContain("[U+");
+  });
 });
 
 describe("Integration: command policy cannot be bypassed by yolo", () => {

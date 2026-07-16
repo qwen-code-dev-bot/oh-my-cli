@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { analyzeImpact, formatImpact, redactSecrets } from "../../src/permission-impact.js";
+import { analyzeImpact, formatImpact, redactSecrets, neutralizeSpoofing } from "../../src/permission-impact.js";
 
 // Secret-bearing fixtures are assembled from parts at runtime so the committed
 // source never contains a contiguous credential that the CI secret scanner
@@ -138,5 +138,88 @@ describe("analyzeImpact + formatImpact: redaction end-to-end", () => {
     const formatted = formatImpact(analyzeImpact("mystery", { secret: "leak" }));
     expect(formatted).not.toContain("leak");
     expect(formatted).toContain("Unrecognized tool");
+  });
+});
+
+// Spoofing Unicode fixtures are built from code points at runtime so the
+// committed source never contains literal invisible/bidi characters.
+const RLO = String.fromCodePoint(0x202e); // right-to-left override
+const ZWSP = String.fromCodePoint(0x200b); // zero-width space
+const BOM = String.fromCodePoint(0xfeff); // zero-width no-break space / BOM
+const WJ = String.fromCodePoint(0x2060); // word joiner
+const LQUOTE = String.fromCodePoint(0x201c); // left double quotation mark
+const RQUOTE = String.fromCodePoint(0x201d); // right double quotation mark
+
+describe("neutralizeSpoofing", () => {
+  it("replaces bidi overrides/isolates with a visible marker and counts them", () => {
+    const { text, count } = neutralizeSpoofing("a" + RLO + "b");
+    expect(text).toBe("a[U+202E]b");
+    expect(count).toBe(1);
+    expect(text).not.toContain(RLO);
+  });
+
+  it("neutralizes zero-width characters including BOM and word joiner", () => {
+    const { text, count } = neutralizeSpoofing(ZWSP + "x" + BOM + "y" + WJ);
+    expect(count).toBe(3);
+    expect(text).toContain("[U+200B]");
+    expect(text).toContain("[U+FEFF]");
+    expect(text).toContain("[U+2060]");
+    expect(text).not.toContain(ZWSP);
+    expect(text).not.toContain(BOM);
+  });
+
+  it("neutralizes look-alike quote characters", () => {
+    const { text, count } = neutralizeSpoofing(LQUOTE + "rm -rf /" + RQUOTE);
+    expect(count).toBe(2);
+    expect(text).toContain("[U+201C]");
+    expect(text).toContain("[U+201D]");
+    expect(text).not.toContain(LQUOTE);
+    expect(text).not.toContain(RQUOTE);
+  });
+
+  it("leaves ordinary ASCII and international text unchanged", () => {
+    expect(neutralizeSpoofing("echo hello world")).toEqual({ text: "echo hello world", count: 0 });
+    expect(neutralizeSpoofing("café résumé 日本語").count).toBe(0);
+  });
+});
+
+describe("analyzeImpact + formatImpact: spoofing Unicode neutralization", () => {
+  it("neutralizes spoofing chars in a shell command preview and reports the count", () => {
+    const impact = analyzeImpact("shell", { command: "echo " + RLO + ZWSP + "done" });
+    expect(impact.neutralized).toBe(2);
+    expect(impact.commandPreview).not.toContain(RLO);
+    expect(impact.commandPreview).not.toContain(ZWSP);
+    expect(impact.commandPreview).toContain("[U+202E]");
+    expect(impact.commandPreview).toContain("[U+200B]");
+    const formatted = formatImpact(impact);
+    expect(formatted).toContain("Neutralized 2 spoofing Unicode character(s).");
+    expect(formatted).not.toContain(RLO);
+  });
+
+  it("neutralizes spoofing chars in a file path and reports the count", () => {
+    const impact = analyzeImpact("read", { path: "src" + ZWSP + "/index.ts" });
+    expect(impact.neutralized).toBe(1);
+    expect(impact.filesystem?.paths[0]).not.toContain(ZWSP);
+    expect(impact.filesystem?.paths[0]).toContain("[U+200B]");
+    expect(formatImpact(impact)).toContain("Neutralized 1 spoofing Unicode character(s).");
+  });
+
+  it("keeps secret redaction working when spoofing chars are also present", () => {
+    const command = "curl --user " + fakeUserPass + " " + RLO + "https://api.example.com";
+    const impact = analyzeImpact("shell", { command });
+    expect(impact.redactions).toBeGreaterThan(0);
+    expect(impact.neutralized).toBe(1);
+    const formatted = formatImpact(impact);
+    expect(formatted).not.toContain("topsecret");
+    expect(formatted).not.toContain(RLO);
+    expect(formatted).toContain("[U+202E]");
+    expect(formatted).toContain("Redacted");
+  });
+
+  it("renders an ordinary command identically with no neutralization marker", () => {
+    const impact = analyzeImpact("shell", { command: "ls -la" });
+    expect(impact.neutralized).toBe(0);
+    expect(impact.commandPreview).toBe("ls -la");
+    expect(formatImpact(impact)).not.toContain("Neutralized");
   });
 });
