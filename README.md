@@ -79,6 +79,7 @@ without touching other sessions.
 | `--expected-branch <name>` | Expected branch for the `--readiness` branch check |
 | `--remote <name>` | Git remote to probe for `--readiness` (default `origin`) |
 | `--repo-context` | Inspect a bounded, redacted repository context snapshot (read-only) and exit |
+| `--plan <task>` | Produce a bounded, deterministic execution plan for a task (read-only) and exit |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -598,6 +599,48 @@ that a downstream planning or verification step can parse independently. The
 probe is a snapshot, not a gate, so it always exits `0`; an unknown toolchain
 degrades gracefully (reports `unknown` rather than failing).
 
+### Task planning
+
+Before entrusting the agent with a task, derive a bounded, deterministic plan
+grounded in the repository context — so execution has an objective sequence a
+later verification or review step can check against:
+
+```bash
+oh-my-cli --plan "add a feature"
+# or point it at another checkout
+oh-my-cli --plan "fix a bug" --workspace path/to/repo
+```
+
+It emits a fixed, dependency-ordered phase sequence — `understand → implement →
+verify → review` — whose `verify` step is grounded in the canonical
+`build`/`test`/`typecheck`/`lint` commands the repository-context probe actually
+detected (listed, never run). The objective and every command are secret-redacted
+and bounded, and the plan is deterministic for fixed inputs (same task + same
+repository state → same plan). The planner inspects the workspace only; it never
+executes the commands it lists, never calls a provider, and never mutates
+anything. When no canonical verification command is detected, the `verify` step
+degrades gracefully to a manual-verification note rather than inventing commands.
+
+```text
+Task plan (oh-my-cli.plan v1)
+──────────────────────────────────────────────
+Objective : add a feature
+Toolchain : npm
+Steps     :
+  1. understand Read the relevant files and the repository context (toolchain: npm) before editing.
+  2. implement  Make the minimal change described by the objective, confined to the workspace.
+  3. verify     Run the detected verification commands and confirm they pass before finishing.
+       - tsc
+       - vitest run tests/unit
+       - tsc --noEmit
+  4. review     Summarize the change and produce completion evidence (diff and test results).
+```
+
+Add `--output json` for a versioned record (`schema` `oh-my-cli.plan`) whose
+`steps` array carries the ordered phases and whose `verifyCommands` lists the
+grounded verification commands. An empty task description is rejected (exit `2`);
+an unknown toolchain degrades gracefully rather than failing.
+
 ## Built-in tools
 
 | Tool | Category | Description |
@@ -655,6 +698,8 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/run-recovery.ts` — bounded run recovery from a durable checkpoint (`--recover`)
 - `src/evidence-archive.ts` — portable, deterministic, signed evidence bundle export/verify (`--export-evidence`/`--verify-evidence`)
 - `src/repo-readiness.ts` — read-only repository-readiness inspection (`--readiness`)
+- `src/repo-context.ts` — read-only, bounded, redacted repository-context snapshot (`--repo-context`)
+- `src/task-plan.ts` — deterministic, bounded, redacted task planner grounded in the repo context (`--plan`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests

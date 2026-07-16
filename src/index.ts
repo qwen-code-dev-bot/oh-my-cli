@@ -17,6 +17,7 @@ import { collectSessionSummaries, formatSessionList } from "./session-summary.js
 import { collectDoctorReport, formatDoctorReport } from "./doctor.js";
 import { collectRepoReadiness, formatRepoReadiness } from "./repo-readiness.js";
 import { collectRepoContext, formatRepoContext } from "./repo-context.js";
+import { planTask, formatTaskPlan } from "./task-plan.js";
 import {
   readRecoveryCheckpoint,
   readEvidenceFile,
@@ -87,6 +88,7 @@ program
   .option("--expected-branch <name>", "Expected branch for the --readiness branch check")
   .option("--remote <name>", "Git remote to probe for --readiness (default origin)", "origin")
   .option("--repo-context", "Inspect a bounded, redacted repository context snapshot (read-only) and exit")
+  .option("--plan <task>", "Produce a bounded, deterministic execution plan for a task (read-only) and exit")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
   .option("--task-identity <id>", "Stable task identity (used by --recover and worktree leases)")
@@ -240,6 +242,28 @@ program
           process.stdout.write(JSON.stringify(snapshot) + "\n");
         } else {
           process.stdout.write(formatRepoContext(snapshot) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Task-plan mode: derive a bounded, deterministic, read-only execution
+      // plan for one task, grounded in the repository context. Never executes
+      // the commands it lists and never calls a provider, so it always exits 0.
+      if (opts.plan !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(1);
+        }
+        if (String(opts.plan).trim() === "") {
+          process.stderr.write("Error: --plan requires a non-empty task description\n");
+          process.exit(2);
+        }
+        const plan = planTask({ task: String(opts.plan), workspace: opts.workspace });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(plan) + "\n");
+        } else {
+          process.stdout.write(formatTaskPlan(plan) + "\n");
         }
         process.exit(0);
       }
