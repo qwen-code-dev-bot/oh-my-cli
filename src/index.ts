@@ -16,6 +16,7 @@ import { collectHealthInventory, formatHealthInventory } from "./health-inventor
 import { collectSessionSummaries, formatSessionList } from "./session-summary.js";
 import { collectDoctorReport, formatDoctorReport } from "./doctor.js";
 import { collectRepoReadiness, formatRepoReadiness } from "./repo-readiness.js";
+import { collectRepoContext, formatRepoContext } from "./repo-context.js";
 import {
   readRecoveryCheckpoint,
   readEvidenceFile,
@@ -85,6 +86,7 @@ program
   .option("--readiness", "Inspect repository readiness for a blocked task (read-only) and exit")
   .option("--expected-branch <name>", "Expected branch for the --readiness branch check")
   .option("--remote <name>", "Git remote to probe for --readiness (default origin)", "origin")
+  .option("--repo-context", "Inspect a bounded, redacted repository context snapshot (read-only) and exit")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
   .option("--task-identity <id>", "Stable task identity (used by --recover and worktree leases)")
@@ -222,6 +224,24 @@ program
           process.stdout.write(formatRepoReadiness(report) + "\n");
         }
         process.exit(report.ready ? 0 : 1);
+      }
+
+      // Repository-context mode: emit a bounded, redacted snapshot of how the
+      // CLI models the repository (toolchain, canonical commands, languages,
+      // structure, VCS state). Read-only and never a gate, so it always exits 0.
+      if (opts.repoContext) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(1);
+        }
+        const snapshot = collectRepoContext({ workspace: opts.workspace });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(snapshot) + "\n");
+        } else {
+          process.stdout.write(formatRepoContext(snapshot) + "\n");
+        }
+        process.exit(0);
       }
 
       // Recovery mode: decide whether an interrupted task can safely resume from

@@ -78,6 +78,7 @@ without touching other sessions.
 | `--readiness` | Inspect repository readiness for a blocked task (read-only) and exit |
 | `--expected-branch <name>` | Expected branch for the `--readiness` branch check |
 | `--remote <name>` | Git remote to probe for `--readiness` (default `origin`) |
+| `--repo-context` | Inspect a bounded, redacted repository context snapshot (read-only) and exit |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -557,6 +558,45 @@ Ready: no blocker detected.
 Add `--output json` for a versioned report (`schema` `oh-my-cli.readiness`) whose
 `blocker` names the first failing check (or `null` when ready). The exit code is a
 documented contract for CI: `0` when ready (no blocker), `1` when blocked.
+
+### Repository context
+
+To see how the CLI models the repository it is working in — before entrusting it
+with a task — run a read-only context probe:
+
+```bash
+oh-my-cli --repo-context
+# or point it at another checkout
+oh-my-cli --repo-context --workspace path/to/repo
+```
+
+It reports the toolchain (package manager + lockfile), the canonical
+`build`/`test`/`typecheck`/`lint` commands resolved from `package.json` scripts,
+`Makefile` targets, or `pyproject.toml` tool sections (reported, never run), the
+primary languages by a bounded file-extension signal, a bounded top-level
+structure outline, and the current VCS state (branch and clean/dirty). The probe
+inspects workspace-local files and Git metadata only; it never installs,
+creates, edits, executes, fetches into, or otherwise mutates anything, and
+secrets and host paths stay redacted.
+
+```text
+Repository context (oh-my-cli.repo-context v1)
+──────────────────────────────────────────────
+Toolchains : npm (package.json, package-lock.json)
+Commands   :
+  build      [package.json] tsc
+  test       [package.json] vitest run tests/unit
+  typecheck  [package.json] tsc --noEmit
+  lint       —
+Languages  : TypeScript (84 files; .ts), Markdown (6 files; .md), JSON (3 files; .json)
+Structure  : src/  tests/  docs/  package.json  tsconfig.json  …
+VCS        : on "main" — clean
+```
+
+Add `--output json` for a versioned record (`schema` `oh-my-cli.repo-context`)
+that a downstream planning or verification step can parse independently. The
+probe is a snapshot, not a gate, so it always exits `0`; an unknown toolchain
+degrades gracefully (reports `unknown` rather than failing).
 
 ## Built-in tools
 
