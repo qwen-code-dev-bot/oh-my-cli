@@ -25,6 +25,8 @@ const RUN_SUMMARY_Z = z.object({
   reason: z.string(),
   elapsedMs: z.number().nonnegative(),
   rounds: z.number().int().nonnegative(),
+  // Added after v1; older summaries omit it, so default to 0 on read.
+  retries: z.number().int().nonnegative().default(0),
   toolCalls: z.object({
     total: z.number().int().nonnegative(),
     byName: z.record(z.number().int().nonnegative()),

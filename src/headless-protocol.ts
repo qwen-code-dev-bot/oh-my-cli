@@ -51,6 +51,17 @@ export type HeadlessEvent =
       budgetUsd: number | null;
       budgetReached: boolean;
     }
+  // A transient provider failure is being retried within a round (bounded
+  // backoff). Metadata only: which attempt, the transient reason class, and the
+  // scheduled wait. Never carries error text, request bodies, or secrets.
+  | {
+      type: "retry";
+      round: number;
+      attempt: number;
+      maxAttempts: number;
+      reasonClass: string;
+      delayMs: number;
+    }
   // Opt-in (`--summary`) privacy-safe run summary, emitted just before the
   // terminal `complete`. Carries only metadata, never prompt/tool/file content.
   | { type: "summary"; summary: RunSummary }
@@ -164,6 +175,16 @@ export function createHeadlessSink(writer: HeadlessWriter): AgentSink {
         costKnown: info.costKnown,
         budgetUsd: info.budgetUsd,
         budgetReached: info.budgetReached,
+      });
+    },
+    retry: (info) => {
+      writer.emit({
+        type: "retry",
+        round: info.round,
+        attempt: info.attempt,
+        maxAttempts: info.maxAttempts,
+        reasonClass: info.reasonClass,
+        delayMs: info.delayMs,
       });
     },
   };

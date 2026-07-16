@@ -5,6 +5,9 @@ export interface FakeResponse {
   type: "text" | "tool_calls";
   content?: string;
   toolCalls?: Array<{ id: string; name: string; arguments: string }>;
+  // When set, the server responds with this HTTP error status (and an optional
+  // Retry-After header) instead of streaming, to exercise provider retry.
+  failWith?: { status: number; retryAfter?: string };
 }
 
 export interface FakeServer {
@@ -32,6 +35,24 @@ export async function createFakeServer(): Promise<FakeServer> {
           const response = responseQueue.length > 0
             ? responseQueue.shift()!
             : { type: "text" as const, content: "Hello from fake provider" };
+
+          if (response.failWith) {
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (response.failWith.retryAfter !== undefined) {
+              headers["Retry-After"] = response.failWith.retryAfter;
+            }
+            res.writeHead(response.failWith.status, headers);
+            res.end(
+              JSON.stringify({
+                error: {
+                  message: `fake ${response.failWith.status}`,
+                  type: "fake_error",
+                  code: String(response.failWith.status),
+                },
+              }),
+            );
+            return;
+          }
 
           if (parsed.stream) {
             sendStreamedResponse(res, response, Boolean(parsed.stream_options?.include_usage));

@@ -36,6 +36,17 @@ export interface AgentUsage {
   budgetReached: boolean;
 }
 
+// A transient provider failure is being retried within a round. Metadata only —
+// which attempt, the transient reason class, and the scheduled wait — so a
+// consumer can observe resilience without seeing error text or secrets.
+export interface AgentRetry {
+  round: number;
+  attempt: number;
+  maxAttempts: number;
+  reasonClass: string;
+  delayMs: number;
+}
+
 // Output sink for the agent loop. The default console sink reproduces the
 // existing terminal behaviour; the headless sink (see headless-protocol.ts)
 // renders the same lifecycle as a versioned JSON event stream.
@@ -47,6 +58,8 @@ export interface AgentSink {
   providerError(message: string): void;
   // Cumulative token usage and cost estimate, reported once per round.
   usage(info: AgentUsage): void;
+  // A transient provider failure is being retried (bounded backoff).
+  retry(info: AgentRetry): void;
 }
 
 export function createConsoleSink(): AgentSink {
@@ -71,6 +84,13 @@ export function createConsoleSink(): AgentSink {
         );
       }
     },
+    retry: (info) => {
+      // A brief stderr note so the wait is visible without polluting stdout.
+      process.stderr.write(
+        `\nProvider retry ${info.attempt}/${info.maxAttempts} after ${info.reasonClass} ` +
+          `(waiting ${info.delayMs}ms).\n`,
+      );
+    },
   };
 }
 
@@ -79,6 +99,10 @@ export interface AgentResult {
   ok: boolean;
   reason: "completed" | "provider_error" | "max_rounds" | "budget_reached";
   rounds: number;
+  // Total transient provider retries across the run (0 when the provider never
+  // failed transiently). Lets a consumer distinguish "exhausted retries"
+  // (retries > 0, then provider_error) from "non-retryable" (retries 0).
+  retries: number;
   // Bounded per-tool activity counts for the whole run. Each tool execution is
   // counted exactly once (no double-counted retries).
   stats: {
@@ -127,6 +151,8 @@ export async function runAgent(
   const toolFailures: Record<string, number> = {};
   const tokens = { prompt: 0, completion: 0, total: 0 };
   let hasUsage = false;
+  // Total transient provider retries observed across the run.
+  let retries = 0;
   // Running cost estimate (USD) across the run. Recomputed from cumulative
   // tokens each round; null in snapshots until the provider reports usage.
   let costUsd = 0;
@@ -152,6 +178,7 @@ export async function runAgent(
         ok: false,
         reason: "budget_reached",
         rounds: round,
+        retries,
         stats: statsSnapshot(),
         tokens: tokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
@@ -174,6 +201,15 @@ export async function runAgent(
           tokens.prompt += event.promptTokens;
           tokens.completion += event.completionTokens;
           tokens.total += event.totalTokens;
+        } else if (event.type === "retry") {
+          retries++;
+          sink.retry({
+            round,
+            attempt: event.attempt,
+            maxAttempts: event.maxAttempts,
+            reasonClass: event.reasonClass,
+            delayMs: event.delayMs,
+          });
         }
       }
     } catch (err: unknown) {
@@ -184,6 +220,7 @@ export async function runAgent(
         ok: false,
         reason: "provider_error",
         rounds: round,
+        retries,
         stats: statsSnapshot(),
         tokens: tokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
@@ -221,6 +258,7 @@ export async function runAgent(
         ok: true,
         reason: "completed",
         rounds: round + 1,
+        retries,
         stats: statsSnapshot(),
         tokens: tokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
@@ -264,6 +302,7 @@ export async function runAgent(
     ok: false,
     reason: "max_rounds",
     rounds: MAX_ROUNDS,
+    retries,
     stats: statsSnapshot(),
     tokens: tokensSnapshot(),
     estimatedCostUsd: costSnapshot(),
