@@ -20,7 +20,7 @@
 // collapsed to ~ so the decision can be logged or shared safely.
 
 import path from "node:path";
-import { redactSecrets, redactHomePath } from "./permission-impact.js";
+import { redactSecrets, redactHomePath, neutralizeSpoofing } from "./permission-impact.js";
 
 export const COMMAND_POLICY_SCHEMA = "oh-my-cli.command-policy" as const;
 export const COMMAND_POLICY_VERSION = 1 as const;
@@ -148,7 +148,7 @@ export function evaluateCommandPolicy(
   const addViolation = (rule: PolicyRuleId, detail: string) => {
     if (seen.has(rule)) return;
     seen.add(rule);
-    violations.push({ rule, detail: redactSecrets(detail).text });
+    violations.push({ rule, detail: neutralizeSpoofing(redactSecrets(detail).text).text });
   };
 
   for (const seg of splitSegments(command)) {
@@ -564,9 +564,12 @@ function redactPathToken(p: string): string {
 }
 
 function previewCommand(cmd: string): string {
-  const oneLine = cmd.replace(/\s+/g, " ").trim();
-  const { text } = redactSecrets(oneLine);
-  return text.length > MAX_PREVIEW ? `${text.slice(0, MAX_PREVIEW)}…` : text;
+  // Redact secrets first (on the raw command), then neutralize spoofing
+  // Unicode before the whitespace collapse so an invisible character such as
+  // U+FEFF (which \s would otherwise silently eat) becomes an observable marker.
+  const redacted = redactSecrets(cmd).text;
+  const oneLine = neutralizeSpoofing(redacted).text.replace(/\s+/g, " ").trim();
+  return oneLine.length > MAX_PREVIEW ? `${oneLine.slice(0, MAX_PREVIEW)}…` : oneLine;
 }
 
 // Human-readable rendering of a decision (used by the CLI diagnostic mode and

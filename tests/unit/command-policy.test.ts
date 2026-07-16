@@ -259,3 +259,49 @@ describe("command-policy: redaction and formatting", () => {
     expect(human).toContain("(none)");
   });
 });
+
+describe("command-policy: spoofing Unicode neutralization", () => {
+  // Built from code points at runtime so the source contains no literal
+  // invisible/bidi characters.
+  const RLO = String.fromCodePoint(0x202e); // right-to-left override
+  const ZWSP = String.fromCodePoint(0x200b); // zero-width space
+  const LQUOTE = String.fromCodePoint(0x201c); // left double quotation mark
+  const RQUOTE = String.fromCodePoint(0x201d); // right double quotation mark
+
+  it("neutralizes spoofing chars in the command preview", () => {
+    const d = deny("echo " + RLO + ZWSP + "hello");
+    expect(d.command).not.toContain(RLO);
+    expect(d.command).not.toContain(ZWSP);
+    expect(d.command).toContain("[U+202E]");
+    expect(d.command).toContain("[U+200B]");
+  });
+
+  it("neutralizes look-alike quotes that could disguise quoting", () => {
+    const d = deny("echo " + LQUOTE + "rm -rf /" + RQUOTE);
+    expect(d.command).not.toContain(LQUOTE);
+    expect(d.command).not.toContain(RQUOTE);
+    expect(d.command).toContain("[U+201C]");
+    expect(d.command).toContain("[U+201D]");
+  });
+
+  it("keeps the human decision and denial message free of raw spoofing chars", () => {
+    const d = deny("git push --force " + RLO + "origin");
+    expect(formatCommandPolicyDecision(d)).not.toContain(RLO);
+    expect(policyDenialMessage(d)).not.toContain(RLO);
+    expect(d.command).toContain("[U+202E]");
+  });
+
+  it("neutralizes spoofing chars in a credential-path violation detail", () => {
+    const d = deny("cat " + ZWSP + "~/.ssh/id_rsa");
+    const detail = d.violations.find((v) => v.rule === "credential_access")?.detail ?? "";
+    expect(detail).not.toContain(ZWSP);
+    expect(detail).toContain("[U+200B]");
+  });
+
+  it("does not change rule detection or secret redaction for ordinary commands", () => {
+    const d = deny("git push --force https://user:hunter2secret@github.com/x.git");
+    expect(d.violations.map((v) => v.rule)).toContain("destructive_git");
+    expect(d.command).toContain("[REDACTED]");
+    expect(d.command).not.toContain("hunter2secret");
+  });
+});

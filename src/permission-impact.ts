@@ -15,6 +15,7 @@ export interface PermissionImpact {
   commandPreview?: string;
   collapsed: string[];
   redactions: number;
+  neutralized: number;
 }
 
 const MAX_PAYLOAD = 200;
@@ -58,6 +59,62 @@ export function redactSecrets(input: string): { text: string; count: number } {
   return { text, count };
 }
 
+// Spoofing Unicode that can make a displayed approval preview visually differ
+// from what will actually run. Untrusted content (a file the agent read, a
+// repository, an Issue, a relayed message) can embed bidirectional
+// override/isolate controls, zero-width characters, or look-alike quote marks
+// to reorder or disguise the visible text — a "Trojan Source"-style attack on
+// the approval step. Each such character is replaced with a visible [U+XXXX]
+// marker (and counted) so a spoofing attempt is observable rather than silent;
+// ordinary visible ASCII/UTF-8 text is left untouched. This is the single
+// shared table used by both the permission-impact preview and the command
+// policy rendering.
+
+// Bidirectional override/isolate controls and marks (U+202A–U+202E,
+// U+2066–U+2069, plus the closely related LRM/RLM/ALM).
+const BIDI_CONTROLS = [
+  0x202a, 0x202b, 0x202c, 0x202d, 0x202e, // LRE RLE PDF LRO RLO
+  0x2066, 0x2067, 0x2068, 0x2069,         // LRI RLI FSI PDI
+  0x200e, 0x200f,                         // LRM RLM
+  0x061c,                                 // ALM (Arabic letter mark)
+];
+
+// Zero-width / invisible characters (U+200B–U+200D, U+2060, U+FEFF).
+const ZERO_WIDTH = [
+  0x200b, 0x200c, 0x200d, // ZWSP ZWNJ ZWJ
+  0x2060,                 // word joiner
+  0xfeff,                 // BOM / zero-width no-break space
+];
+
+// Look-alike quote characters that masquerade as ASCII ' " or `.
+const LOOKALIKE_QUOTES = [
+  0x2018, 0x2019, 0x201a, 0x201b, // single curly quotes
+  0x201c, 0x201d, 0x201e, 0x201f, // double curly quotes
+  0x2032, 0x2033, 0x2035, 0x2036, // primes / reversed primes
+  0xff02, 0xff07,                 // fullwidth " and '
+];
+
+const SPOOFING_CODEPOINTS = new Set<number>([
+  ...BIDI_CONTROLS,
+  ...ZERO_WIDTH,
+  ...LOOKALIKE_QUOTES,
+]);
+
+export function neutralizeSpoofing(input: string): { text: string; count: number } {
+  let count = 0;
+  let text = "";
+  for (const ch of input) {
+    const cp = ch.codePointAt(0)!;
+    if (SPOOFING_CODEPOINTS.has(cp)) {
+      count++;
+      text += "[U+" + cp.toString(16).toUpperCase().padStart(4, "0") + "]";
+    } else {
+      text += ch;
+    }
+  }
+  return { text, count };
+}
+
 export function analyzeImpact(tool: string, args: Record<string, unknown>): PermissionImpact {
   const impact: PermissionImpact = {
     tool,
@@ -66,20 +123,27 @@ export function analyzeImpact(tool: string, args: Record<string, unknown>): Perm
     externalState: [],
     collapsed: [],
     redactions: 0,
+    neutralized: 0,
   };
 
   switch (tool) {
     case "read": {
-      impact.filesystem = { access: "read", paths: pathList(args.path) };
+      const pl = pathList(args.path);
+      impact.filesystem = { access: "read", paths: pl.paths };
+      impact.neutralized += pl.neutralized;
       break;
     }
     case "write": {
-      impact.filesystem = { access: "write", paths: pathList(args.path) };
+      const pl = pathList(args.path);
+      impact.filesystem = { access: "write", paths: pl.paths };
+      impact.neutralized += pl.neutralized;
       if (isOversized(args.content)) impact.collapsed.push("content");
       break;
     }
     case "edit": {
-      impact.filesystem = { access: "write", paths: pathList(args.path) };
+      const pl = pathList(args.path);
+      impact.filesystem = { access: "write", paths: pl.paths };
+      impact.neutralized += pl.neutralized;
       if (isOversized(args.oldText)) impact.collapsed.push("oldText");
       if (isOversized(args.newText)) impact.collapsed.push("newText");
       break;
@@ -91,6 +155,9 @@ export function analyzeImpact(tool: string, args: Record<string, unknown>): Perm
       cmd = red.text;
       impact.redactions += red.count;
       if (detectsNetwork(cmd)) impact.network = true;
+      const neutral = neutralizeSpoofing(cmd);
+      cmd = neutral.text;
+      impact.neutralized += neutral.count;
       const collapsed = collapseCommand(cmd);
       impact.commandPreview = collapsed.text;
       if (collapsed.collapsed) impact.collapsed.push("command");
@@ -135,6 +202,9 @@ export function formatImpact(impact: PermissionImpact): string {
   if (impact.redactions > 0) {
     lines.push(`  Redacted ${impact.redactions} secret-like value(s).`);
   }
+  if (impact.neutralized > 0) {
+    lines.push(`  Neutralized ${impact.neutralized} spoofing Unicode character(s).`);
+  }
   if (!impact.filesystem && !impact.process && !impact.network && impact.externalState.length === 0) {
     lines.push(`  No filesystem, network, or process impact detected.`);
   }
@@ -150,9 +220,11 @@ function isOversized(v: unknown): boolean {
   return typeof v === "string" && v.length > MAX_PAYLOAD;
 }
 
-function pathList(v: unknown): string[] {
+function pathList(v: unknown): { paths: string[]; neutralized: number } {
   const p = strArg(v);
-  return p ? [redactHomePath(p)] : [];
+  if (!p) return { paths: [], neutralized: 0 };
+  const neutral = neutralizeSpoofing(redactHomePath(p));
+  return { paths: [neutral.text], neutralized: neutral.count };
 }
 
 function collapseCommand(cmd: string): { text: string; collapsed: boolean } {

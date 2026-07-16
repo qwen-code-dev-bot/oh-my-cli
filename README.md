@@ -113,6 +113,21 @@ Color is enabled by default in the interactive REPL and command palette. Pass
 
 Read operations never require approval.
 
+### Approval preview is spoof-resistant
+
+Before a mutating tool is approved, the CLI shows a redacted preview of what it
+will touch — the shell command and the file paths (`src/permission-impact.ts`) —
+and the command-policy decision/denial renders the same way
+(`src/command-policy.ts`). Both surfaces neutralize spoofing Unicode before
+display: bidirectional override/isolate controls (e.g. U+202A–U+202E and
+U+2066–U+2069), zero-width characters (e.g. U+200B–U+200D, U+FEFF, and U+2060),
+and look-alike quote marks. Each such character is replaced with a visible
+`[U+XXXX]` marker and counted, so untrusted content (a file the agent read, a
+repository, an Issue, or a relayed message) cannot visually reorder or disguise
+the preview into a "Trojan Source"-style trap. Secret redaction, home-path
+collapsing, whitespace collapsing, and size truncation are unchanged, and
+ordinary commands render identically aside from any marker.
+
 ### Headless JSON protocol
 
 For CI and automation, pass `--output json` with `-p` to emit a versioned,
