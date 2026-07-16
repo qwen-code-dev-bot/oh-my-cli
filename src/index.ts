@@ -25,6 +25,17 @@ import {
 } from "./run-recovery.js";
 import type { RecoveryContext } from "./run-recovery.js";
 import {
+  buildEvidenceBundle,
+  writeEvidenceBundle,
+  readEvidenceBundle,
+  readCommandOutcomes,
+  verifyEvidenceBundle,
+  formatEvidenceExport,
+  formatEvidenceVerification,
+  EvidenceArchiveError,
+} from "./evidence-archive.js";
+import type { EvidenceInput } from "./evidence-archive.js";
+import {
   createWorktreeLease,
   cleanWorktreeLease,
   formatWorktreeLeaseResult,
@@ -77,6 +88,10 @@ program
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
   .option("--task-identity <id>", "Stable task identity (used by --recover and worktree leases)")
   .option("--evidence <file>", "Current evidence file (JSON stepId -> digest) for --recover")
+  .option("--export-evidence <file>", "Export a portable, signed evidence bundle to <file> and exit")
+  .option("--verify-evidence <file>", "Verify a portable evidence bundle offline and exit")
+  .option("--summary-file <file>", "Run-summary file to include in --export-evidence")
+  .option("--outcomes-file <file>", "Command-outcomes file (JSON array) to include in --export-evidence")
   .option("--create-worktree", "Create a leased git worktree for a mutating delegated agent and exit")
   .option("--clean-worktree", "Clean a leased git worktree after verified completion and exit")
   .option("--agent-identity <id>", "Stable agent identity for a leased worktree (with --create-worktree/--clean-worktree)")
@@ -243,6 +258,75 @@ program
           process.stdout.write(formatRecoveryPlan(plan) + "\n");
         }
         process.exit(plan.decision === "resume" ? 0 : 1);
+      }
+
+      // Evidence-archive export mode: compose a portable, signed evidence bundle
+      // from already-redacted run artifacts, offline (no provider config needed).
+      // Exits 0 on success, 2 on a usage/input error.
+      if (opts.exportEvidence !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        if (!opts.summaryFile && !opts.checkpoint && !opts.evidence && !opts.outcomesFile) {
+          process.stderr.write(
+            "Error: --export-evidence needs at least one of --summary-file, --checkpoint, --evidence, or --outcomes-file\n",
+          );
+          process.exit(2);
+        }
+        const input: EvidenceInput = {};
+        try {
+          if (opts.summaryFile) input.summary = readRunSummaryFile(String(opts.summaryFile), "summary");
+          if (opts.checkpoint) input.checkpoint = readRecoveryCheckpoint(String(opts.checkpoint));
+          if (opts.evidence) input.contentDigests = readEvidenceFile(String(opts.evidence));
+          if (opts.outcomesFile) input.outcomes = readCommandOutcomes(String(opts.outcomesFile));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (opts.taskIdentity) input.source = { task: String(opts.taskIdentity) };
+        try {
+          const bundle = buildEvidenceBundle(input);
+          writeEvidenceBundle(String(opts.exportEvidence), bundle);
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(bundle) + "\n");
+          } else {
+            process.stdout.write(formatEvidenceExport(bundle) + "\n");
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        process.exit(0);
+      }
+
+      // Evidence-archive verify mode: check a portable evidence bundle's manifest
+      // signature and per-entry digests offline (no provider config needed). Exits
+      // 0 when the bundle is intact, 1 when it is tampered, 2 on a usage/input error.
+      if (opts.verifyEvidence !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let bundle: ReturnType<typeof readEvidenceBundle>;
+        try {
+          bundle = readEvidenceBundle(String(opts.verifyEvidence));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        const result = verifyEvidenceBundle(bundle);
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(result) + "\n");
+        } else {
+          process.stdout.write(formatEvidenceVerification(result) + "\n");
+        }
+        process.exit(result.ok ? 0 : 1);
       }
 
       // Leased-worktree mode: create or clean one isolated git worktree per

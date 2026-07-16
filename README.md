@@ -89,6 +89,10 @@ without touching other sessions.
 | `--checkpoint <file>` | Recovery checkpoint file for `--recover` |
 | `--task-identity <id>` | Stable task identity (used by `--recover` and worktree leases) |
 | `--evidence <file>` | Current evidence file (JSON `stepId -> digest`) for `--recover` |
+| `--export-evidence <file>` | Export a portable, signed evidence bundle to `<file>` and exit |
+| `--verify-evidence <file>` | Verify a portable evidence bundle offline and exit |
+| `--summary-file <file>` | Run-summary file to include in `--export-evidence` |
+| `--outcomes-file <file>` | Command-outcomes file (JSON array) to include in `--export-evidence` |
 | `--create-worktree` | Create a leased git worktree for a mutating delegated agent and exit |
 | `--clean-worktree` | Clean a leased git worktree after verified completion and exit |
 | `--agent-identity <id>` | Stable agent identity for a leased worktree (with `--create-worktree`/`--clean-worktree`) |
@@ -382,6 +386,59 @@ The exit code is a documented contract:
 - `1` — denied (one or more violations).
 - `2` — a usage error (invalid `--provenance` or `--output`).
 
+### Evidence archive
+
+Run summaries and recovery checkpoints are otherwise machine-local, which makes
+independent audit and regression reproduction hard. `--export-evidence` bundles
+the durable, already-redacted evidence of a run — the versioned run summary,
+recovery checkpoint metadata, command outcomes, and content digests — into one
+portable, deterministic JSON archive with a signed manifest. `--verify-evidence`
+checks that archive offline.
+
+The bundle carries only metadata and digests — **never prompts, raw tool
+payloads, credentials, or absolute host paths** (free-form values are
+secret-redacted and the home directory is collapsed to `~`). It is built for
+three guarantees:
+
+- **Privacy** — no sensitive content reaches the archive.
+- **Determinism** — identical normalized evidence yields byte-identical bytes
+  (sorted keys, entries ordered by name, no wall-clock timestamps).
+- **Integrity** — each entry carries a sha256 of its content and the manifest
+  carries a sha256 signature, so verification fails closed on any missing,
+  extra, reordered, or modified entry. ("Signed" is a deterministic integrity
+  digest — there is deliberately no key management in this slice.)
+
+```bash
+# Export one portable bundle from a run's artifacts
+oh-my-cli --export-evidence evidence-bundle.json \
+  --summary-file summary.json \
+  --checkpoint checkpoint.json \
+  --outcomes-file outcomes.json \
+  --task-identity deploy-task
+
+# Verify a bundle offline (human or machine-readable)
+oh-my-cli --verify-evidence evidence-bundle.json
+oh-my-cli --verify-evidence evidence-bundle.json --output json
+```
+
+```text
+Evidence archive (oh-my-cli.evidence-archive v1)
+────────────────────────────────────────
+task:      deploy-task
+outcome:   success
+repo head: 3a61045b781f27e95b496ede6dfd23d0b63a6b4b
+entries:   3
+  - checkpoint (checkpoint-metadata) 2f0cf65114dd…
+  - command-outcomes (command-outcomes) e8638708332b…
+  - run-summary (run-summary) e6b89a9f130a…
+signature: 3768d82e18366cff751258b98761ec87506b011c34e72e0923e645819e32bcbb
+```
+
+The exit code is a documented contract:
+
+- `--export-evidence`: `0` on success, `2` on a usage/input error (no inputs, or an unreadable/malformed artifact).
+- `--verify-evidence`: `0` when the bundle is intact, `1` when it is tampered, `2` on a usage error (unreadable/malformed bundle).
+
 ### Readiness doctor
 
 After installing, run a read-only health check to catch runtime, resolution,
@@ -487,6 +544,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`)
 - `src/run-scorecard.ts` — deterministic, privacy-safe comparison of two summaries (`--baseline`/`--candidate`)
 - `src/run-recovery.ts` — bounded run recovery from a durable checkpoint (`--recover`)
+- `src/evidence-archive.ts` — portable, deterministic, signed evidence bundle export/verify (`--export-evidence`/`--verify-evidence`)
 - `src/repo-readiness.ts` — read-only repository-readiness inspection (`--readiness`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)
