@@ -37,6 +37,10 @@ export interface RunSummary {
   reason: string;
   elapsedMs: number;
   rounds: number;
+  // Total transient provider retries across the run (0 when the provider never
+  // failed transiently). Distinguishes an exhausted-retry failure from a
+  // non-retryable one.
+  retries: number;
   toolCalls: RunSummaryToolStats;
   toolFailures: RunSummaryToolStats;
   // Token totals across the whole run, or null when the provider did not report
@@ -59,6 +63,8 @@ export interface BuildRunSummaryInput {
   reason: string;
   elapsedMs: number;
   rounds: number;
+  // Total transient provider retries; defaults to 0 when omitted.
+  retries?: number;
   toolCalls: Record<string, number>;
   toolFailures: Record<string, number>;
   tokens: RunSummaryTokens | null;
@@ -104,6 +110,7 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummary {
     reason: input.reason,
     elapsedMs: Math.max(0, Math.round(input.elapsedMs)),
     rounds: Math.max(0, Math.floor(input.rounds)),
+    retries: Math.max(0, Math.floor(input.retries ?? 0)),
     toolCalls: toBoundedStats(input.toolCalls),
     toolFailures: toBoundedStats(input.toolFailures),
     tokens: input.tokens
@@ -146,6 +153,7 @@ export function formatRunSummary(summary: RunSummary): string {
   lines.push(`  reason:    ${summary.reason}`);
   lines.push(`  elapsed:   ${formatElapsed(summary.elapsedMs)}`);
   lines.push(`  rounds:    ${summary.rounds}`);
+  lines.push(`  retries:   ${summary.retries}`);
   lines.push(`  tool calls: ${summary.toolCalls.total}${formatNames(summary.toolCalls.byName)}`);
   lines.push(`  tool failures: ${summary.toolFailures.total}${formatNames(summary.toolFailures.byName)}`);
   lines.push(

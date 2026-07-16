@@ -151,7 +151,8 @@ Each line is a self-describing record that parses independently:
   (schema version), a monotonic `seq`, an ISO `ts`, and a `type`.
 - **Events** — `start`, `assistant` (one per turn), `tool_start`, `tool_result`
   (`ok` reflects success), `usage` (cumulative tokens and cost estimate per
-  round, with budget state), `error` (`stage` is `provider` or `internal`), and a
+  round, with budget state), `retry` (a transient provider failure is retried
+  with bounded backoff), `error` (`stage` is `provider` or `internal`), and a
   terminal `complete`.
 - **Exit semantics** — the `complete` record's `exitCode` always equals the
   process exit code (`0` success, `1` failure), so wrappers can compare the
@@ -164,9 +165,9 @@ Each line is a self-describing record that parses independently:
 For unattended runs, pass `--summary` to append a privacy-safe execution summary
 after the run. It is opt-in: interactive sessions and plain `-p` runs are
 unchanged unless you request it. The summary is **metadata only** — outcome,
-exit code, classified reason, elapsed time, rounds, bounded tool-call/failure
-counts, token totals, and a cost estimate — and never carries prompt, tool, or
-file content. Secret-shaped strings are redacted and the host home directory is
+exit code, classified reason, elapsed time, rounds, provider retries, bounded
+tool-call/failure counts, token totals, and a cost estimate — and never carries
+prompt, tool, or file content. Secret-shaped strings are redacted and the host home directory is
 collapsed to `~`, so the session log path stays private.
 
 In text mode the summary prints a short block after the run:
@@ -180,6 +181,7 @@ oh-my-cli -p "Run the build" --summary
 # reason:    completed
 # elapsed:   2.0s
 # rounds:    1
+# retries:   0
 # tool calls: 1 (shell×1)
 # tokens:    prompt 5, completion 5, total 10
 # est. cost: $0.000090 (estimate, not billing)
@@ -196,7 +198,7 @@ oh-my-cli -p "Run the build" --output json --summary \
 ```
 
 ```json
-{"protocol":"oh-my-cli.headless","v":1,"seq":3,"ts":"…","type":"summary","summary":{"schema":"oh-my-cli.summary","v":1,"outcome":"success","exitCode":0,"reason":"completed","elapsedMs":2000,"rounds":1,"toolCalls":{"total":1,"byName":{"shell":1}},"toolFailures":{"total":0,"byName":{}},"tokens":{"prompt":5,"completion":5,"total":10},"estimatedCostUsd":0.00009,"evidence":{"sessionId":"01J…","sessionPath":"~/.oh-my-cli/sessions/01J….jsonl"}}}
+{"protocol":"oh-my-cli.headless","v":1,"seq":3,"ts":"…","type":"summary","summary":{"schema":"oh-my-cli.summary","v":1,"outcome":"success","exitCode":0,"reason":"completed","elapsedMs":2000,"rounds":1,"retries":0,"toolCalls":{"total":1,"byName":{"shell":1}},"toolFailures":{"total":0,"byName":{}},"tokens":{"prompt":5,"completion":5,"total":10},"estimatedCostUsd":0.00009,"evidence":{"sessionId":"01J…","sessionPath":"~/.oh-my-cli/sessions/01J….jsonl"}}}
 ```
 
 The `outcome` is `success` or `failure`; on failure the `reason` classifies the
@@ -230,6 +232,28 @@ fast before any provider call.
 # Cap a run at half a cent; it stops before spending more
 oh-my-cli -p "Refactor the parser" --budget 0.005 --output json --summary
 ```
+
+### Provider transient-error retry
+
+Transient provider failures — HTTP `429`, `500`/`502`/`503`/`504`, and retryable
+network errors (`ECONNRESET`, `ETIMEDOUT`, …) — are retried automatically with
+bounded exponential backoff, so a momentary blip doesn't fail an otherwise
+healthy run. The policy is **bounded** for unattended use: at most 3 attempts,
+each wait capped at 2 seconds, so the worst-case added latency is small and can
+never hang. A server `Retry-After` header is honored (clamped to the per-attempt
+cap). Non-retryable failures (auth, invalid request, unsupported model) surface
+immediately without a retry.
+
+A retry happens only **before any output for that attempt is produced**, so a
+mid-stream failure is never silently restarted (which would duplicate partial
+assistant text). Each retry is observable:
+
+- In `--output json` mode a `retry` event carries the upcoming `attempt`,
+  `maxAttempts`, a `reasonClass` (`rate_limited`, `server_error`, or
+  `network_error`), and the scheduled `delayMs`.
+- The run summary reports the run's total `retries`, so a consumer can
+  distinguish an exhausted-retry failure (`retries > 0`, then `provider_error`)
+  from a non-retryable one (`retries: 0`).
 
 ### Run scorecard
 
@@ -575,7 +599,7 @@ supported platforms, artifact verification, and rollback evidence.
 ## Architecture
 
 - `src/config.ts` — environment variable validation (zod)
-- `src/provider.ts` — OpenAI-compatible streaming client with text + tool-call aggregation
+- `src/provider.ts` — OpenAI-compatible streaming client with text + tool-call aggregation and bounded transient-error retry
 - `src/agent.ts` — agent loop with 30-round hard cap and spend-budget gate
 - `src/cost.ts` — bundled model price table, token→USD cost estimate, and budget parsing (`--budget`)
 - `src/tools.ts` — tool definitions (read, write, edit, shell)

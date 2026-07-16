@@ -24,7 +24,108 @@ export interface StreamedUsage {
   totalTokens: number;
 }
 
-export type StreamEvent = StreamedText | StreamedToolCall | StreamedUsage;
+// A transient provider failure is about to be retried. Metadata only — which
+// attempt, the transient reason class, and the scheduled wait — so a consumer
+// can observe resilience without ever seeing error text, request bodies, or
+// secrets.
+export type TransientReasonClass = "rate_limited" | "server_error" | "network_error";
+
+export interface StreamedRetry {
+  type: "retry";
+  // The attempt about to run (2-based; attempt 1 is the initial try).
+  attempt: number;
+  maxAttempts: number;
+  reasonClass: TransientReasonClass;
+  delayMs: number;
+}
+
+export type StreamEvent = StreamedText | StreamedToolCall | StreamedUsage | StreamedRetry;
+
+// Bounded retry policy. Fixed so an unattended run can never hang: at most
+// RETRY_MAX_ATTEMPTS total tries, each wait capped at RETRY_MAX_DELAY_MS, so the
+// worst-case cumulative wait is bounded by their product.
+export const RETRY_MAX_ATTEMPTS = 3;
+export const RETRY_BASE_DELAY_MS = 200;
+export const RETRY_MAX_DELAY_MS = 2000;
+
+// Network error codes treated as transient, mirroring the preflight vocabulary.
+const TRANSIENT_NETWORK_CODES = new Set([
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+]);
+
+export interface TransientClassification {
+  reasonClass: TransientReasonClass;
+  retryAfterMs: number | null;
+}
+
+// Classify a provider error as transient (retryable) or not. Returns null for
+// non-retryable failures (auth, invalid request, unsupported model, …), which
+// must surface immediately.
+export function classifyTransient(err: unknown): TransientClassification | null {
+  const e = err as {
+    status?: number;
+    code?: string;
+    cause?: { code?: string };
+    // May be a plain record (tests) or a fetch Headers object (SDK errors).
+    headers?: unknown;
+  };
+  const status = typeof e.status === "number" ? e.status : undefined;
+  if (status === 429) {
+    return { reasonClass: "rate_limited", retryAfterMs: parseRetryAfterMs(e.headers) };
+  }
+  if (status !== undefined && (status === 500 || status === 502 || status === 503 || status === 504)) {
+    return { reasonClass: "server_error", retryAfterMs: parseRetryAfterMs(e.headers) };
+  }
+  const code = e.code ?? e.cause?.code;
+  if (code && TRANSIENT_NETWORK_CODES.has(code)) {
+    return { reasonClass: "network_error", retryAfterMs: null };
+  }
+  return null;
+}
+
+// Parse a Retry-After header (delta-seconds) into milliseconds, clamped to the
+// per-attempt maximum. HTTP-date forms are ignored (treated as absent). Accepts
+// either a plain record (tests) or a fetch Headers object (SDK errors).
+function parseRetryAfterMs(headers: unknown): number | null {
+  if (!headers || typeof headers !== "object") return null;
+  let raw: string | null | undefined;
+  const get = (headers as { get?: unknown }).get;
+  if (typeof get === "function") {
+    raw = (get as (name: string) => string | null).call(headers, "retry-after");
+  } else {
+    const h = headers as Record<string, string | undefined>;
+    raw = h["retry-after"] ?? h["Retry-After"];
+  }
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+  return Math.min(Math.round(seconds * 1000), RETRY_MAX_DELAY_MS);
+}
+
+// Exponential backoff with bounded (equal) jitter, honoring a clamped
+// Retry-After when present. `rng` is injectable so tests are deterministic.
+export function backoffDelayMs(
+  attempt: number,
+  retryAfterMs: number | null,
+  rng: () => number = Math.random,
+): number {
+  if (retryAfterMs != null && retryAfterMs >= 0) {
+    return Math.min(retryAfterMs, RETRY_MAX_DELAY_MS);
+  }
+  const exp = RETRY_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1);
+  const capped = Math.min(exp, RETRY_MAX_DELAY_MS);
+  const jittered = capped / 2 + (capped / 2) * rng();
+  return Math.max(1, Math.round(jittered));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export interface ProviderOptions {
   tools?: Array<{
@@ -33,7 +134,46 @@ export interface ProviderOptions {
   }>;
 }
 
+// Stream a provider call, retrying transient failures (429, 5xx, retryable
+// network errors) that occur BEFORE any output is produced, with bounded
+// exponential backoff. A `retry` event is emitted before each wait so consumers
+// can observe the resilience. A failure after output has started is never
+// retried (it would duplicate partial content); it propagates to the caller.
 export async function* streamChat(
+  config: Config,
+  messages: SessionMessage[],
+  options?: ProviderOptions,
+): AsyncGenerator<StreamEvent> {
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    let producedOutput = false;
+    try {
+      for await (const event of streamOnce(config, messages, options)) {
+        producedOutput = true;
+        yield event;
+      }
+      return;
+    } catch (err) {
+      const transient = classifyTransient(err);
+      if (transient && !producedOutput && attempt < RETRY_MAX_ATTEMPTS) {
+        const delayMs = backoffDelayMs(attempt, transient.retryAfterMs);
+        yield {
+          type: "retry",
+          attempt: attempt + 1,
+          maxAttempts: RETRY_MAX_ATTEMPTS,
+          reasonClass: transient.reasonClass,
+          delayMs,
+        };
+        await sleep(delayMs);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+async function* streamOnce(
   config: Config,
   messages: SessionMessage[],
   options?: ProviderOptions,
@@ -41,6 +181,9 @@ export async function* streamChat(
   const client = new OpenAI({
     apiKey: config.apiKey,
     baseURL: config.baseUrl,
+    // We own retry policy here so it is explicit and observable; the SDK's own
+    // (invisible) retries are disabled to avoid double-backoff.
+    maxRetries: 0,
   });
 
   const params: Record<string, unknown> = {
