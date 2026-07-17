@@ -865,11 +865,27 @@ and `blockers` fields carry the handoff evidence.
 | Tool | Category | Description |
 |---|---|---|
 | `read` | read | Read a workspace-relative file with optional line offset/limit |
+| `list` | read | List the immediate entries of a workspace directory (types, deterministic order) |
+| `glob` | read | Recursively match workspace-relative paths against a glob pattern |
+| `grep` | read | Search file contents for a regular expression, returning `path:line` matches |
 | `write` | mutate-file | Create or replace a workspace-relative UTF-8 file |
 | `edit` | mutate-file | Replace exactly one occurrence of text in a file |
 | `shell` | mutate-shell | Execute a command via `/bin/bash` (30s default timeout, 120s max, 1 MiB output cap) |
 
 File operations are confined to the workspace directory. Symlink escapes are detected and rejected.
+
+The `list`, `glob`, and `grep` tools are read-only and therefore never require
+approval, so the agent can explore the repository in any approval mode. They
+stay strictly inside the workspace (every base path is confined with symlink
+escape detection), never follow symbolic links, and apply repository ignore
+rules (the root `.gitignore` plus a built-in set of generated directories such
+as `node_modules` and `dist`); `glob`/`grep` accept an `ignore:false` option to
+search ignored trees and `grep` accepts an `include` glob to narrow matches.
+Every collection is bounded by depth, file count, match count, per-file size,
+and a wall-clock deadline; binary, oversized, and over-long-line inputs are
+skipped or truncated with explicit metadata rather than flooding context, and
+results are deterministically ordered. Because no subprocess is ever spawned,
+cancellation and time limits cannot leave background processes behind.
 
 A long-running or silent shell command (a build, install, or test that emits no
 output) need not look stuck: after ~5s the CLI prints a periodic
@@ -904,7 +920,8 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/provider.ts` — OpenAI-compatible streaming client with text + tool-call aggregation and bounded transient-error retry
 - `src/agent.ts` — agent loop with 30-round hard cap and spend-budget gate
 - `src/cost.ts` — bundled model price table, token→USD cost estimate, and budget parsing (`--budget`)
-- `src/tools.ts` — tool definitions (read, write, edit, shell)
+- `src/tools.ts` — tool definitions (read, list, glob, grep, write, edit, shell)
+- `src/discovery.ts` — bounded, read-only, symlink-safe discovery primitives (list, glob, grep) backing the same-named tools
 - `src/workspace.ts` — path confinement with symlink escape detection
 - `src/approval.ts` — approval mode logic
 - `src/command-policy.ts` — deterministic, offline shell-command classification and denial (`--command-policy`)

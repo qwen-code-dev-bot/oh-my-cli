@@ -44,6 +44,44 @@ describe("Tools", () => {
     });
   });
 
+  describe("discovery tools (list/glob/grep)", () => {
+    it("registers list, glob, and grep as read-category tools (no approval)", () => {
+      for (const name of ["list", "glob", "grep"]) {
+        const tool = toolMap.get(name);
+        expect(tool, `${name} should be registered`).toBeDefined();
+        expect(tool!.category).toBe("read");
+      }
+    });
+
+    it("list returns formatted immediate entries", async () => {
+      fs.writeFileSync(path.join(tmpDir, "a.txt"), "x");
+      fs.mkdirSync(path.join(tmpDir, "sub"));
+      const result = await toolMap.get("list")!.execute({}, workspace);
+      expect(result.isError).toBeUndefined();
+      expect(result.content).toContain("a.txt");
+      expect(result.content).toContain("sub");
+    });
+
+    it("glob returns matching paths", async () => {
+      fs.mkdirSync(path.join(tmpDir, "src"));
+      fs.writeFileSync(path.join(tmpDir, "src", "a.ts"), "x");
+      const result = await toolMap.get("glob")!.execute({ pattern: "**/*.ts" }, workspace);
+      expect(result.content).toContain("src/a.ts");
+    });
+
+    it("grep returns path:line matches", async () => {
+      fs.writeFileSync(path.join(tmpDir, "a.txt"), "first\nneedle\nthird");
+      const result = await toolMap.get("grep")!.execute({ pattern: "needle" }, workspace);
+      expect(result.content).toContain("a.txt:2: needle");
+    });
+
+    it("rejects path traversal escape", async () => {
+      await expect(
+        toolMap.get("list")!.execute({ path: "../../etc" }, workspace),
+      ).rejects.toThrow(/escape/i);
+    });
+  });
+
   describe("write", () => {
     it("creates a file", async () => {
       const result = await toolMap.get("write")!.execute({ path: "new.txt", content: "hello" }, workspace);
