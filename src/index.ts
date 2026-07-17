@@ -33,6 +33,7 @@ import {
   formatDeliveryBrief,
   parseCiResult,
 } from "./delivery-brief.js";
+import { collectProviderContract, formatProviderContract } from "./provider-contract.js";
 import {
   readRecoveryCheckpoint,
   readEvidenceFile,
@@ -134,6 +135,8 @@ program
   .option("--ci-handoff", "Compose verify and review into a bounded, redacted, head-bound CI handoff brief and exit")
   .option("--delivery-brief", "Compose plan, verify, review, and CI handoff into a bounded, redacted, head-bound completion verdict and exit")
   .option("--ci-result <state>", "CI outcome for --delivery-brief: pass, fail, or pending (default pending)")
+  .option("--provider-contract", "Inspect the resolved provider extension contract from settings (read-only, redacted) and exit")
+  .option("--provider <id>", "Provider id to select for --provider-contract (defaults to settings.providers.default or the sole entry)")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
   .option("--task-identity <id>", "Stable task identity (used by --recover and worktree leases)")
@@ -438,6 +441,39 @@ program
           process.stdout.write(formatDeliveryBrief(report) + "\n");
         }
         process.exit(report.verdict === "ship" ? 0 : 1);
+      }
+
+      // Provider-contract mode: inspect the resolved provider extension contract
+      // declared in the user settings file (versioned, redacted, read-only).
+      // Proves the provider extension contract end to end — declare providers in
+      // settings, negotiate the contract version, select one, and resolve its
+      // non-secret configuration — without changing core code. Exit 0 on success,
+      // 2 on a contract/usage error (unknown version, malformed section, unknown
+      // provider, inlined credential, or invalid output format).
+      if (opts.providerContract) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let report;
+        try {
+          report = collectProviderContract({
+            settingsPath: resolveSettingsPath(opts.settings),
+            env: process.env,
+            providerId: opts.provider,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatProviderContract(report) + "\n");
+        }
+        process.exit(0);
       }
 
       // Recovery mode: decide whether an interrupted task can safely resume from

@@ -165,6 +165,8 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--ci-handoff` | Compose verify and review into a bounded, redacted, head-bound CI handoff brief and exit |
 | `--delivery-brief` | Compose plan, verify, review, and CI handoff into a bounded, redacted, head-bound completion verdict and exit |
 | `--ci-result <state>` | CI outcome for `--delivery-brief`: `pass`, `fail`, or `pending` (default `pending`) |
+| `--provider-contract` | Inspect the resolved provider extension contract from settings (read-only, redacted) and exit |
+| `--provider <id>` | Provider id to select for `--provider-contract` (defaults to `settings.providers.default` or the sole entry) |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -1005,6 +1007,67 @@ Add `--output json` for a versioned record (`schema` `oh-my-cli.delivery-brief`)
 whose `head` binds the verdict to the repo head and whose `signals`, `blockers`,
 and `holds` fields carry the completion evidence.
 
+### Provider contract
+
+The CLI's model configuration is a flat set of env-derived settings. To adapt the
+CLI to a different provider without forking the core, declare one or more
+providers as a **versioned extension contract** in the same unified settings file
+(`~/.oh-my-cli/settings.json`, or `--settings <path>`). `--provider-contract`
+negotiates the contract version, selects one provider, and resolves its
+non-secret configuration — read-only, redacted, and without changing core code.
+
+```json
+{
+  "providers": {
+    "contractVersion": 1,
+    "default": "alt",
+    "entries": [
+      {
+        "id": "alt",
+        "baseUrl": "https://alt.example/v1",
+        "model": "alt-model",
+        "models": ["alt-small", "alt-large"],
+        "apiKeyEnv": "ALT_KEY",
+        "capabilities": { "vision": true }
+      }
+    ]
+  }
+}
+```
+
+```bash
+oh-my-cli --provider-contract
+# select one explicitly when several are declared
+oh-my-cli --provider-contract --provider alt --output json
+```
+
+The contract is untrusted input. The credential is supplied by an
+environment-variable name (`apiKeyEnv`, or `OPENAI_API_KEY` when absent) and its
+value is never printed; a raw credential field (e.g. `apiKey`) inside an entry is
+rejected rather than ignored; an unsupported `contractVersion` fails closed
+instead of being silently coerced. Selection is deterministic: an explicit
+`--provider` id wins, then `settings.providers.default`, then the sole entry;
+ambiguity or an unknown id fails with a clear reason. The resolved endpoint is
+reduced to its host and the home path is collapsed to `~`. Credential
+availability is reported (`credentialAvailable`) but not gated, so the contract
+stays inspectable even when the credential is not currently exported. Exit code:
+`0` on success, `2` on a contract/usage error.
+
+```text
+Provider:     alt
+Contract:     oh-my-cli.provider-contract v1 (settings contract version 1)
+Endpoint:     alt.example (settings)
+Model:        alt-model
+Catalog:      alt-small, alt-large
+Credential:   ALT_KEY
+Capabilities: vision
+Settings:     ~/.oh-my-cli/settings.json
+```
+
+Add `--output json` for a versioned record (`schema` `oh-my-cli.provider-contract`)
+carrying the negotiated `contractVersion`, the selected `providerId`, the redacted
+`endpoint`, `modelCatalog`, `capabilities`, and credential provenance.
+
 ## Built-in tools
 
 | Tool | Category | Description |
@@ -1091,6 +1154,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/change-review.ts` — bounded, redacted, head-bound review brief for the current change against a base ref (`--review-change`)
 - `src/ci-handoff.ts` — bounded, redacted, head-bound CI handoff brief composing verify + review (`--ci-handoff`)
 - `src/delivery-brief.ts` — bounded, redacted, head-bound completion verdict composing plan + verify + review + handoff with a CI result (`--delivery-brief`)
+- `src/provider-contract.ts` — versioned, redacted provider extension contract: declare providers in settings, negotiate the contract version, select one, and resolve its non-secret config (`--provider-contract`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests
