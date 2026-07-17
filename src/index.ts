@@ -29,6 +29,11 @@ import { verifyTask, formatVerifyReport } from "./task-verify.js";
 import { reviewChange, formatChangeReviewReport } from "./change-review.js";
 import { collectCiHandoff, formatCiHandoffReport } from "./ci-handoff.js";
 import {
+  collectDeliveryBrief,
+  formatDeliveryBrief,
+  parseCiResult,
+} from "./delivery-brief.js";
+import {
   readRecoveryCheckpoint,
   readEvidenceFile,
   currentRepoHead,
@@ -125,8 +130,10 @@ program
   .option("--plan <task>", "Produce a bounded, deterministic execution plan for a task (read-only) and exit")
   .option("--verify-task", "Run the repository's canonical verify commands and report a bounded, head-bound pass/fail verdict and exit")
   .option("--review-change", "Review the current change against a base ref and emit a bounded, redacted, head-bound review brief and exit")
-  .option("--base <ref>", "Base ref for --review-change and --ci-handoff (default origin/main, then HEAD)")
+  .option("--base <ref>", "Base ref for --review-change, --ci-handoff, and --delivery-brief (default origin/main, then HEAD)")
   .option("--ci-handoff", "Compose verify and review into a bounded, redacted, head-bound CI handoff brief and exit")
+  .option("--delivery-brief", "Compose plan, verify, review, and CI handoff into a bounded, redacted, head-bound completion verdict and exit")
+  .option("--ci-result <state>", "CI outcome for --delivery-brief: pass, fail, or pending (default pending)")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
   .option("--task-identity <id>", "Stable task identity (used by --recover and worktree leases)")
@@ -399,6 +406,38 @@ program
           process.stdout.write(formatCiHandoffReport(report) + "\n");
         }
         process.exit(report.verdict === "local-blockers" ? 1 : 0);
+      }
+
+      // Delivery-brief mode: compose the plan, verify, review, and CI-handoff
+      // slices with a bounded CI result into a single head-bound completion
+      // verdict (ship / hold / no-ship). Runs only the repository's own
+      // canonical verify commands (via the handoff slice); never mutates the
+      // repository or governance paths. Exit 0 only when the verdict is ship, 1
+      // for hold or no-ship, 2 on a usage error.
+      if (opts.deliveryBrief) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let ciResult;
+        try {
+          ciResult = parseCiResult(opts.ciResult);
+        } catch (e) {
+          process.stderr.write(`Error: ${(e as Error).message}\n`);
+          process.exit(2);
+        }
+        const report = collectDeliveryBrief({
+          workspace: opts.workspace,
+          base: opts.base,
+          ciResult,
+        });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatDeliveryBrief(report) + "\n");
+        }
+        process.exit(report.verdict === "ship" ? 0 : 1);
       }
 
       // Recovery mode: decide whether an interrupted task can safely resume from
