@@ -59,6 +59,7 @@ import {
 import type { RegressionThresholds } from "./run-scorecard.js";
 import type { RunSummary } from "./run-summary.js";
 import { colorEnabled, createColorPalette } from "./color.js";
+import { formatProductBanner, VERSION } from "./product-banner.js";
 import path from "node:path";
 
 // Handle Ctrl-C gracefully — session is already persisted incrementally
@@ -723,6 +724,22 @@ program
           ...defaultCommands(),
           { name: "/tools", description: "List available agent tools (read, write, edit, shell)", action: () => { process.stderr.write("Tools: read, write, edit, shell\n"); } },
         ];
+
+        // Startup identity: a responsive pixel-art banner printed once to stderr.
+        // It is never redrawn, so it yields space naturally as the session scrolls.
+        process.stderr.write(
+          formatProductBanner({
+            version: VERSION,
+            model: config.model,
+            workspace: workspace.root,
+            authReady: config.apiKey.length > 0,
+            approvalMode,
+            width: process.stderr.columns ?? 80,
+            noColor: opts.color === false,
+            env: process.env,
+            isTTY: Boolean(process.stdin.isTTY),
+          }) + "\n\n",
+        );
 
         process.stderr.write(`Session: ${sessionId}  ${DIM}Ctrl+K: command palette${RESET}\n`);
 
