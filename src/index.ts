@@ -18,6 +18,7 @@ import { collectDoctorReport, formatDoctorReport } from "./doctor.js";
 import { collectRepoReadiness, formatRepoReadiness } from "./repo-readiness.js";
 import { collectRepoContext, formatRepoContext } from "./repo-context.js";
 import { planTask, formatTaskPlan } from "./task-plan.js";
+import { verifyTask, formatVerifyReport } from "./task-verify.js";
 import {
   readRecoveryCheckpoint,
   readEvidenceFile,
@@ -89,6 +90,7 @@ program
   .option("--remote <name>", "Git remote to probe for --readiness (default origin)", "origin")
   .option("--repo-context", "Inspect a bounded, redacted repository context snapshot (read-only) and exit")
   .option("--plan <task>", "Produce a bounded, deterministic execution plan for a task (read-only) and exit")
+  .option("--verify-task", "Run the repository's canonical verify commands and report a bounded, head-bound pass/fail verdict and exit")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
   .option("--task-identity <id>", "Stable task identity (used by --recover and worktree leases)")
@@ -266,6 +268,25 @@ program
           process.stdout.write(formatTaskPlan(plan) + "\n");
         }
         process.exit(0);
+      }
+
+      // Task-verify mode: run the repository's own detected canonical verify
+      // commands (build/test/typecheck/lint) and report a bounded, redacted,
+      // head-bound pass/fail verdict. Exit 0 when every command passes (or none
+      // are detected), 1 when any command fails, 2 on a usage error.
+      if (opts.verifyTask) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const report = verifyTask({ workspace: opts.workspace });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatVerifyReport(report) + "\n");
+        }
+        process.exit(report.verdict === "fail" ? 1 : 0);
       }
 
       // Recovery mode: decide whether an interrupted task can safely resume from
