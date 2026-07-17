@@ -227,3 +227,61 @@ describe("formatRunSummary", () => {
     expect(text).not.toMatch(/password|secret|sk-/i);
   });
 });
+
+describe("run summary attachments", () => {
+  it("defaults to no attachments and records non-secret references when provided", () => {
+    const base = {
+      ok: true,
+      exitCode: 0,
+      reason: "completed",
+      elapsedMs: 1,
+      rounds: 1,
+      toolCalls: {},
+      toolFailures: {},
+      tokens: null,
+      sessionId: "s",
+      sessionPath: null,
+    };
+    expect(buildRunSummary({ ...base }).attachments).toEqual([]);
+    const s = buildRunSummary({
+      ...base,
+      attachments: [{ name: "shot.png", mediaType: "image/png", bytes: 1234 }],
+    });
+    expect(s.attachments).toEqual([{ name: "shot.png", mediaType: "image/png", bytes: 1234 }]);
+  });
+
+  it("renders an images line only when attachments exist, with name/type/size", () => {
+    const withImages = formatRunSummary(
+      buildRunSummary({
+        ok: true,
+        exitCode: 0,
+        reason: "completed",
+        elapsedMs: 1,
+        rounds: 1,
+        toolCalls: {},
+        toolFailures: {},
+        tokens: null,
+        sessionId: "s",
+        sessionPath: null,
+        attachments: [{ name: "shot.png", mediaType: "image/png", bytes: 1234 }],
+      }),
+    );
+    expect(withImages).toContain("images:    shot.png (image/png, 1234 bytes)");
+
+    const without = formatRunSummary(
+      buildRunSummary({
+        ok: true,
+        exitCode: 0,
+        reason: "completed",
+        elapsedMs: 1,
+        rounds: 1,
+        toolCalls: {},
+        toolFailures: {},
+        tokens: null,
+        sessionId: "s",
+        sessionPath: null,
+      }),
+    );
+    expect(without).not.toContain("images:");
+  });
+});

@@ -16,6 +16,8 @@ import type { ApprovalMode } from "./approval.js";
 import type { SessionMessage } from "./session.js";
 import type { AgentSink, AgentUsage, AgentRetry } from "./agent.js";
 import { runAgent } from "./agent.js";
+import { loadImageAttachments } from "./image-input.js";
+import type { LoadedImage } from "./image-input.js";
 import { runPalette } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
@@ -309,7 +311,7 @@ export function renderIdentity(
     return [
       ...rows,
       `${" ".repeat(logoWidth + gap)}${panel[5] ?? ""}`,
-      `${style.dim}Tips: use @path to add files, or Ctrl+K to browse commands.${style.reset}`,
+      `${style.dim}Tips: /attach an image for vision, or Ctrl+K to browse commands.${style.reset}`,
     ];
   }
   if (height >= 2 && cols >= 20) {
@@ -707,6 +709,10 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   // is not aborted (no new provider capability), only its UI contribution stops.
   let submitChain: Promise<void> = Promise.resolve();
 
+  // Images staged via /attach are sent with the next submitted prompt, then
+  // cleared so they are not re-attached to later turns.
+  const pendingImages: LoadedImage[] = [];
+
   function submit(): void {
     const text = state.composer.text.trim();
     if (!text) return;
@@ -714,14 +720,36 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       shutdown(0);
       return;
     }
+    if (text.startsWith("/attach")) {
+      state.composer.text = "";
+      const paths = text.slice("/attach".length).split(/\s+/).filter(Boolean);
+      if (paths.length === 0) {
+        state.transcript.push({ kind: "notice", text: "usage: /attach <image-path> [more-paths...]" });
+      } else {
+        try {
+          const loaded = loadImageAttachments(paths, opts.workspace);
+          pendingImages.push(...loaded);
+          state.transcript.push({
+            kind: "notice",
+            text: `attached ${loaded.length} image(s): ${loaded.map((i) => `${i.name} (${i.mediaType})`).join(", ")}`,
+          });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          state.transcript.push({ kind: "error", text: redactSecrets(msg).text });
+        }
+      }
+      scheduleRender();
+      return;
+    }
     state.composer.text = "";
     state.composer.mode = "submitting";
     state.transcript.push({ kind: "user", text });
     scheduleRender();
-    submitChain = submitChain.then(() => runOne(text));
+    const images = pendingImages.splice(0);
+    submitChain = submitChain.then(() => runOne(text, images));
   }
 
-  async function runOne(text: string): Promise<void> {
+  async function runOne(text: string, images: LoadedImage[] = []): Promise<void> {
     const generation = ++runGeneration;
     try {
       const history = opts.loadHistory();
@@ -735,6 +763,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         budgetUsd: opts.budgetUsd ?? null,
         compactThreshold: opts.compactThreshold,
         mutatingAllowed: opts.mutatingAllowed ?? true,
+        images,
       });
       if (generation !== runGeneration) return; // cancelled mid-run
       state.composer.mode = result.ok ? "focused" : "error";

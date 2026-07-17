@@ -48,6 +48,16 @@ const RUN_SUMMARY_Z = z.object({
     sessionId: z.string(),
     sessionPath: z.string().nullable(),
   }),
+  // Added after v1; older summaries omit it, so default to none on read.
+  attachments: z
+    .array(
+      z.object({
+        name: z.string(),
+        mediaType: z.string(),
+        bytes: z.number().int().nonnegative(),
+      }),
+    )
+    .default([]),
 });
 
 /**

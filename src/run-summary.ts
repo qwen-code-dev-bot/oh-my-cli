@@ -55,6 +55,9 @@ export interface RunSummary {
     // the summary; null when no session path is available.
     sessionPath: string | null;
   };
+  // Non-secret references to images attached to the run's prompt (name, media
+  // type, size). Never raw bytes or content; empty when no images were attached.
+  attachments: Array<{ name: string; mediaType: string; bytes: number }>;
 }
 
 export interface BuildRunSummaryInput {
@@ -72,6 +75,8 @@ export interface BuildRunSummaryInput {
   estimatedCostUsd?: number | null;
   sessionId: string;
   sessionPath: string | null;
+  // Non-secret references to images attached to the prompt; defaults to none.
+  attachments?: Array<{ name: string; mediaType: string; bytes: number }>;
 }
 
 // Collapse a raw name→count map into a total plus a bounded, deterministic
@@ -130,6 +135,11 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummary {
       sessionId: input.sessionId,
       sessionPath: input.sessionPath,
     },
+    attachments: (input.attachments ?? []).map((a) => ({
+      name: a.name,
+      mediaType: a.mediaType,
+      bytes: Math.max(0, Math.floor(a.bytes)),
+    })),
   };
 }
 
@@ -170,5 +180,9 @@ export function formatRunSummary(summary: RunSummary): string {
     ? `session ${summary.evidence.sessionId} (${summary.evidence.sessionPath})`
     : `session ${summary.evidence.sessionId}`;
   lines.push(`  evidence:  ${where}`);
+  if (summary.attachments.length > 0) {
+    const refs = summary.attachments.map((a) => `${a.name} (${a.mediaType}, ${a.bytes} bytes)`);
+    lines.push(`  images:    ${refs.join(", ")}`);
+  }
   return lines.join("\n");
 }

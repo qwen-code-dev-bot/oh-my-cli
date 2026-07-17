@@ -11,6 +11,7 @@ import { folderTrustDenialMessage } from "./folder-trust.js";
 import { estimateCostUsd, lookupModelPrice, formatCostUsd } from "./cost.js";
 import { buildEffectiveSystemPrompt } from "./instruction-context.js";
 import { compactMessages, buildCompactedTranscript } from "./compaction.js";
+import type { LoadedImage } from "./image-input.js";
 
 const MAX_ROUNDS = 30;
 
@@ -34,6 +35,10 @@ export interface AgentOptions {
   // next provider call (the on-disk transcript is untouched). Undefined or <= 0
   // disables auto-compaction.
   compactThreshold?: number;
+  // Image attachments for the initial user prompt. They are sent to the provider
+  // as multimodal content parts; only a non-secret reference is persisted (the
+  // data URL never reaches the session log).
+  images?: LoadedImage[];
 }
 
 // Cumulative usage and cost reported after each round. `estimatedCostUsd` is an
@@ -176,8 +181,23 @@ export async function runAgent(
   }
 
   const userMsg: SessionMessage = { role: "user", content: userPrompt };
+  if (opts.images && opts.images.length > 0) {
+    // In-memory copy carries the data URLs the provider needs.
+    userMsg.images = opts.images.map((img) => ({
+      name: img.name,
+      mediaType: img.mediaType,
+      bytes: img.bytes,
+      dataUrl: img.dataUrl,
+    }));
+  }
   messages.push(userMsg);
-  opts.onMessage(userMsg);
+  // Persist a privacy-safe copy: the data URL (raw image bytes) never reaches
+  // the session log; only the non-secret reference (name, type, size) is kept.
+  opts.onMessage(
+    userMsg.images
+      ? { ...userMsg, images: userMsg.images.map(({ name, mediaType, bytes }) => ({ name, mediaType, bytes })) }
+      : userMsg,
+  );
 
   let finalText = "";
 

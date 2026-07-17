@@ -11,6 +11,11 @@ export interface SessionMessage {
     function: { name: string; arguments: string };
   }>;
   tool_call_id?: string;
+  // Multimodal image attachments on a user message. Only a non-secret reference
+  // (name, media type, size) is persisted; the data URL (raw bytes) lives solely
+  // in the in-memory transcript sent to the provider and is stripped before this
+  // message reaches the session log.
+  images?: Array<{ name: string; mediaType: string; bytes: number; dataUrl?: string }>;
 }
 
 // Lightweight provenance recorded as the first line of a session so a lister

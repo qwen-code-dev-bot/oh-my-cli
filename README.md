@@ -146,6 +146,7 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | Option | Description |
 |---|---|
 | `-p, --prompt <prompt>` | Run a single non-interactive request |
+| `--image <paths...>` | Attach image file(s) by path for vision-capable analysis (PNG, JPEG, GIF, or WebP); also `/attach` in interactive mode |
 | `--resume <session-id>` | Resume a persisted session |
 | `--compact <session-id>` | Compact a session into a bounded summary sidecar (original transcript preserved) and exit |
 | `--compact-threshold <tokens>` | Auto-compact the in-memory transcript when the latest prompt size reaches this (also honors `OMC_COMPACT_THRESHOLD`) |
