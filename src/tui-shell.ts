@@ -514,6 +514,8 @@ export interface ConversationShellOptions {
   // Returns the persisted conversation at submit time (mirrors store.load).
   loadHistory: () => SessionMessage[];
   budgetUsd?: number | null;
+  // Context-pressure auto-compaction threshold (tokens); undefined disables it.
+  compactThreshold?: number;
   // Folder-trust enforcement: when false, mutating tools fail closed in the
   // interactive shell too (criterion 1 requires the distinction in interactive
   // mode). Defaults to true so a non-enforcing run is unchanged.
@@ -731,6 +733,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         onMessage: opts.onMessage,
         sink: createShellSink(generation),
         budgetUsd: opts.budgetUsd ?? null,
+        compactThreshold: opts.compactThreshold,
         mutatingAllowed: opts.mutatingAllowed ?? true,
       });
       if (generation !== runGeneration) return; // cancelled mid-run

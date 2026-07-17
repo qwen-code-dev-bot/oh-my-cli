@@ -82,6 +82,13 @@ export class SessionStore {
     return this.filePath(id) + ".tmp";
   }
 
+  // Sibling sidecar holding a compaction summary. A distinct extension keeps it
+  // out of listIds() (which matches *.jsonl) so a compacted session is still
+  // enumerated exactly once.
+  compactPath(id: string): string {
+    return path.join(this.dir, `${id}.compact.json`);
+  }
+
   append(id: string, message: SessionMessage): void {
     const line = JSON.stringify(message) + "\n";
     fs.appendFileSync(this.filePath(id), line, "utf-8");

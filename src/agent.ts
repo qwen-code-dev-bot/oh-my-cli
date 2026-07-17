@@ -10,6 +10,7 @@ import { evaluateCommandPolicy, policyDenialMessage } from "./command-policy.js"
 import { folderTrustDenialMessage } from "./folder-trust.js";
 import { estimateCostUsd, lookupModelPrice, formatCostUsd } from "./cost.js";
 import { buildEffectiveSystemPrompt } from "./instruction-context.js";
+import { compactMessages, buildCompactedTranscript } from "./compaction.js";
 
 const MAX_ROUNDS = 30;
 
@@ -28,6 +29,11 @@ export interface AgentOptions {
   // (so yolo cannot widen the boundary). Defaults to true (no enforcement) so
   // callers that do not opt in keep the existing behaviour.
   mutatingAllowed?: boolean;
+  // Context-pressure threshold in tokens. When the most recent provider call's
+  // prompt size reaches this, the in-memory transcript is compacted before the
+  // next provider call (the on-disk transcript is untouched). Undefined or <= 0
+  // disables auto-compaction.
+  compactThreshold?: number;
 }
 
 // Cumulative usage and cost reported after each round. `estimatedCostUsd` is an
@@ -54,6 +60,17 @@ export interface AgentRetry {
   delayMs: number;
 }
 
+// The in-memory transcript was compacted to relieve context pressure. Metadata
+// only — how many messages were summarized and how many completed-action
+// receipts were retained — so a consumer can observe the event without seeing
+// content or secrets.
+export interface AgentCompaction {
+  round: number;
+  summarizedMessages: number;
+  receipts: number;
+  promptTokens: number;
+}
+
 // Output sink for the agent loop. The default console sink reproduces the
 // existing terminal behaviour; the headless sink (see headless-protocol.ts)
 // renders the same lifecycle as a versioned JSON event stream.
@@ -67,6 +84,8 @@ export interface AgentSink {
   usage(info: AgentUsage): void;
   // A transient provider failure is being retried (bounded backoff).
   retry(info: AgentRetry): void;
+  // The in-memory transcript was compacted to relieve context pressure.
+  compaction?(info: AgentCompaction): void;
 }
 
 export function createConsoleSink(): AgentSink {
@@ -96,6 +115,13 @@ export function createConsoleSink(): AgentSink {
       process.stderr.write(
         `\nProvider retry ${info.attempt}/${info.maxAttempts} after ${info.reasonClass} ` +
           `(waiting ${info.delayMs}ms).\n`,
+      );
+    },
+    compaction: (info) => {
+      // Surface the compaction so the context reduction is observable.
+      process.stderr.write(
+        `\nContext compacted: summarized ${info.summarizedMessages} message(s) ` +
+          `(${info.receipts} completed-action receipt(s)) after ${info.promptTokens} prompt tokens.\n`,
       );
     },
   };
@@ -166,6 +192,14 @@ export async function runAgent(
   let costUsd = 0;
   const costKnown = lookupModelPrice(opts.config.model).known;
   const budgetUsd = opts.budgetUsd ?? null;
+  // Context-pressure auto-compaction. Null disables it. `lastPromptTokens` is the
+  // most recent provider call's prompt size — the live context pressure that
+  // drives compaction at the next round boundary.
+  const compactThreshold =
+    typeof opts.compactThreshold === "number" && opts.compactThreshold > 0
+      ? opts.compactThreshold
+      : null;
+  let lastPromptTokens = 0;
   const bump = (map: Record<string, number>, name: string) => {
     map[name] = (map[name] ?? 0) + 1;
   };
@@ -194,6 +228,28 @@ export async function runAgent(
       };
     }
 
+    // Context-pressure gate: when the most recent provider call's prompt size has
+    // reached the threshold, compact the in-memory transcript before the next
+    // provider call. Only the live `messages` window is replaced with a bounded
+    // summary; the on-disk transcript is untouched (every message was already
+    // persisted via onMessage). This runs at a round boundary where every prior
+    // tool call already has its result, so no orphan tool_call is produced. The
+    // threshold is reset so we do not re-compact until the context grows again.
+    if (compactThreshold !== null && lastPromptTokens >= compactThreshold && messages.length > 1) {
+      const triggeredAt = lastPromptTokens;
+      const { summary } = compactMessages(messages);
+      const compacted = buildCompactedTranscript(messages, summary);
+      messages.length = 0;
+      messages.push(...compacted);
+      lastPromptTokens = 0;
+      sink.compaction?.({
+        round,
+        summarizedMessages: summary.messageCount,
+        receipts: summary.receipts.length,
+        promptTokens: triggeredAt,
+      });
+    }
+
     let assistantText = "";
     const assistantToolCalls: Array<{ id: string; name: string; arguments: string }> = [];
 
@@ -209,6 +265,7 @@ export async function runAgent(
           tokens.prompt += event.promptTokens;
           tokens.completion += event.completionTokens;
           tokens.total += event.totalTokens;
+          lastPromptTokens = event.promptTokens;
         } else if (event.type === "retry") {
           retries++;
           sink.retry({
