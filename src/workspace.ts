@@ -18,12 +18,21 @@ export class Workspace {
 
   resolveSafe(relativePath: string): string {
     const resolved = this.resolve(relativePath);
+    // Canonicalize the root: on macOS the workspace often lives under a
+    // symlinked prefix (e.g. /var -> /private/var), so comparing ancestor
+    // realpaths against the raw root would falsely reject in-workspace files.
+    let realRoot: string;
+    try {
+      realRoot = fs.realpathSync(this.root);
+    } catch {
+      realRoot = this.root;
+    }
     // Check for symlink escape: walk each ancestor that exists
     let current = resolved;
     while (current.length > this.root.length) {
       if (fs.existsSync(current)) {
         const real = fs.realpathSync(current);
-        if (!real.startsWith(this.root + path.sep) && real !== this.root) {
+        if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
           throw new Error(`Symlink path escape rejected: ${relativePath}`);
         }
       }
