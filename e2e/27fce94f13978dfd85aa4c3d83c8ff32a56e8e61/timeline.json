@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "repository": "qwen-code-dev-bot/oh-my-cli",
+  "pullRequest": 100,
+  "commit": "27fce94f13978dfd85aa4c3d83c8ff32a56e8e61",
+  "result": "PASS",
+  "events": [
+    {
+      "at": "2026-07-17T11:26:11Z",
+      "type": "build_verified"
+    },
+    {
+      "at": "2026-07-17T11:26:11Z",
+      "type": "tmux_started",
+      "session": "oh-my-cli-bot-evidence",
+      "cols": 120,
+      "rows": 36
+    },
+    {
+      "at": "2026-07-17T11:26:11Z",
+      "type": "first_frame_ready"
+    },
+    {
+      "at": "2026-07-17T11:26:11Z",
+      "type": "capture_completed"
+    }
+  ]
+}
