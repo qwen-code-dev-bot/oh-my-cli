@@ -29,7 +29,7 @@ import { MEDIUM_MARK, VERSION, WIDE_WORDMARK } from "./product-banner.js";
 export const COMPOSER_MAX_ROWS = 8;
 export const COMPOSER_MIN_ROWS = 1;
 export const IDENTITY_MAX_ROWS = 7;
-export const STATUS_ROWS = 1;
+export const STATUS_ROWS = 2;
 
 // Minimum terminal dimensions before the full-screen shell is used at all; below
 // these the caller falls back to the plain readline REPL so nothing clips.
@@ -194,7 +194,7 @@ export function computeLayout(viewport: Viewport, opts: { composerRows?: number 
   const cols = Math.max(0, Math.floor(viewport.cols));
   const desiredComposer = clamp(opts.composerRows ?? COMPOSER_MIN_ROWS, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS);
 
-  const statusRows = rows >= 1 ? STATUS_ROWS : 0;
+  const statusRows = rows >= 2 ? STATUS_ROWS : rows >= 1 ? 1 : 0;
   let remaining = rows - statusRows;
 
   // Identity scales from a full product wordmark to a compact title. Decoration
@@ -235,7 +235,7 @@ export function computeLayout(viewport: Viewport, opts: { composerRows?: number 
 // Desired total composer band height (state rule + bounded input rows).
 export function composerTotalRows(text: string): number {
   const textLines = text === "" ? 1 : text.split("\n").length;
-  return clamp(textLines + 1, 2, COMPOSER_MAX_ROWS);
+  return clamp(textLines + 2, 3, COMPOSER_MAX_ROWS);
 }
 
 // ---------------------------------------------------------------------------
@@ -274,23 +274,49 @@ export function composerMarker(mode: ComposerMode): ComposerMarker {
 // Region renderers (pure)
 // ---------------------------------------------------------------------------
 
-export function renderIdentity(layout: ShellLayout, style: ShellStyle, version: string): string[] {
+function panelLine(text: string, width: number, style: ShellStyle): string {
+  const inner = Math.max(0, width - 4);
+  const body = clipLine(text, inner);
+  return `${style.accent}│${style.reset} ${body}${" ".repeat(Math.max(0, inner - visibleWidth(body)))} ${style.accent}│${style.reset}`;
+}
+
+export function renderIdentity(
+  layout: ShellLayout,
+  style: ShellStyle,
+  version: string,
+  status: StatusInfo,
+): string[] {
   const height = layout.identity.end - layout.identity.start;
   if (height <= 0) return [];
   const cols = layout.viewport.cols;
-  const metadata = `v${version}  ·  terminal-native coding agent`;
-  if (height >= 7 && cols >= 44) {
+  const logoWidth = Math.max(...WIDE_WORDMARK.map((line) => visibleWidth(line)));
+  const gap = 2;
+  const panelWidth = Math.min(42, cols - logoWidth - gap);
+  if (height >= 7 && panelWidth >= 30) {
+    const panel = [
+      `${style.accent}┌${"─".repeat(panelWidth - 2)}┐${style.reset}`,
+      panelLine(`${style.bold}>_ OH MY CLI${style.reset}  ${style.dim}(v${version})${style.reset}`, panelWidth, style),
+      panelLine("", panelWidth, style),
+      panelLine(`${status.model}  (/model to change)`, panelWidth, style),
+      panelLine(status.workspace, panelWidth, style),
+      `${style.accent}└${"─".repeat(panelWidth - 2)}┘${style.reset}`,
+    ];
     const rows = WIDE_WORDMARK.map((line, index) => {
       const tone = index < 2 ? style.accent : style.accentSoft;
-      return `${tone}${style.bold}${line}${style.reset}`;
+      const logo = `${tone}${style.bold}${line}${style.reset}${" ".repeat(Math.max(0, logoWidth - visibleWidth(line)))}`;
+      return `${logo}${" ".repeat(gap)}${panel[index] ?? ""}`;
     });
-    return [...rows, `${style.dim}${clipLine(metadata, cols)}${style.reset}`, ""];
+    return [
+      ...rows,
+      `${" ".repeat(logoWidth + gap)}${panel[5] ?? ""}`,
+      `${style.dim}Tips: use @path to add files, or Ctrl+K to browse commands.${style.reset}`,
+    ];
   }
   if (height >= 2 && cols >= 20) {
     const mark = MEDIUM_MARK[0] ?? "OMC";
     return [
       `${style.accent}${style.bold}${clipLine(mark, cols)}${style.reset}`,
-      `${style.dim}${clipLine(`OH MY CLI  ${metadata}`, cols)}${style.reset}`,
+      `${style.dim}${clipLine(`v${version}  ·  ${status.model}  ·  ${status.workspace}`, cols)}${style.reset}`,
     ];
   }
   return [`${style.accent}${style.bold}${clipLine(`OH MY CLI  v${version}`, cols)}${style.reset}`];
@@ -302,40 +328,31 @@ export function renderStatusLine(info: StatusInfo, layout: ShellLayout, style: S
   const cols = layout.viewport.cols;
   // Only non-secret operational state: model, redacted workspace, context usage
   // when known, and approval mode. No api key, base URL, or other credential.
-  const parts = [
-    info.model,
-    `approval ${info.approvalMode}`,
-    info.workspace,
-    info.contextUsage ? info.contextUsage : null,
-  ].filter((p): p is string => Boolean(p));
-  const indicator = `${style.success}●${style.reset}`;
-  return [`${indicator} ${style.dim}${clipLine(parts.join("  ·  "), Math.max(0, cols - 2))}${style.reset}`];
+  const primary = [info.workspace, info.model, info.contextUsage].filter((p): p is string => Boolean(p));
+  const first = `${style.success}→${style.reset} ${style.dim}${clipLine(primary.join("  ·  "), Math.max(0, cols - 2))}${style.reset}`;
+  if (height === 1) return [first];
+  const second = `  ${style.dim}${clipLine(`approval ${info.approvalMode}  ·  ? shortcuts  ·  Ctrl+C exit`, Math.max(0, cols - 2))}${style.reset}`;
+  return [first, second];
 }
 
-function renderEmptyTranscript(region: Region, cols: number, style: ShellStyle): string[] {
+function renderEmptyTranscript(region: Region, _cols: number, _style: ShellStyle): string[] {
   const height = Math.max(0, region.end - region.start);
   if (height === 0) return [];
-  const content = [
-    `${style.accent}${style.bold}${clipLine("Ready for your next task", cols)}${style.reset}`,
-    `${style.dim}${clipLine("Ask a question, reference @files, or open commands with Ctrl+K.", cols)}${style.reset}`,
-    "",
-    `${style.dim}${clipLine("/help  explore capabilities    /status  inspect this session", cols)}${style.reset}`,
-  ];
-  const top = Math.max(1, Math.min(3, Math.floor((height - content.length) / 3)));
-  const lines = Array.from({ length: top }, () => "");
-  lines.push(...content.slice(0, Math.max(0, height - top)));
-  while (lines.length < height) lines.push("");
-  return lines.slice(0, height);
+  return Array.from({ length: height }, () => "");
 }
 
 function entryPrefix(kind: TranscriptKind): string {
   switch (kind) {
     case "user":
       return "> ";
+    case "assistant":
+      return "◆ ";
+    case "streaming":
+      return "✦ ";
     case "tool":
-      return "· ";
+      return "● ";
     case "notice":
-      return "# ";
+      return "• ";
     case "error":
       return "! ";
     default:
@@ -373,8 +390,12 @@ export function renderTranscript(entries: TranscriptEntry[], region: Region, col
 function renderRule(label: string, cols: number, style: ShellStyle): string {
   const labelCells = Array.from(label).length;
   if (cols <= labelCells) return clipLine(label, cols);
-  const fill = cols - labelCells - 1;
-  return `${style.accent}${style.bold}${label}${style.reset} ${style.dim}${"─".repeat(fill)}${style.reset}`;
+  const fill = Math.max(0, cols - labelCells - 3);
+  return `${style.accent}${"─".repeat(fill)}${style.reset} ${style.dim}${label}${style.reset} ${style.accent}─${style.reset}`;
+}
+
+function renderBottomRule(cols: number, style: ShellStyle): string {
+  return `${style.accent}${"─".repeat(cols)}${style.reset}`;
 }
 
 // Render the composer band. When there is room (>= 2 rows) the first row is a
@@ -385,26 +406,28 @@ export function renderComposer(state: ComposerState, layout: ShellLayout, style:
   if (height === 0) return [];
   const cols = layout.viewport.cols;
   const marker = composerMarker(state.mode);
-  const label = `${marker.glyph} [${marker.label}]`;
-  const useRule = height >= 2;
-  const textHeight = useRule ? height - 1 : height;
+  const label = `${marker.glyph} ${marker.label}`;
+  const useFrame = height >= 3;
+  const useTopRule = height >= 2;
+  const textHeight = height - (useTopRule ? 1 : 0) - (useFrame ? 1 : 0);
 
   const lines: string[] = [];
-  if (useRule) lines.push(renderRule(label, cols, style));
+  if (useTopRule) lines.push(renderRule(label, cols, style));
 
-  const lead = useRule ? "" : `${marker.glyph} `;
+  const lead = `${marker.glyph} `;
   const bodyWidth = Math.max(1, cols - Array.from(lead).length);
 
   if (state.text === "") {
     const showPlaceholder =
       state.mode === "idle" || state.mode === "focused" || state.mode === "multiline";
     const ph = showPlaceholder ? clipLine(state.placeholder, bodyWidth) : "";
-    lines.push(lead + (ph ? `${style.dim}${ph}${style.reset}` : ""));
+    lines.push(`${style.accent}${lead}${style.reset}${ph ? `${style.dim}${ph}${style.reset}` : ""}`);
   } else {
     const wrapped = wrapText(state.text, bodyWidth);
     const shown = wrapped.slice(Math.max(0, wrapped.length - textHeight));
-    for (const w of shown) lines.push(lead + w);
+    for (const w of shown) lines.push(`${style.accent}${lead}${style.reset}${w}`);
   }
+  if (useFrame) lines.push(renderBottomRule(cols, style));
   return lines.slice(0, height);
 }
 
@@ -417,7 +440,7 @@ export function composeScreen(state: ShellState): ComposedScreen {
   const composerRows = composerTotalRows(state.composer.text);
   const layout = computeLayout(state.viewport, { composerRows });
 
-  const identityLines = renderIdentity(layout, style, state.version);
+  const identityLines = renderIdentity(layout, style, state.version, state.status);
   const transcriptLines =
     state.transcript.length === 0
       ? renderEmptyTranscript(layout.transcript, layout.viewport.cols, style)
