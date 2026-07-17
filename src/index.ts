@@ -34,6 +34,7 @@ import {
   parseCiResult,
 } from "./delivery-brief.js";
 import { collectProviderContract, formatProviderContract } from "./provider-contract.js";
+import { collectMcpContract, formatMcpContract } from "./mcp-contract.js";
 import {
   readRecoveryCheckpoint,
   readEvidenceFile,
@@ -137,6 +138,9 @@ program
   .option("--ci-result <state>", "CI outcome for --delivery-brief: pass, fail, or pending (default pending)")
   .option("--provider-contract", "Inspect the resolved provider extension contract from settings (read-only, redacted) and exit")
   .option("--provider <id>", "Provider id to select for --provider-contract (defaults to settings.providers.default or the sole entry)")
+  .option("--mcp-contract", "Inspect the resolved MCP server extension contract from settings (read-only, redacted) and exit")
+  .option("--server <id>", "MCP server id to select for --mcp-contract (defaults to settings.mcp.default or the sole entry)")
+  .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract and report the declared state")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
   .option("--task-identity <id>", "Stable task identity (used by --recover and worktree leases)")
@@ -472,6 +476,40 @@ program
           process.stdout.write(JSON.stringify(report) + "\n");
         } else {
           process.stdout.write(formatProviderContract(report) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // MCP-contract mode: inspect the resolved MCP server extension contract
+      // declared in the user settings file (versioned, redacted, read-only).
+      // Proves the MCP-lifecycle slice end to end — declare servers in settings,
+      // negotiate the contract version, deterministically select one, and resolve
+      // its lifecycle state (declared / ready / isolated) with safe failure
+      // defaults — without changing core code. A disabled or unavailable server
+      // resolves to "isolated" (exit 0); a contract/usage error exits 2.
+      if (opts.mcpContract) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let report;
+        try {
+          report = collectMcpContract({
+            settingsPath: resolveSettingsPath(opts.settings),
+            env: process.env,
+            serverId: opts.server,
+            probe: opts.probe,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatMcpContract(report) + "\n");
         }
         process.exit(0);
       }
