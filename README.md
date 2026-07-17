@@ -80,6 +80,7 @@ without touching other sessions.
 | `--remote <name>` | Git remote to probe for `--readiness` (default `origin`) |
 | `--repo-context` | Inspect a bounded, redacted repository context snapshot (read-only) and exit |
 | `--plan <task>` | Produce a bounded, deterministic execution plan for a task (read-only) and exit |
+| `--verify-task` | Run the repository's canonical verify commands and report a bounded, head-bound pass/fail verdict and exit |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -641,6 +642,44 @@ Add `--output json` for a versioned record (`schema` `oh-my-cli.plan`) whose
 grounded verification commands. An empty task description is rejected (exit `2`);
 an unknown toolchain degrades gracefully rather than failing.
 
+### Task verification
+
+After a change, get an objective, machine-checkable answer to "does this
+repository actually pass its own build/test/typecheck/lint?" `--verify-task`
+runs the *same* canonical commands the planner lists — `build → test →
+typecheck → lint`, as detected from the repository context — against the
+workspace, with a bounded per-command timeout and bounded output capture, and
+reports a pass/fail verdict bound to the repository head:
+
+```bash
+oh-my-cli --verify-task
+# or verify another checkout
+oh-my-cli --verify-task --workspace path/to/repo
+```
+
+It runs only the commands the repository itself declares (the same ones a
+developer runs by hand) and never accepts arbitrary command strings. Captured
+output is secret-redacted and the absolute workspace path is scrubbed; the
+command set is exactly what `--plan` reports. The verdict is `pass` only when
+every detected command passes, `fail` if any fails, or `no-verify-commands`
+when none are detected (not a failure). Exit code: `0` pass/none-detected, `1`
+any failure, `2` usage error.
+
+```text
+Task verification (oh-my-cli.task-verify v1)
+──────────────────────────────────────────────
+Head   : 9f53e65c64b8dbd9a2616e61d4db18a62ea298ed
+Verdict: pass
+Commands:
+  [PASS] build      tsc  (exit 0, 1180ms)
+  [PASS] test       vitest run tests/unit  (exit 0, 8423ms)
+  [PASS] typecheck  tsc --noEmit  (exit 0, 1095ms)
+```
+
+Add `--output json` for a versioned record (`schema` `oh-my-cli.task-verify`)
+whose `head` binds the verdict to the repo head and whose `results` array
+carries each command's exit code, pass flag, duration, and redacted output tail.
+
 ## Built-in tools
 
 | Tool | Category | Description |
@@ -700,6 +739,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/repo-readiness.ts` — read-only repository-readiness inspection (`--readiness`)
 - `src/repo-context.ts` — read-only, bounded, redacted repository-context snapshot (`--repo-context`)
 - `src/task-plan.ts` — deterministic, bounded, redacted task planner grounded in the repo context (`--plan`)
+- `src/task-verify.ts` — bounded, redacted, head-bound pass/fail verification of the repo's canonical commands (`--verify-task`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests
