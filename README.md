@@ -82,7 +82,8 @@ without touching other sessions.
 | `--plan <task>` | Produce a bounded, deterministic execution plan for a task (read-only) and exit |
 | `--verify-task` | Run the repository's canonical verify commands and report a bounded, head-bound pass/fail verdict and exit |
 | `--review-change` | Review the current change against a base ref and emit a bounded, redacted, head-bound review brief and exit |
-| `--base <ref>` | Base ref for `--review-change` (default `origin/main`, then `HEAD`) |
+| `--base <ref>` | Base ref for `--review-change` and `--ci-handoff` (default `origin/main`, then `HEAD`) |
+| `--ci-handoff` | Compose verify and review into a bounded, redacted, head-bound CI handoff brief and exit |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -728,6 +729,54 @@ Add `--output json` for a versioned record (`schema` `oh-my-cli.change-review`)
 whose `head` binds the brief to the repo head and whose `signals` object carries
 each objective risk signal.
 
+### CI handoff
+
+At the CI boundary, get one objective answer to "is this change safe to hand to
+CI, and what should CI run?" `--ci-handoff` composes the verify and review
+slices into a single bounded, redacted, head-bound handoff brief: the exact
+commit, the canonical commands CI should run with their **local** pass/fail
+status, the change summary and review signals, and any local blocker that must
+be cleared first.
+
+```bash
+oh-my-cli --ci-handoff
+# or hand off against an explicit base
+oh-my-cli --ci-handoff --base origin/main --workspace path/to/repo
+```
+
+It runs only the repository's own canonical verify commands (the same ones
+`--verify-task` runs); it never mutates the repository or governance paths and
+never calls a provider. Secret-like content is reported only as a count (never
+literals) and the absolute workspace path never appears in the output. The
+verdict is `local-blockers` when an introduced secret, a mutated protected
+governance path, or a failing local verify is present; `no-change` when nothing
+changed; otherwise `ready-for-ci`. Exit code: `0` ready-for-ci/no-change, `1`
+local-blockers, `2` usage error.
+
+```text
+CI handoff (oh-my-cli.ci-handoff v1)
+──────────────────────────────────────────────
+Head   : 2426b8272da5c9d56c9d0a4b9355eaa5e6b6f8ac
+Base   : origin/main (9f53e65c64b8dbd9a2616e61d4db18a62ea298ed)
+Verdict: ready-for-ci
+Change : 3 file(s), +410 -0
+Commands for CI:
+  [PASS] build      tsc  (exit 0)
+  [PASS] test       vitest run tests/unit  (exit 0)
+  [PASS] typecheck  tsc --noEmit  (exit 0)
+Review signals:
+  Secrets introduced : 0 added line(s)
+  Protected paths    : none
+  Source w/o tests   : no
+  Oversized change   : no
+  Runtime deps added : none
+Blockers: none
+```
+
+Add `--output json` for a versioned record (`schema` `oh-my-cli.ci-handoff`)
+whose `head` binds the brief to the repo head and whose `commands`, `review`,
+and `blockers` fields carry the handoff evidence.
+
 ## Built-in tools
 
 | Tool | Category | Description |
@@ -789,6 +838,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/task-plan.ts` — deterministic, bounded, redacted task planner grounded in the repo context (`--plan`)
 - `src/task-verify.ts` — bounded, redacted, head-bound pass/fail verification of the repo's canonical commands (`--verify-task`)
 - `src/change-review.ts` — bounded, redacted, head-bound review brief for the current change against a base ref (`--review-change`)
+- `src/ci-handoff.ts` — bounded, redacted, head-bound CI handoff brief composing verify + review (`--ci-handoff`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests

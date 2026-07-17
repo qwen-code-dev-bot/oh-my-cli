@@ -20,6 +20,7 @@ import { collectRepoContext, formatRepoContext } from "./repo-context.js";
 import { planTask, formatTaskPlan } from "./task-plan.js";
 import { verifyTask, formatVerifyReport } from "./task-verify.js";
 import { reviewChange, formatChangeReviewReport } from "./change-review.js";
+import { collectCiHandoff, formatCiHandoffReport } from "./ci-handoff.js";
 import {
   readRecoveryCheckpoint,
   readEvidenceFile,
@@ -93,7 +94,8 @@ program
   .option("--plan <task>", "Produce a bounded, deterministic execution plan for a task (read-only) and exit")
   .option("--verify-task", "Run the repository's canonical verify commands and report a bounded, head-bound pass/fail verdict and exit")
   .option("--review-change", "Review the current change against a base ref and emit a bounded, redacted, head-bound review brief and exit")
-  .option("--base <ref>", "Base ref for --review-change (default origin/main, then HEAD)")
+  .option("--base <ref>", "Base ref for --review-change and --ci-handoff (default origin/main, then HEAD)")
+  .option("--ci-handoff", "Compose verify and review into a bounded, redacted, head-bound CI handoff brief and exit")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
   .option("--task-identity <id>", "Stable task identity (used by --recover and worktree leases)")
@@ -310,6 +312,26 @@ program
           process.stdout.write(formatChangeReviewReport(report) + "\n");
         }
         process.exit(report.verdict === "needs-attention" ? 1 : 0);
+      }
+
+      // CI-handoff mode: compose the verify and review slices into a single
+      // bounded, redacted, head-bound handoff brief. Runs only the repository's
+      // own canonical verify commands; never mutates the repository or
+      // governance paths. Exit 0 when ready for CI or there is no change, 1 when
+      // a local blocker is present, 2 on a usage error.
+      if (opts.ciHandoff) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const report = collectCiHandoff({ workspace: opts.workspace, base: opts.base });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatCiHandoffReport(report) + "\n");
+        }
+        process.exit(report.verdict === "local-blockers" ? 1 : 0);
       }
 
       // Recovery mode: decide whether an interrupted task can safely resume from
