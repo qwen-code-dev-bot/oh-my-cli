@@ -161,8 +161,10 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--plan <task>` | Produce a bounded, deterministic execution plan for a task (read-only) and exit |
 | `--verify-task` | Run the repository's canonical verify commands and report a bounded, head-bound pass/fail verdict and exit |
 | `--review-change` | Review the current change against a base ref and emit a bounded, redacted, head-bound review brief and exit |
-| `--base <ref>` | Base ref for `--review-change` and `--ci-handoff` (default `origin/main`, then `HEAD`) |
+| `--base <ref>` | Base ref for `--review-change`, `--ci-handoff`, and `--delivery-brief` (default `origin/main`, then `HEAD`) |
 | `--ci-handoff` | Compose verify and review into a bounded, redacted, head-bound CI handoff brief and exit |
+| `--delivery-brief` | Compose plan, verify, review, and CI handoff into a bounded, redacted, head-bound completion verdict and exit |
+| `--ci-result <state>` | CI outcome for `--delivery-brief`: `pass`, `fail`, or `pending` (default `pending`) |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -955,6 +957,54 @@ Add `--output json` for a versioned record (`schema` `oh-my-cli.ci-handoff`)
 whose `head` binds the brief to the repo head and whose `commands`, `review`,
 and `blockers` fields carry the handoff evidence.
 
+### Delivery brief
+
+After CI finishes, get one objective answer to "is this change ready to ship?"
+`--delivery-brief` composes the plan, verify, review, and CI-handoff slices with
+a bounded CI result into a single bounded, redacted, head-bound completion
+verdict: `ship`, `hold`, or `no-ship`. It is the capstone of the verify → review
+→ handoff → deliver arc — the pre-CI handoff brief answers "is this safe to hand
+to CI?", while the delivery brief answers "is this clear to ship?" once the CI
+result is known.
+
+```bash
+oh-my-cli --delivery-brief --ci-result pass
+# or deliver against an explicit base
+oh-my-cli --delivery-brief --ci-result pass --base origin/main --workspace path/to/repo
+```
+
+The CI outcome is a bounded, validated input (`--ci-result pass|fail|pending`,
+default `pending`) so the verdict stays deterministic and offline. It runs only
+the repository's own canonical verify commands (via the handoff slice); it never
+mutates the repository or governance paths and never calls a provider. Secret-
+like content is reported only as a count (never literals) and the absolute
+workspace path never appears in the output. The verdict is `no-ship` when an
+introduced secret, a mutated protected governance path, a failing local verify,
+or a failed CI is present; `hold` when there is no change to deliver, CI is still
+pending, or the plan has no grounded verification command; otherwise `ship`. Exit
+code: `0` ship, `1` hold/no-ship, `2` usage error.
+
+```text
+Delivery brief (oh-my-cli.delivery-brief v1)
+──────────────────────────────────────────────
+Head   : 2426b8272da5c9d56c9d0a4b9355eaa5e6b6f8ac
+Base   : origin/main (9f53e65c64b8dbd9a2616e61d4db18a62ea298ed)
+Verdict: ship
+Change : 3 file(s), +410 -0
+Signals:
+  plan     grounded
+  verify   pass
+  review   clean
+  handoff  ready-for-ci
+  ci       pass
+Blockers: none
+Holds: none
+```
+
+Add `--output json` for a versioned record (`schema` `oh-my-cli.delivery-brief`)
+whose `head` binds the verdict to the repo head and whose `signals`, `blockers`,
+and `holds` fields carry the completion evidence.
+
 ## Built-in tools
 
 | Tool | Category | Description |
@@ -1040,6 +1090,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/task-verify.ts` — bounded, redacted, head-bound pass/fail verification of the repo's canonical commands (`--verify-task`)
 - `src/change-review.ts` — bounded, redacted, head-bound review brief for the current change against a base ref (`--review-change`)
 - `src/ci-handoff.ts` — bounded, redacted, head-bound CI handoff brief composing verify + review (`--ci-handoff`)
+- `src/delivery-brief.ts` — bounded, redacted, head-bound completion verdict composing plan + verify + review + handoff with a CI result (`--delivery-brief`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests
