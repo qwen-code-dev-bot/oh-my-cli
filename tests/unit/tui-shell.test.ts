@@ -200,6 +200,22 @@ describe("tui-shell: transcript anchors newest content at the bottom", () => {
 });
 
 describe("tui-shell: whole-screen composition", () => {
+  it("uses the responsive product wordmark and a useful first-run empty state", () => {
+    const text = renderShell(baseState()).join("\n");
+    expect(text).toContain("████ █  █");
+    expect(text).toContain("terminal-native coding agent");
+    expect(text).toContain("Ready for your next task");
+    expect(text).toContain("reference @files");
+    expect(text).toContain("Ctrl+K");
+  });
+
+  it("reduces the identity before sacrificing the composer on short terminals", () => {
+    const text = renderShell(baseState({ viewport: { rows: 12, cols: 40 } })).join("\n");
+    expect(text).toContain("OH MY CLI");
+    expect(text).toContain("[edit]");
+    expect(text).not.toContain("████ █  █");
+  });
+
   it("renders exactly viewport.rows rows with the composer above the status footer", () => {
     const state = baseState({
       transcript: [{ kind: "assistant", text: "answer" }],

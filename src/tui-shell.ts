@@ -19,7 +19,7 @@ import { runAgent } from "./agent.js";
 import { runPalette } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
-import { VERSION } from "./product-banner.js";
+import { MEDIUM_MARK, VERSION, WIDE_WORDMARK } from "./product-banner.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -28,7 +28,7 @@ import { VERSION } from "./product-banner.js";
 // Total composer band height (a state rule line plus bounded input rows).
 export const COMPOSER_MAX_ROWS = 8;
 export const COMPOSER_MIN_ROWS = 1;
-export const IDENTITY_MAX_ROWS = 1;
+export const IDENTITY_MAX_ROWS = 7;
 export const STATUS_ROWS = 1;
 
 // Minimum terminal dimensions before the full-screen shell is used at all; below
@@ -74,6 +74,9 @@ export interface StatusInfo {
 export interface ShellStyle {
   bold: string;
   dim: string;
+  accent: string;
+  accentSoft: string;
+  success: string;
   reset: string;
 }
 
@@ -121,8 +124,17 @@ export interface ComposedScreen {
 // ---------------------------------------------------------------------------
 
 export function shellStyle(color: boolean): ShellStyle {
-  if (!color) return { bold: "", dim: "", reset: "" };
-  return { bold: "\x1b[1m", dim: "\x1b[2m", reset: "\x1b[0m" };
+  if (!color) {
+    return { bold: "", dim: "", accent: "", accentSoft: "", success: "", reset: "" };
+  }
+  return {
+    bold: "\x1b[1m",
+    dim: "\x1b[2m",
+    accent: "\x1b[38;5;81m",
+    accentSoft: "\x1b[38;5;141m",
+    success: "\x1b[38;5;114m",
+    reset: "\x1b[0m",
+  };
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -185,8 +197,16 @@ export function computeLayout(viewport: Viewport, opts: { composerRows?: number 
   const statusRows = rows >= 1 ? STATUS_ROWS : 0;
   let remaining = rows - statusRows;
 
-  // Identity header: keep it only when there is comfortable room.
-  const identityRows = remaining >= 3 ? IDENTITY_MAX_ROWS : 0;
+  // Identity scales from a full product wordmark to a compact title. Decoration
+  // yields before conversation space on short or narrow terminals.
+  const identityRows =
+    remaining >= 17 && cols >= 44
+      ? IDENTITY_MAX_ROWS
+      : remaining >= 8 && cols >= 20
+        ? 2
+        : remaining >= 3
+          ? 1
+          : 0;
   remaining -= identityRows;
 
   // Composer: bounded, but always leave >= 1 row for the transcript when possible.
@@ -258,13 +278,22 @@ export function renderIdentity(layout: ShellLayout, style: ShellStyle, version: 
   const height = layout.identity.end - layout.identity.start;
   if (height <= 0) return [];
   const cols = layout.viewport.cols;
-  const wordmark = "OH MY CLI";
-  const ver = ` v${version}`;
-  // Clip on plain length so color escapes never inflate the visible width.
-  if (wordmark.length + ver.length > cols) {
-    return [clipLine(wordmark + ver, cols)];
+  const metadata = `v${version}  ·  terminal-native coding agent`;
+  if (height >= 7 && cols >= 44) {
+    const rows = WIDE_WORDMARK.map((line, index) => {
+      const tone = index < 2 ? style.accent : style.accentSoft;
+      return `${tone}${style.bold}${line}${style.reset}`;
+    });
+    return [...rows, `${style.dim}${clipLine(metadata, cols)}${style.reset}`, ""];
   }
-  return [`${style.bold}${wordmark}${style.reset}${style.dim}${ver}${style.reset}`];
+  if (height >= 2 && cols >= 20) {
+    const mark = MEDIUM_MARK[0] ?? "OMC";
+    return [
+      `${style.accent}${style.bold}${clipLine(mark, cols)}${style.reset}`,
+      `${style.dim}${clipLine(`OH MY CLI  ${metadata}`, cols)}${style.reset}`,
+    ];
+  }
+  return [`${style.accent}${style.bold}${clipLine(`OH MY CLI  v${version}`, cols)}${style.reset}`];
 }
 
 export function renderStatusLine(info: StatusInfo, layout: ShellLayout, style: ShellStyle): string[] {
@@ -275,11 +304,28 @@ export function renderStatusLine(info: StatusInfo, layout: ShellLayout, style: S
   // when known, and approval mode. No api key, base URL, or other credential.
   const parts = [
     info.model,
+    `approval ${info.approvalMode}`,
     info.workspace,
     info.contextUsage ? info.contextUsage : null,
-    `approval ${info.approvalMode}`,
   ].filter((p): p is string => Boolean(p));
-  return [`${style.dim}${clipLine(parts.join(" · "), cols)}${style.reset}`];
+  const indicator = `${style.success}●${style.reset}`;
+  return [`${indicator} ${style.dim}${clipLine(parts.join("  ·  "), Math.max(0, cols - 2))}${style.reset}`];
+}
+
+function renderEmptyTranscript(region: Region, cols: number, style: ShellStyle): string[] {
+  const height = Math.max(0, region.end - region.start);
+  if (height === 0) return [];
+  const content = [
+    `${style.accent}${style.bold}${clipLine("Ready for your next task", cols)}${style.reset}`,
+    `${style.dim}${clipLine("Ask a question, reference @files, or open commands with Ctrl+K.", cols)}${style.reset}`,
+    "",
+    `${style.dim}${clipLine("/help  explore capabilities    /status  inspect this session", cols)}${style.reset}`,
+  ];
+  const top = Math.max(1, Math.min(3, Math.floor((height - content.length) / 3)));
+  const lines = Array.from({ length: top }, () => "");
+  lines.push(...content.slice(0, Math.max(0, height - top)));
+  while (lines.length < height) lines.push("");
+  return lines.slice(0, height);
 }
 
 function entryPrefix(kind: TranscriptKind): string {
@@ -328,7 +374,7 @@ function renderRule(label: string, cols: number, style: ShellStyle): string {
   const labelCells = Array.from(label).length;
   if (cols <= labelCells) return clipLine(label, cols);
   const fill = cols - labelCells - 1;
-  return `${style.bold}${label}${style.reset} ${"─".repeat(fill)}`;
+  return `${style.accent}${style.bold}${label}${style.reset} ${style.dim}${"─".repeat(fill)}${style.reset}`;
 }
 
 // Render the composer band. When there is room (>= 2 rows) the first row is a
@@ -372,7 +418,10 @@ export function composeScreen(state: ShellState): ComposedScreen {
   const layout = computeLayout(state.viewport, { composerRows });
 
   const identityLines = renderIdentity(layout, style, state.version);
-  const transcriptLines = renderTranscript(state.transcript, layout.transcript, layout.viewport.cols);
+  const transcriptLines =
+    state.transcript.length === 0
+      ? renderEmptyTranscript(layout.transcript, layout.viewport.cols, style)
+      : renderTranscript(state.transcript, layout.transcript, layout.viewport.cols);
   const composerLines = renderComposer(state.composer, layout, style);
   const statusLines = renderStatusLine(state.status, layout, style);
 
