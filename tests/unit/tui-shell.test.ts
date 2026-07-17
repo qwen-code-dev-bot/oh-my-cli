@@ -43,10 +43,10 @@ describe("tui-shell: computeLayout viewport allocation", () => {
     expect(layout.status.end).toBe(24);
   });
 
-  it("always keeps a status footer row when any space exists", () => {
+  it("uses a two-row status footer when space allows", () => {
     for (const rows of [1, 2, 4, 8, 24, 50]) {
       const layout = computeLayout({ rows, cols: 80 }, { composerRows: 2 });
-      expect(layout.statusRows).toBe(1);
+      expect(layout.statusRows).toBe(rows === 1 ? 1 : 2);
       expect(layout.status.end).toBe(rows);
     }
   });
@@ -72,8 +72,8 @@ describe("tui-shell: computeLayout viewport allocation", () => {
 
 describe("tui-shell: bounded multiline growth", () => {
   it("caps the composer band height regardless of input line count", () => {
-    expect(composerTotalRows("")).toBe(2); // rule + 1
-    expect(composerTotalRows("a\nb\nc")).toBe(4);
+    expect(composerTotalRows("")).toBe(3); // top rule + input + bottom rule
+    expect(composerTotalRows("a\nb\nc")).toBe(5);
     const many = Array.from({ length: 30 }, (_, i) => `line${i}`).join("\n");
     expect(composerTotalRows(many)).toBe(COMPOSER_MAX_ROWS);
   });
@@ -119,7 +119,7 @@ describe("tui-shell: composer states are color-independent", () => {
         layout,
         shellStyle(false),
       );
-      expect(lines.join("\n")).toContain(`[${composerMarker(mode).label}]`);
+      expect(lines.join("\n")).toContain(`${composerMarker(mode).glyph} ${composerMarker(mode).label}`);
       expect(lines.join("\n")).not.toMatch(ANSI);
     }
   });
@@ -164,8 +164,8 @@ describe("tui-shell: status line is readable and credential-free", () => {
       approvalMode: "default",
     };
     const layout = computeLayout({ rows: 24, cols: 40 });
-    const line = renderStatusLine(info, layout, shellStyle(false)).join("");
-    expect(visibleWidth(line)).toBeLessThanOrEqual(40);
+    const lines = renderStatusLine(info, layout, shellStyle(false));
+    for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(40);
   });
 });
 
@@ -200,6 +200,22 @@ describe("tui-shell: transcript anchors newest content at the bottom", () => {
 });
 
 describe("tui-shell: whole-screen composition", () => {
+  it("uses a Qwen-style product header and quiet first-run canvas", () => {
+    const text = renderShell(baseState()).join("\n");
+    expect(text).toContain("████ █  █");
+    expect(text).toContain(">_ OH MY CLI");
+    expect(text).toContain("(/model to change)");
+    expect(text).toContain("Tips: use @path");
+    expect(text).toContain("Ctrl+K");
+  });
+
+  it("reduces the identity before sacrificing the composer on short terminals", () => {
+    const text = renderShell(baseState({ viewport: { rows: 12, cols: 40 } })).join("\n");
+    expect(text).toContain("███ █   █ ███");
+    expect(text).toContain("❯ edit");
+    expect(text).not.toContain("████ █  █");
+  });
+
   it("renders exactly viewport.rows rows with the composer above the status footer", () => {
     const state = baseState({
       transcript: [{ kind: "assistant", text: "answer" }],
@@ -244,7 +260,7 @@ describe("tui-shell: whole-screen composition", () => {
     expect(text).not.toMatch(ANSI);
     expect(text).toContain("plain answer");
     expect(text).toContain("typed");
-    expect(text).toContain("[edit]");
+    expect(text).toContain("❯ edit");
   });
 });
 
