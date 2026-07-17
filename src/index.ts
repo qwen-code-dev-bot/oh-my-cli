@@ -802,10 +802,13 @@ program
           mutatingAllowed,
         });
         sealSession();
+        // Exit with the run outcome so unattended/CI callers can detect failure;
+        // the plain-text path previously fell through and always exited 0.
+        const exitCode = result.ok ? 0 : 1;
         if (opts.summary) {
           const summary = buildRunSummary({
             ok: result.ok,
-            exitCode: result.ok ? 0 : 1,
+            exitCode,
             reason: result.reason,
             elapsedMs: Date.now() - startedAt,
             rounds: result.rounds,
@@ -819,6 +822,7 @@ program
           });
           process.stdout.write("\n" + formatRunSummary(summary) + "\n");
         }
+        process.exit(exitCode);
       } else if (opts.resume) {
         // Resume mode: need a new prompt from stdin
         if (process.stdin.isTTY) {
