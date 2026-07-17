@@ -81,6 +81,8 @@ without touching other sessions.
 | `--repo-context` | Inspect a bounded, redacted repository context snapshot (read-only) and exit |
 | `--plan <task>` | Produce a bounded, deterministic execution plan for a task (read-only) and exit |
 | `--verify-task` | Run the repository's canonical verify commands and report a bounded, head-bound pass/fail verdict and exit |
+| `--review-change` | Review the current change against a base ref and emit a bounded, redacted, head-bound review brief and exit |
+| `--base <ref>` | Base ref for `--review-change` (default `origin/main`, then `HEAD`) |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -680,6 +682,52 @@ Add `--output json` for a versioned record (`schema` `oh-my-cli.task-verify`)
 whose `head` binds the verdict to the repo head and whose `results` array
 carries each command's exit code, pass flag, duration, and redacted output tail.
 
+### Change review
+
+Before opening or merging a PR, get an objective, machine-checkable answer to
+"what does this change actually alter, and does it introduce an obvious,
+reviewable risk?" `--review-change` computes the change set between a base ref
+(default `origin/main`, then `HEAD`) and the current head/worktree using Git
+only, and emits a bounded, redacted, head-bound review brief:
+
+```bash
+oh-my-cli --review-change
+# or review against an explicit base
+oh-my-cli --review-change --base origin/main --workspace path/to/repo
+```
+
+It runs no commands and calls no provider; every signal is objective and
+reproducible. Secret-like content is reported only as a count (never literals)
+and the absolute workspace path never appears in the output. The verdict is
+`needs-attention` when any objective signal fires — a secret-like string
+introduced, a protected governance/security/license path mutated, source
+changed without a corresponding test change, an oversized change, or a new
+runtime dependency added — `clean` otherwise, or `no-change` for an empty diff.
+Exit code: `0` clean/no-change, `1` needs-attention, `2` usage error.
+
+```text
+Change review (oh-my-cli.change-review v1)
+──────────────────────────────────────────────
+Head   : 2426b8272da5c9d56c9d0a4b9355eaa5e6b6f8ac
+Base   : origin/main (9f53e65c64b8dbd9a2616e61d4db18a62ea298ed)
+Verdict: clean
+Changes: 3 file(s), +410 -0
+Files:
+  A  src/change-review.ts  (+180 -0)
+  M  src/index.ts  (+24 -0)
+  A  tests/unit/change-review.test.ts  (+206 -0)
+Signals:
+  Secrets introduced : 0 added line(s)
+  Protected paths    : none
+  Source w/o tests   : no
+  Oversized change   : no
+  Runtime deps       : n/a
+```
+
+Add `--output json` for a versioned record (`schema` `oh-my-cli.change-review`)
+whose `head` binds the brief to the repo head and whose `signals` object carries
+each objective risk signal.
+
 ## Built-in tools
 
 | Tool | Category | Description |
@@ -740,6 +788,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/repo-context.ts` — read-only, bounded, redacted repository-context snapshot (`--repo-context`)
 - `src/task-plan.ts` — deterministic, bounded, redacted task planner grounded in the repo context (`--plan`)
 - `src/task-verify.ts` — bounded, redacted, head-bound pass/fail verification of the repo's canonical commands (`--verify-task`)
+- `src/change-review.ts` — bounded, redacted, head-bound review brief for the current change against a base ref (`--review-change`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests
