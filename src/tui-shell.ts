@@ -514,6 +514,10 @@ export interface ConversationShellOptions {
   // Returns the persisted conversation at submit time (mirrors store.load).
   loadHistory: () => SessionMessage[];
   budgetUsd?: number | null;
+  // Folder-trust enforcement: when false, mutating tools fail closed in the
+  // interactive shell too (criterion 1 requires the distinction in interactive
+  // mode). Defaults to true so a non-enforcing run is unchanged.
+  mutatingAllowed?: boolean;
   color: boolean;
   paletteCommands: PaletteCommand[];
   stdin?: NodeJS.ReadStream;
@@ -727,6 +731,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         onMessage: opts.onMessage,
         sink: createShellSink(generation),
         budgetUsd: opts.budgetUsd ?? null,
+        mutatingAllowed: opts.mutatingAllowed ?? true,
       });
       if (generation !== runGeneration) return; // cancelled mid-run
       state.composer.mode = result.ok ? "focused" : "error";

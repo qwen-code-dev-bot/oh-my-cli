@@ -47,6 +47,15 @@ import {
   formatWorktreeLeaseResult,
 } from "./worktree-lease.js";
 import { evaluateCommandPolicy, formatCommandPolicyDecision } from "./command-policy.js";
+import {
+  resolveFolderTrust,
+  formatFolderTrust,
+  loadTrustStore,
+  addTrusted,
+  saveTrustStore,
+  defaultTrustStorePath,
+  workspaceTrustKey,
+} from "./folder-trust.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary } from "./run-summary.js";
@@ -86,6 +95,10 @@ program
   .option("--workspace <dir>", "Workspace directory", process.cwd())
   .option("--preflight", "Run a provider connectivity preflight and exit")
   .option("--sandbox-info", "Show effective sandbox isolation diagnostic and exit")
+  .option("--trust-info", "Show the folder-trust decision for the workspace (read-only) and exit")
+  .option("--trust", "Trust this workspace for this run only (not persisted)")
+  .option("--trust-workspace", "Persist trust for this workspace in the user trust store and exit")
+  .option("--enforce-folder-trust", "Deny mutating tools when the workspace is untrusted (env: OMC_ENFORCE_FOLDER_TRUST=1)")
   .option("--health", "Show MCP server and extension health inventory and exit")
   .option("--settings <path>", "Unified settings file for model config and --health (default ~/.oh-my-cli/settings.json)")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
@@ -524,6 +537,36 @@ program
         process.exit(0);
       }
 
+      if (opts.trustInfo) {
+        const enforcing =
+          Boolean(opts.enforceFolderTrust) || process.env.OMC_ENFORCE_FOLDER_TRUST === "1";
+        const ft = resolveFolderTrust({
+          workspacePath: opts.workspace,
+          env: process.env,
+          trustThisRun: Boolean(opts.trust),
+        });
+        process.stdout.write(
+          formatFolderTrust({
+            workspacePath: opts.workspace,
+            decision: ft.decision,
+            sandbox: ft.sandbox,
+            enforcing,
+          }) + "\n",
+        );
+        process.exit(0);
+      }
+
+      if (opts.trustWorkspace) {
+        const storePath = defaultTrustStorePath();
+        const key = workspaceTrustKey(opts.workspace);
+        const store = addTrusted(loadTrustStore(storePath), key);
+        saveTrustStore(storePath, store);
+        process.stdout.write(
+          `Trusted workspace ${redactHomePath(opts.workspace)} (store: ${redactHomePath(storePath)})\n`,
+        );
+        process.exit(0);
+      }
+
       if (opts.preflight) {
         const resolved = resolveModelConfig({
           settingsPath: resolveSettingsPath(opts.settings),
@@ -546,6 +589,29 @@ program
       if (!["default", "auto-edit", "yolo"].includes(approvalMode)) {
         process.stderr.write(`Error: invalid approval mode "${approvalMode}"\n`);
         process.exit(1);
+      }
+
+      // Folder-trust boundary: when enforcement is on, an untrusted workspace
+      // fails closed for every mutating tool (approval modes stay subordinate,
+      // so yolo cannot widen it). Off by default; read-only tools are unaffected.
+      // Computed lazily so a non-enforcing run pays no cost and behaves exactly
+      // as before.
+      const enforcingFolderTrust =
+        Boolean(opts.enforceFolderTrust) || process.env.OMC_ENFORCE_FOLDER_TRUST === "1";
+      let mutatingAllowed = true;
+      if (enforcingFolderTrust) {
+        const folderTrust = resolveFolderTrust({
+          workspacePath: workspace.root,
+          env: process.env,
+          trustThisRun: Boolean(opts.trust),
+        });
+        mutatingAllowed = folderTrust.decision.mutatingAllowed;
+        if (!mutatingAllowed) {
+          process.stderr.write(
+            `Folder trust: ${folderTrust.decision.state} — mutating tools denied (fail closed). ` +
+              `Trust with --trust (this run) or --trust-workspace (durable), or set OMC_SANDBOX=enforced.\n`,
+          );
+        }
       }
 
       // Optional spend budget (flag overrides env). Invalid values fail fast with
@@ -627,6 +693,7 @@ program
               onMessage,
               sink,
               budgetUsd,
+              mutatingAllowed,
             });
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -690,6 +757,7 @@ program
           sessionId,
           onMessage,
           budgetUsd,
+          mutatingAllowed,
         });
         sealSession();
         if (opts.summary) {
@@ -727,6 +795,7 @@ program
               sessionId,
               onMessage,
               budgetUsd,
+              mutatingAllowed,
             });
           });
         } else {
@@ -768,6 +837,7 @@ program
             onMessage,
             loadHistory: () => store.load(sessionId),
             budgetUsd,
+            mutatingAllowed,
             color: useColor,
             paletteCommands,
           });
@@ -844,6 +914,7 @@ program
                 sessionId,
                 onMessage,
                 budgetUsd,
+                mutatingAllowed,
               });
             } catch (err: unknown) {
               const msg = err instanceof Error ? err.message : String(err);

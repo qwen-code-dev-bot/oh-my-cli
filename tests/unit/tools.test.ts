@@ -139,6 +139,13 @@ describe("Tools", () => {
       expect(result.content).toContain("hello");
     });
 
+    it("confines the command working directory to the workspace", async () => {
+      const result = await toolMap.get("shell")!.execute({ command: "pwd" }, workspace);
+      expect(result.isError).toBeUndefined();
+      // The command runs in the workspace root, not the process launch directory.
+      expect(fs.realpathSync(result.content.trim())).toBe(fs.realpathSync(tmpDir));
+    });
+
     it("captures stderr on failure", async () => {
       const result = await toolMap.get("shell")!.execute({ command: "ls /nonexistent-path-xyz" }, workspace);
       expect(result.isError).toBe(true);
