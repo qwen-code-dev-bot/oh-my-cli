@@ -62,6 +62,16 @@ export type HeadlessEvent =
       reasonClass: string;
       delayMs: number;
     }
+  // The in-memory transcript was compacted to relieve context pressure. Metadata
+  // only: how many messages were summarized and how many completed-action
+  // receipts were retained, plus the prompt-token pressure that triggered it.
+  | {
+      type: "compaction";
+      round: number;
+      summarizedMessages: number;
+      receipts: number;
+      promptTokens: number;
+    }
   // Opt-in (`--summary`) privacy-safe run summary, emitted just before the
   // terminal `complete`. Carries only metadata, never prompt/tool/file content.
   | { type: "summary"; summary: RunSummary }
@@ -185,6 +195,15 @@ export function createHeadlessSink(writer: HeadlessWriter): AgentSink {
         maxAttempts: info.maxAttempts,
         reasonClass: info.reasonClass,
         delayMs: info.delayMs,
+      });
+    },
+    compaction: (info) => {
+      writer.emit({
+        type: "compaction",
+        round: info.round,
+        summarizedMessages: info.summarizedMessages,
+        receipts: info.receipts,
+        promptTokens: info.promptTokens,
       });
     },
   };

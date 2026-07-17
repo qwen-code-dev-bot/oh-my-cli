@@ -109,12 +109,46 @@ interrupted write is promoted, a partial one is discarded, and a corrupt one is
 quarantined alongside the session (preserved, never deleted) with a warning —
 without touching other sessions.
 
+### Session compaction
+
+A long session can be compacted into a bounded, versioned summary so it can
+continue past a provider context limit without losing task or execution state.
+Compaction never edits the transcript: the full JSONL stays on disk and the
+summary is written to a sibling `<session-id>.compact.json` sidecar. On the next
+`--resume`, the sidecar is validated against the transcript (schema, version, and
+a digest of the summarized messages) and only then applied; a missing, corrupt,
+or mismatched sidecar is ignored and the full transcript is used instead (fail
+closed). Completed tool actions are kept as bounded, redacted receipts that the
+resumed model is told **not to repeat**, so removing detailed turns never re-runs
+a completed mutation.
+
+```bash
+# Write a compaction sidecar for a session (original transcript untouched) and
+# print a redacted report of what will be retained.
+oh-my-cli --compact <session-id>
+
+# Resume: the validated summary is applied automatically.
+oh-my-cli --resume <session-id>
+```
+
+To compact automatically during a run, set a context-pressure threshold in
+tokens; when the latest provider prompt reaches it, the in-memory transcript is
+compacted before the next call (the on-disk transcript is still untouched, and
+the event is observable in `--output json` as a `compaction` record):
+
+```bash
+oh-my-cli -p "Long task" --compact-threshold 100000
+# or: OMC_COMPACT_THRESHOLD=100000 oh-my-cli -p "Long task"
+```
+
 ### Options
 
 | Option | Description |
 |---|---|
 | `-p, --prompt <prompt>` | Run a single non-interactive request |
 | `--resume <session-id>` | Resume a persisted session |
+| `--compact <session-id>` | Compact a session into a bounded summary sidecar (original transcript preserved) and exit |
+| `--compact-threshold <tokens>` | Auto-compact the in-memory transcript when the latest prompt size reaches this (also honors `OMC_COMPACT_THRESHOLD`) |
 | `--approval-mode <mode>` | `default`, `auto-edit`, or `yolo` |
 | `--workspace <dir>` | Workspace directory (default: cwd) |
 | `--doctor` | Run read-only installation/platform readiness checks and exit |
@@ -992,6 +1026,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/permission-impact.ts` — redacted permission-impact preview for the approval prompt
 - `src/color.ts` — ANSI color toggle (`--no-color` / `NO_COLOR`) and palette factory
 - `src/session.ts` — JSONL session persistence
+- `src/compaction.ts` — bounded, versioned, fail-closed session compaction (`--compact`/`--compact-threshold`)
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
 - `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`)
 - `src/run-scorecard.ts` — deterministic, privacy-safe comparison of two summaries (`--baseline`/`--candidate`)

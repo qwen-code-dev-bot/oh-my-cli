@@ -14,6 +14,12 @@ import { runPreflight, formatPreflight } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
 import { collectSessionSummaries, formatSessionList } from "./session-summary.js";
+import {
+  compactMessages,
+  saveCompaction,
+  formatCompaction,
+  loadSessionMessages,
+} from "./compaction.js";
 import { collectDoctorReport, formatDoctorReport } from "./doctor.js";
 import { collectRepoReadiness, formatRepoReadiness } from "./repo-readiness.js";
 import { collectRepoContext, formatRepoContext } from "./repo-context.js";
@@ -102,6 +108,8 @@ program
   .option("--health", "Show MCP server and extension health inventory and exit")
   .option("--settings <path>", "Unified settings file for model config and --health (default ~/.oh-my-cli/settings.json)")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
+  .option("--compact <session-id>", "Compact a session into a bounded summary sidecar (original preserved) and exit")
+  .option("--compact-threshold <tokens>", "Auto-compact the in-memory transcript when the latest prompt size reaches this (env: OMC_COMPACT_THRESHOLD)")
   .option("--doctor", "Run read-only installation and platform readiness checks and exit")
   .option("--readiness", "Inspect repository readiness for a blocked task (read-only) and exit")
   .option("--expected-branch <name>", "Expected branch for the --readiness branch check")
@@ -196,6 +204,24 @@ program
         const store = new SessionStore();
         const summaries = collectSessionSummaries(store);
         process.stdout.write(formatSessionList(summaries) + "\n");
+        process.exit(0);
+      }
+
+      // Compaction mode: derive a bounded, versioned summary sidecar for a
+      // session. The original transcript is never modified; the sidecar is
+      // consumed on the next resume via loadSessionMessages. Exits 2 on a
+      // missing/empty session, 0 on success.
+      if (opts.compact !== undefined) {
+        const store = new SessionStore();
+        const id = String(opts.compact);
+        const full = store.load(id);
+        if (full.length === 0) {
+          process.stderr.write(`Error: no such session "${id}"\n`);
+          process.exit(2);
+        }
+        const { summary } = compactMessages(full);
+        saveCompaction(store.compactPath(id), summary);
+        process.stdout.write(formatCompaction(summary) + "\n");
         process.exit(0);
       }
 
@@ -625,6 +651,20 @@ program
         process.exit(1);
       }
 
+      // Context-pressure auto-compaction threshold (tokens). Honors the flag then
+      // the env var; absent/blank disables it, an unparseable value is a usage
+      // error rather than a silent disable.
+      let compactThreshold: number | undefined;
+      const compactRaw = opts.compactThreshold ?? process.env.OMC_COMPACT_THRESHOLD;
+      if (compactRaw !== undefined && String(compactRaw).trim() !== "") {
+        const parsed = Number(String(compactRaw));
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          process.stderr.write(`Error: invalid compact threshold "${compactRaw}" (expected a positive integer)\n`);
+          process.exit(1);
+        }
+        compactThreshold = Math.floor(parsed);
+      }
+
       let sessionId: string;
       let existingMessages: SessionMessage[] = [];
 
@@ -641,7 +681,7 @@ program
             `Warning: session ${sessionId} had a corrupt checkpoint; it was preserved as ${where} and isolated. Starting fresh.\n`,
           );
         }
-        existingMessages = store.load(sessionId);
+        existingMessages = loadSessionMessages(store, sessionId);
         if (existingMessages.length === 0) {
           process.stderr.write(`Warning: session ${sessionId} is empty or not found\n`);
         }
@@ -693,6 +733,7 @@ program
               onMessage,
               sink,
               budgetUsd,
+              compactThreshold,
               mutatingAllowed,
             });
           } catch (err: unknown) {
@@ -757,6 +798,7 @@ program
           sessionId,
           onMessage,
           budgetUsd,
+          compactThreshold,
           mutatingAllowed,
         });
         sealSession();
@@ -795,6 +837,7 @@ program
               sessionId,
               onMessage,
               budgetUsd,
+              compactThreshold,
               mutatingAllowed,
             });
           });
@@ -835,8 +878,9 @@ program
             approvalMode,
             sessionId,
             onMessage,
-            loadHistory: () => store.load(sessionId),
+            loadHistory: () => loadSessionMessages(store, sessionId),
             budgetUsd,
+            compactThreshold,
             mutatingAllowed,
             color: useColor,
             paletteCommands,
@@ -906,7 +950,7 @@ program
               process.exit(0);
             }
             try {
-              existingMessages = store.load(sessionId);
+              existingMessages = loadSessionMessages(store, sessionId);
               await runAgent(answer, existingMessages.slice(0, -1), {
                 config,
                 workspace,
@@ -914,6 +958,7 @@ program
                 sessionId,
                 onMessage,
                 budgetUsd,
+                compactThreshold,
                 mutatingAllowed,
               });
             } catch (err: unknown) {
