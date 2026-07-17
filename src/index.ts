@@ -60,6 +60,7 @@ import type { RegressionThresholds } from "./run-scorecard.js";
 import type { RunSummary } from "./run-summary.js";
 import { colorEnabled, createColorPalette } from "./color.js";
 import { formatProductBanner, VERSION } from "./product-banner.js";
+import { runConversationShell, isFullScreenCapable } from "./tui-shell.js";
 import path from "node:path";
 
 // Handle Ctrl-C gracefully — session is already persisted incrementally
@@ -714,16 +715,43 @@ program
         }
 
         const useColor = colorEnabled({ noColor: opts.color === false, env: process.env });
-        const { bold: BOLD, dim: DIM, reset: RESET } = createColorPalette(useColor);
-
-        const readline = await import("node:readline");
-        const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
 
         // Build palette commands with live context
         const paletteCommands: PaletteCommand[] = [
           ...defaultCommands(),
           { name: "/tools", description: "List available agent tools (read, write, edit, shell)", action: () => { process.stderr.write("Tools: read, write, edit, shell\n"); } },
         ];
+
+        // Prefer the stable full-screen conversation shell (regions + fixed
+        // composer) when the terminal supports it. Reduced color still uses it
+        // (without ANSI); only a non-TTY, missing/dumb terminal, or a too-small
+        // viewport falls back to the plain readline REPL below.
+        if (
+          isFullScreenCapable({
+            isTTY: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+            rows: process.stdout.rows,
+            cols: process.stdout.columns,
+            env: process.env,
+          })
+        ) {
+          await runConversationShell({
+            config,
+            workspace,
+            approvalMode,
+            sessionId,
+            onMessage,
+            loadHistory: () => store.load(sessionId),
+            budgetUsd,
+            color: useColor,
+            paletteCommands,
+          });
+          return;
+        }
+
+        const { bold: BOLD, dim: DIM, reset: RESET } = createColorPalette(useColor);
+
+        const readline = await import("node:readline");
+        const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
 
         // Startup identity: a responsive pixel-art banner printed once to stderr.
         // It is never redrawn, so it yields space naturally as the session scrolls.
