@@ -150,6 +150,10 @@ without touching other sessions.
 | `--worktree-root <dir>` | Directory where leased worktrees live (default `<workspace>/.oh-my-cli/worktrees`) |
 | `--command-policy <command>` | Evaluate one shell command against the offline command policy and exit |
 | `--provenance <source>` | Command provenance for `--command-policy`: `builtin`, `repository` (default), or `issue` |
+| `--trust-info` | Show the folder-trust decision for the workspace (read-only) and exit |
+| `--trust` | Trust this workspace for this run only (not persisted) |
+| `--trust-workspace` | Persist trust for this workspace in the user trust store and exit |
+| `--enforce-folder-trust` | Deny mutating tools when the workspace is untrusted (env: `OMC_ENFORCE_FOLDER_TRUST=1`) |
 
 Color is enabled by default in the interactive REPL and command palette. Pass
 `--no-color` or set a non-empty `NO_COLOR` environment variable (per
@@ -178,6 +182,62 @@ repository, an Issue, or a relayed message) cannot visually reorder or disguise
 the preview into a "Trojan Source"-style trap. Secret redaction, home-path
 collapsing, whitespace collapsing, and size truncation are unchanged, and
 ordinary commands render identically aside from any marker.
+
+### Folder trust
+
+Before any project-controlled instruction, setting, hook, extension, or mutating
+tool can affect a run, the CLI decides whether the workspace folder is trusted.
+This is the top-level safety boundary: it is **fail closed** and **approval modes
+are subordinate to it** — `--approval-mode yolo` cannot widen it, and read-only
+tools (`read`/`list`/`glob`/`grep`) are always permitted.
+
+A workspace is **untrusted by default**. Trust is granted only by an explicit
+user act, recorded in a **user-owned** store at `~/.oh-my-cli/trust.json` that a
+project can never write — so an untrusted repository cannot trust itself or
+select its own model endpoint, credential source, hooks, or mutating tools. The
+canonical workspace key collapses symlink aliases and linked git worktrees to one
+identity, so a subagent or leased worktree inherits its parent's trust (equal
+isolation) rather than escaping it.
+
+The decision distinguishes four states, in both interactive and headless modes:
+
+| State | Mutation | Meaning |
+|---|---|---|
+| `trusted` | permitted | Workspace is in the user trust store (or `--trust` for this run) |
+| `sandbox-enforced` | permitted | An effective sandbox is enforced around tool execution (`OMC_SANDBOX=enforced`) |
+| `untrusted` | denied | Not trusted and no sandbox; mutating tools fail closed |
+| `sandbox-unavailable` | denied | Not trusted and a sandbox is required (`OMC_REQUIRE_SANDBOX=1`) but unavailable |
+
+Enforcement is **opt-in** so existing runs are unchanged: pass
+`--enforce-folder-trust` (or set `OMC_ENFORCE_FOLDER_TRUST=1`) to deny mutating
+tools when the workspace is untrusted. Grant or inspect trust with:
+
+```bash
+# Show the folder-trust decision for the workspace (read-only) and exit
+oh-my-cli --trust-info --enforce-folder-trust --workspace path/to/repo
+
+# Trust this workspace for one run (not persisted)
+oh-my-cli -p "…" --enforce-folder-trust --trust
+
+# Persist trust for this workspace in the user trust store
+oh-my-cli --trust-workspace --workspace path/to/repo
+```
+
+```text
+Folder Trust
+────────────────────────────────────────
+Workspace:   ~/code/unfamiliar-repo
+Trust state: untrusted
+Sandbox:     none
+Mutation:    DENIED (fail closed)
+Enforcing:   yes
+Reason:      Workspace is not trusted; mutating tools fail closed.
+```
+
+The trust store fails closed on any missing, malformed, or wrong-schema file
+(nothing trusted) rather than widening trust. All diagnostics redact the host
+home directory to `~` and never emit secrets. `--trust-info` is a read-only
+diagnostic (always exit `0`), not a gate.
 
 ### Headless JSON protocol
 
@@ -872,7 +932,10 @@ and `blockers` fields carry the handoff evidence.
 | `edit` | mutate-file | Replace exactly one occurrence of text in a file |
 | `shell` | mutate-shell | Execute a command via `/bin/bash` (30s default timeout, 120s max, 1 MiB output cap) |
 
-File operations are confined to the workspace directory. Symlink escapes are detected and rejected.
+File operations are confined to the workspace directory. Symlink escapes are
+detected and rejected. Shell commands run with their working directory confined
+to the canonical workspace root, so a command cannot inherit a launch directory
+outside the trust boundary.
 
 The `list`, `glob`, and `grep` tools are read-only and therefore never require
 approval, so the agent can explore the repository in any approval mode. They
@@ -924,6 +987,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/discovery.ts` — bounded, read-only, symlink-safe discovery primitives (list, glob, grep) backing the same-named tools
 - `src/workspace.ts` — path confinement with symlink escape detection
 - `src/approval.ts` — approval mode logic
+- `src/folder-trust.ts` — folder-trust boundary and effective-sandbox detection (`--trust`/`--trust-info`/`--trust-workspace`/`--enforce-folder-trust`)
 - `src/command-policy.ts` — deterministic, offline shell-command classification and denial (`--command-policy`)
 - `src/permission-impact.ts` — redacted permission-impact preview for the approval prompt
 - `src/color.ts` — ANSI color toggle (`--no-color` / `NO_COLOR`) and palette factory

@@ -227,7 +227,7 @@ export function createTools(): ToolDef[] {
         required: ["command"],
       },
       category: "mutate-shell",
-      execute: async (args, _workspace) => {
+      execute: async (args, workspace) => {
         const { command, timeout } = ShellParams.parse(args);
         const timeoutMs = (timeout ?? 30) * 1000;
         // A liveness heartbeat is only useful on an interactive terminal; in
@@ -236,7 +236,9 @@ export function createTools(): ToolDef[] {
         const onLiveness = process.stderr.isTTY
           ? (elapsedMs: number) => process.stderr.write(formatLiveness(elapsedMs) + "\n")
           : undefined;
-        const run = await runShellCommand({ command, timeoutMs, onLiveness });
+        // Confine the command's working directory to the canonical workspace so
+        // it cannot inherit a launch directory outside the trust boundary.
+        const run = await runShellCommand({ command, timeoutMs, onLiveness, cwd: workspace.root });
         const elapsedMs = run.elapsedMs;
         if (run.timedOut) {
           return { content: `Error: command timed out after ${timeoutMs / 1000}s`, isError: true, elapsedMs };
@@ -270,6 +272,9 @@ export function formatLiveness(elapsedMs: number): string {
 export interface ShellRunOptions {
   command: string;
   timeoutMs: number;
+  // Working directory the command runs in. Confining this to the canonical
+  // workspace prevents a command from inheriting a launch directory outside it.
+  cwd?: string;
   // Per-stream output cap in bytes (default 1 MiB).
   maxOutput?: number;
   // Emit the first liveness beat once this much time has passed, then repeat.
@@ -305,6 +310,7 @@ export function runShellCommand(opts: ShellRunOptions): Promise<ShellRunResult> 
       const { spawn } = await import("node:child_process");
       const child = spawn("/bin/bash", ["-c", opts.command], {
         stdio: ["ignore", "pipe", "pipe"],
+        cwd: opts.cwd,
       });
 
       let stdout = "";

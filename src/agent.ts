@@ -7,6 +7,7 @@ import type { Workspace } from "./workspace.js";
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
 import { evaluateCommandPolicy, policyDenialMessage } from "./command-policy.js";
+import { folderTrustDenialMessage } from "./folder-trust.js";
 import { estimateCostUsd, lookupModelPrice, formatCostUsd } from "./cost.js";
 import { buildEffectiveSystemPrompt } from "./instruction-context.js";
 
@@ -22,6 +23,11 @@ export interface AgentOptions {
   // Optional spend budget in USD. When the running cost estimate reaches this
   // cap, the loop stops before issuing further provider calls. Null disables it.
   budgetUsd?: number | null;
+  // Folder-trust enforcement. When false, every mutating tool (file or shell)
+  // fails closed before approval is even considered, regardless of approvalMode
+  // (so yolo cannot widen the boundary). Defaults to true (no enforcement) so
+  // callers that do not opt in keep the existing behaviour.
+  mutatingAllowed?: boolean;
 }
 
 // Cumulative usage and cost reported after each round. `estimatedCostUsd` is an
@@ -284,7 +290,13 @@ export async function runAgent(
     // Execute each tool call
     for (const tc of assistantToolCalls) {
       sink.toolStart({ id: tc.id, name: tc.name, round });
-      const result = await executeToolCall(tc, toolMap, opts.approvalMode, opts.workspace);
+      const result = await executeToolCall(
+        tc,
+        toolMap,
+        opts.approvalMode,
+        opts.workspace,
+        opts.mutatingAllowed ?? true,
+      );
       sink.toolResult({ id: tc.id, name: tc.name, result, round });
       bump(toolCalls, tc.name);
       if (result.isError) bump(toolFailures, tc.name);
@@ -320,10 +332,18 @@ async function executeToolCall(
   toolMap: Map<string, ToolDef>,
   approvalMode: ApprovalMode,
   workspace: Workspace,
+  mutatingAllowed: boolean,
 ): Promise<ToolResult> {
   const tool = toolMap.get(tc.name);
   if (!tool) {
     return { content: `Error: unknown tool "${tc.name}"`, isError: true };
+  }
+
+  // Folder-trust enforcement runs first and regardless of approval mode, so an
+  // untrusted workspace fails closed for every mutating tool — yolo cannot widen
+  // the boundary. Read-only tools (list/glob/grep/read) are always permitted.
+  if (!mutatingAllowed && tool.category !== "read") {
+    return { content: folderTrustDenialMessage(), isError: true };
   }
 
   // Deterministic command policy runs before approval and regardless of mode,
