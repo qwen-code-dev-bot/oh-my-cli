@@ -29,13 +29,56 @@ and troubleshooting.
 
 ## Configuration
 
-Set these environment variables:
+Model configuration is resolved from environment variables and an optional user
+settings file. Environment variables always take precedence, so existing
+export-based setups work unchanged.
+
+### Environment variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `OPENAI_API_KEY` | Yes | — | API key for the provider |
+| `OPENAI_API_KEY` | Yes¹ | — | API key for the provider |
 | `OPENAI_BASE_URL` | No | `https://api.openai.com/v1` | OpenAI-compatible base URL |
-| `OPENAI_MODEL` | Yes | — | Model name |
+| `OPENAI_MODEL` | Yes¹ | — | Model name |
+
+¹ Not required in the environment when supplied through the user settings file
+below.
+
+### User settings file
+
+To avoid exporting variables in every shell, store the non-secret model
+configuration in the user-owned file `~/.oh-my-cli/settings.json`, or select an
+alternative with `--settings <path>`. The credential itself is never stored in
+the file — only the *name* of the environment variable that holds it:
+
+```json
+{
+  "model": {
+    "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "name": "qwen-latest-series-invite-beta-v77",
+    "apiKeyEnv": "DASHSCOPE_API_KEY"
+  },
+  "mcpServers": {},
+  "extensions": {}
+}
+```
+
+This is the same file that backs the `--health` MCP/extension inventory. Each
+field is resolved with the following precedence (highest first):
+
+| Field | 1 (highest) | 2 | 3 (lowest) |
+|---|---|---|---|
+| Base URL | `OPENAI_BASE_URL` | `model.baseUrl` | built-in default |
+| Model name | `OPENAI_MODEL` | `model.name` | *(required)* |
+| Credential | `OPENAI_API_KEY` | env var named by `model.apiKeyEnv` | *(required)* |
+
+Security: the settings file is only ever the user-owned default or a path you
+pass explicitly — a settings file inside a project is never auto-discovered, so
+an untrusted repository cannot redirect your endpoint or credential. Raw
+credential fields such as `model.apiKey` are rejected; reference an environment
+variable through `apiKeyEnv` instead. `oh-my-cli --preflight` prints a redacted
+summary of the resolved model, endpoint host, settings source, and credential
+variable name (never the credential value).
 
 ## Usage
 

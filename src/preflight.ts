@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import type { Config } from "./config.js";
+import { redactEndpointHost } from "./permission-impact.js";
 
 export type PreflightResult =
   | { ok: true; model: string; latencyMs: number }
@@ -60,7 +61,7 @@ function classifyError(err: unknown, config: Config): PreflightResult {
     return {
       ok: false,
       category: "unsupported_model",
-      message: `Model "${config.model}" is not available at ${config.baseUrl}. Check OPENAI_MODEL.`,
+      message: `Model "${config.model}" is not available at ${redactEndpointHost(config.baseUrl)}. Check OPENAI_MODEL.`,
     };
   }
 
@@ -68,7 +69,7 @@ function classifyError(err: unknown, config: Config): PreflightResult {
     return {
       ok: false,
       category: "network_failure",
-      message: `Cannot reach ${config.baseUrl} (${code}). Check OPENAI_BASE_URL and network.`,
+      message: `Cannot reach ${redactEndpointHost(config.baseUrl)} (${code}). Check OPENAI_BASE_URL and network.`,
     };
   }
 
@@ -84,7 +85,7 @@ function classifyError(err: unknown, config: Config): PreflightResult {
     return {
       ok: false,
       category: "network_failure",
-      message: `Endpoint not found at ${config.baseUrl}. Check OPENAI_BASE_URL.`,
+      message: `Endpoint not found at ${redactEndpointHost(config.baseUrl)}. Check OPENAI_BASE_URL.`,
     };
   }
 

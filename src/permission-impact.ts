@@ -252,3 +252,14 @@ export function redactHomePath(p: string): string {
   }
   return p;
 }
+
+// Reduce an endpoint URL to its host for display, dropping any userinfo, path,
+// and query so a credential accidentally embedded in the URL never appears in
+// diagnostics. Returns a placeholder when the value is not a parseable URL.
+export function redactEndpointHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "<invalid-url>";
+  }
+}
