@@ -19,6 +19,7 @@ import { collectRepoReadiness, formatRepoReadiness } from "./repo-readiness.js";
 import { collectRepoContext, formatRepoContext } from "./repo-context.js";
 import { planTask, formatTaskPlan } from "./task-plan.js";
 import { verifyTask, formatVerifyReport } from "./task-verify.js";
+import { reviewChange, formatChangeReviewReport } from "./change-review.js";
 import {
   readRecoveryCheckpoint,
   readEvidenceFile,
@@ -91,6 +92,8 @@ program
   .option("--repo-context", "Inspect a bounded, redacted repository context snapshot (read-only) and exit")
   .option("--plan <task>", "Produce a bounded, deterministic execution plan for a task (read-only) and exit")
   .option("--verify-task", "Run the repository's canonical verify commands and report a bounded, head-bound pass/fail verdict and exit")
+  .option("--review-change", "Review the current change against a base ref and emit a bounded, redacted, head-bound review brief and exit")
+  .option("--base <ref>", "Base ref for --review-change (default origin/main, then HEAD)")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
   .option("--task-identity <id>", "Stable task identity (used by --recover and worktree leases)")
@@ -287,6 +290,26 @@ program
           process.stdout.write(formatVerifyReport(report) + "\n");
         }
         process.exit(report.verdict === "fail" ? 1 : 0);
+      }
+
+      // Change-review mode: inspect the current change against a base ref and
+      // emit a bounded, redacted, head-bound review brief. Read-only (Git and
+      // package.json only, no commands run, no provider). Exit 0 when the change
+      // is clean or empty, 1 when an objective risk signal fires, 2 on a usage
+      // error.
+      if (opts.reviewChange) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const report = reviewChange({ workspace: opts.workspace, base: opts.base });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatChangeReviewReport(report) + "\n");
+        }
+        process.exit(report.verdict === "needs-attention" ? 1 : 0);
       }
 
       // Recovery mode: decide whether an interrupted task can safely resume from
