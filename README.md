@@ -167,6 +167,9 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--ci-result <state>` | CI outcome for `--delivery-brief`: `pass`, `fail`, or `pending` (default `pending`) |
 | `--provider-contract` | Inspect the resolved provider extension contract from settings (read-only, redacted) and exit |
 | `--provider <id>` | Provider id to select for `--provider-contract` (defaults to `settings.providers.default` or the sole entry) |
+| `--mcp-contract` | Inspect the resolved MCP server extension contract from settings (read-only, redacted) and exit |
+| `--server <id>` | MCP server id to select for `--mcp-contract` (defaults to `settings.mcp.default` or the sole entry) |
+| `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` and report the declared state |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -1068,6 +1071,76 @@ Add `--output json` for a versioned record (`schema` `oh-my-cli.provider-contrac
 carrying the negotiated `contractVersion`, the selected `providerId`, the redacted
 `endpoint`, `modelCatalog`, `capabilities`, and credential provenance.
 
+### MCP server contract
+
+The bounded health inventory (`--health`) lists every configured MCP server
+and extension with a health category — a read-only snapshot. To *depend on* one
+MCP server as a governed extension, declare it as a **versioned contract** in the
+same unified settings file (`~/.oh-my-cli/settings.json`, or `--settings <path>`).
+`--mcp-contract` negotiates the contract version, deterministically selects one
+server, and resolves its lifecycle state — read-only, redacted, and without
+changing core code.
+
+```json
+{
+  "mcp": {
+    "contractVersion": 1,
+    "default": "filesystem",
+    "entries": [
+      {
+        "id": "filesystem",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+        "capabilities": { "tools": true }
+      }
+    ]
+  }
+}
+```
+
+```bash
+oh-my-cli --mcp-contract
+# select one explicitly when several are declared
+oh-my-cli --mcp-contract --server filesystem --output json
+# resolve the declaration without probing (declared state)
+oh-my-cli --mcp-contract --no-probe
+```
+
+This slice is limited to safe local/stdio transport: a server's `command` is
+resolved on `PATH` but **never executed**, so probing cannot run arbitrary code.
+Remote (http/sse) transports are refused (fail closed) in contract version 1. The
+contract is untrusted input — a raw credential field inside an entry is rejected
+rather than ignored, and an unsupported `contractVersion` fails closed instead of
+being silently coerced. Selection is deterministic: an explicit `--server` id
+wins, then `settings.mcp.default`, then the sole entry; ambiguity or an unknown id
+fails with a clear reason.
+
+The selected server resolves to one lifecycle state with safe failure defaults:
+`declared` (valid contract, not probed — via `--no-probe`), `ready` (the command
+is resolvable), or `isolated` (disabled, misconfigured, command missing, or the
+bounded probe timed out). A disabled or unavailable server resolves to `isolated`
+and the command still exits `0` — the consumer skips it without crashing. A
+contract/usage error exits `2`. Argument values are never printed (only their
+count) and the home path is collapsed to `~`.
+
+```text
+Server:       filesystem
+Contract:     oh-my-cli.mcp-contract v1 (settings contract version 1)
+Transport:    stdio
+Command:      npx
+Arguments:    3
+Enabled:      true
+State:        ready [command resolved]
+Probe:        1ms (timeout 3000ms)
+Capabilities: tools
+Settings:     ~/.oh-my-cli/settings.json
+```
+
+Add `--output json` for a versioned record (`schema` `oh-my-cli.mcp-contract`)
+carrying the negotiated `contractVersion`, the selected `serverId`, `transport`,
+`command`, `argCount`, the resolved `state` and `reason`, and `probeMs`.
+
 ## Built-in tools
 
 | Tool | Category | Description |
@@ -1155,6 +1228,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/ci-handoff.ts` — bounded, redacted, head-bound CI handoff brief composing verify + review (`--ci-handoff`)
 - `src/delivery-brief.ts` — bounded, redacted, head-bound completion verdict composing plan + verify + review + handoff with a CI result (`--delivery-brief`)
 - `src/provider-contract.ts` — versioned, redacted provider extension contract: declare providers in settings, negotiate the contract version, select one, and resolve its non-secret config (`--provider-contract`)
+- `src/mcp-contract.ts` — versioned, redacted MCP server extension contract: declare servers in settings, negotiate the contract version, select one, and resolve its lifecycle state (declared/ready/isolated) with safe failure defaults (`--mcp-contract`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests
