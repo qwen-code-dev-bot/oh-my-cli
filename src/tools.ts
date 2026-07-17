@@ -1,6 +1,14 @@
 import { z } from "zod";
 import type { Workspace } from "./workspace.js";
 import type { ApprovalMode } from "./approval.js";
+import {
+  listDirectory,
+  globPaths,
+  grepContent,
+  formatListResult,
+  formatGlobResult,
+  formatGrepResult,
+} from "./discovery.js";
 
 export interface ToolResult {
   content: string;
@@ -41,6 +49,24 @@ const ShellParams = z.object({
   timeout: z.number().int().min(1).max(120).optional().describe("Timeout in seconds (max 120)"),
 });
 
+const ListParams = z.object({
+  path: z.string().optional().describe("Workspace-relative directory (default: workspace root)"),
+  ignore: z.boolean().optional().describe("Apply repository ignore rules (default true)"),
+});
+
+const GlobParams = z.object({
+  pattern: z.string().describe("Glob pattern relative to the base, e.g. src/**/*.ts"),
+  path: z.string().optional().describe("Workspace-relative base directory (default: workspace root)"),
+  ignore: z.boolean().optional().describe("Apply repository ignore rules (default true)"),
+});
+
+const GrepParams = z.object({
+  pattern: z.string().describe("Regular expression to search for in file contents"),
+  path: z.string().optional().describe("Workspace-relative file or directory (default: workspace root)"),
+  include: z.string().optional().describe("Only search files whose path matches this glob"),
+  ignore: z.boolean().optional().describe("Apply repository ignore rules (default true)"),
+});
+
 export function createTools(): ToolDef[] {
   return [
     {
@@ -69,6 +95,69 @@ export function createTools(): ToolDef[] {
           return { content: lines.slice(start, end).join("\n") };
         }
         return { content };
+      },
+    },
+    {
+      name: "list",
+      description:
+        "List the immediate entries of a workspace directory (read-only, no approval). " +
+        "Returns workspace-relative paths with type, deterministically ordered. Honors ignore rules unless ignore:false.",
+      parameters: ListParams,
+      jsonSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Workspace-relative directory (default: workspace root)" },
+          ignore: { type: "boolean", description: "Apply repository ignore rules (default true)" },
+        },
+      },
+      category: "read",
+      execute: async (args, workspace) => {
+        const { path: relPath, ignore } = ListParams.parse(args);
+        return { content: formatListResult(listDirectory(workspace, { path: relPath, ignore })) };
+      },
+    },
+    {
+      name: "glob",
+      description:
+        "Find workspace-relative paths matching a glob pattern (read-only, no approval), e.g. src/**/*.ts. " +
+        "Bounded, deterministically ordered, never follows symlinks. Honors ignore rules unless ignore:false.",
+      parameters: GlobParams,
+      jsonSchema: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "Glob pattern relative to the base, e.g. src/**/*.ts" },
+          path: { type: "string", description: "Workspace-relative base directory (default: workspace root)" },
+          ignore: { type: "boolean", description: "Apply repository ignore rules (default true)" },
+        },
+        required: ["pattern"],
+      },
+      category: "read",
+      execute: async (args, workspace) => {
+        const { pattern, path: relPath, ignore } = GlobParams.parse(args);
+        return { content: formatGlobResult(globPaths(workspace, { pattern, path: relPath, ignore })) };
+      },
+    },
+    {
+      name: "grep",
+      description:
+        "Search file contents for a regular expression (read-only, no approval). " +
+        "Returns workspace-relative path:line: matches, bounded and deterministically ordered. " +
+        "Skips binary and oversized files with explicit counts; never follows symlinks. Honors ignore rules unless ignore:false.",
+      parameters: GrepParams,
+      jsonSchema: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "Regular expression to search for in file contents" },
+          path: { type: "string", description: "Workspace-relative file or directory (default: workspace root)" },
+          include: { type: "string", description: "Only search files whose path matches this glob" },
+          ignore: { type: "boolean", description: "Apply repository ignore rules (default true)" },
+        },
+        required: ["pattern"],
+      },
+      category: "read",
+      execute: async (args, workspace) => {
+        const { pattern, path: relPath, include, ignore } = GrepParams.parse(args);
+        return { content: formatGrepResult(grepContent(workspace, { pattern, path: relPath, include, ignore })) };
       },
     },
     {
