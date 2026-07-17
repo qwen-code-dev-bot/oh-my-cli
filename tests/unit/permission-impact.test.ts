@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { analyzeImpact, formatImpact, redactSecrets, neutralizeSpoofing } from "../../src/permission-impact.js";
+import {
+  analyzeImpact,
+  formatImpact,
+  redactSecrets,
+  neutralizeSpoofing,
+  redactEndpointHost,
+} from "../../src/permission-impact.js";
 
 // Secret-bearing fixtures are assembled from parts at runtime so the committed
 // source never contains a contiguous credential that the CI secret scanner
@@ -221,5 +227,20 @@ describe("analyzeImpact + formatImpact: spoofing Unicode neutralization", () => 
     expect(impact.neutralized).toBe(0);
     expect(impact.commandPreview).toBe("ls -la");
     expect(formatImpact(impact)).not.toContain("Neutralized");
+  });
+});
+
+describe("redactEndpointHost", () => {
+  it("keeps only the host, dropping userinfo, path, and query", () => {
+    const pass = ["s3", "cret"].join("");
+    expect(redactEndpointHost(`https://user:${pass}@host.example/v1/secret?token=abc`)).toBe("host.example");
+  });
+
+  it("preserves the port", () => {
+    expect(redactEndpointHost("http://127.0.0.1:8080/v1")).toBe("127.0.0.1:8080");
+  });
+
+  it("returns a placeholder for an unparseable URL", () => {
+    expect(redactEndpointHost("not-a-url")).toBe("<invalid-url>");
   });
 });

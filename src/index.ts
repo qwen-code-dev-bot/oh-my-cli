@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import { loadConfig } from "./config.js";
+import { resolveModelConfig, resolveSettingsPath, describeResolvedConfig } from "./settings.js";
 import { Workspace } from "./workspace.js";
 import { SessionStore } from "./session.js";
 import { runAgent } from "./agent.js";
@@ -86,7 +86,7 @@ program
   .option("--preflight", "Run a provider connectivity preflight and exit")
   .option("--sandbox-info", "Show effective sandbox isolation diagnostic and exit")
   .option("--health", "Show MCP server and extension health inventory and exit")
-  .option("--settings <path>", "Integrations settings file for --health (default <workspace>/.oh-my-cli/settings.json)")
+  .option("--settings <path>", "Unified settings file for model config and --health (default ~/.oh-my-cli/settings.json)")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
   .option("--doctor", "Run read-only installation and platform readiness checks and exit")
   .option("--readiness", "Inspect repository readiness for a blocked task (read-only) and exit")
@@ -488,8 +488,7 @@ program
       }
 
       if (opts.health) {
-        const settingsPath =
-          opts.settings ?? path.join(opts.workspace, ".oh-my-cli", "settings.json");
+        const settingsPath = resolveSettingsPath(opts.settings);
         const inventory = await collectHealthInventory(settingsPath);
         process.stdout.write(formatHealthInventory(inventory) + "\n");
         process.exit(0);
@@ -506,13 +505,20 @@ program
       }
 
       if (opts.preflight) {
-        const config = loadConfig();
-        const result = await runPreflight(config);
+        const resolved = resolveModelConfig({
+          settingsPath: resolveSettingsPath(opts.settings),
+          env: process.env,
+        });
+        process.stderr.write(describeResolvedConfig(resolved) + "\n");
+        const result = await runPreflight(resolved.config);
         process.stdout.write(formatPreflight(result) + "\n");
         process.exit(result.ok ? 0 : 1);
       }
 
-      const config = loadConfig();
+      const config = resolveModelConfig({
+        settingsPath: resolveSettingsPath(opts.settings),
+        env: process.env,
+      }).config;
       const workspace = new Workspace(opts.workspace);
       const store = new SessionStore();
       const approvalMode = opts.approvalMode as ApprovalMode;

@@ -34,6 +34,26 @@ export OPENAI_API_KEY="your-api-key-here"
 export OPENAI_MODEL="gpt-4o"
 ```
 
+Alternatively, persist the non-secret model configuration in the user-owned file
+`~/.oh-my-cli/settings.json` so you do not have to export variables in every
+shell. Store only the model name, compatible base URL, and the *name* of the
+environment variable that holds the credential — never the key itself:
+
+```json
+{
+  "model": {
+    "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "name": "qwen-latest-series-invite-beta-v77",
+    "apiKeyEnv": "DASHSCOPE_API_KEY"
+  }
+}
+```
+
+Environment variables always take precedence over the settings file, and a
+settings file is only read from the user-owned default or an explicit
+`--settings <path>` — never auto-discovered inside a project. See
+[../README.md](../README.md#configuration) for the full precedence table.
+
 Secrets are kept out of output: the CLI redacts key-like tokens before printing.
 
 ## 3. Verify your setup
