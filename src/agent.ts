@@ -8,6 +8,7 @@ import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
 import { evaluateCommandPolicy, policyDenialMessage } from "./command-policy.js";
 import { estimateCostUsd, lookupModelPrice, formatCostUsd } from "./cost.js";
+import { buildEffectiveSystemPrompt } from "./instruction-context.js";
 
 const MAX_ROUNDS = 30;
 
@@ -133,10 +134,11 @@ export async function runAgent(
   const messages: SessionMessage[] = [...existingMessages];
 
   if (messages.length === 0) {
-    const system: SessionMessage = {
-      role: "system",
-      content: "You are a helpful coding assistant with file and shell tools. Use tools when needed.",
-    };
+    // Fresh session: seed with the effective repository instruction context
+    // (bounded identity + Git state + trusted instruction hierarchy) instead of
+    // a generic prompt. Resumed sessions keep their original system message.
+    const { text } = buildEffectiveSystemPrompt({ workspace: opts.workspace.root });
+    const system: SessionMessage = { role: "system", content: text };
     messages.push(system);
     opts.onMessage(system);
   }

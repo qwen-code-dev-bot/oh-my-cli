@@ -17,6 +17,7 @@ import { collectSessionSummaries, formatSessionList } from "./session-summary.js
 import { collectDoctorReport, formatDoctorReport } from "./doctor.js";
 import { collectRepoReadiness, formatRepoReadiness } from "./repo-readiness.js";
 import { collectRepoContext, formatRepoContext } from "./repo-context.js";
+import { collectInstructionContext, formatInstructionContext } from "./instruction-context.js";
 import { planTask, formatTaskPlan } from "./task-plan.js";
 import { verifyTask, formatVerifyReport } from "./task-verify.js";
 import { reviewChange, formatChangeReviewReport } from "./change-review.js";
@@ -93,6 +94,7 @@ program
   .option("--expected-branch <name>", "Expected branch for the --readiness branch check")
   .option("--remote <name>", "Git remote to probe for --readiness (default origin)", "origin")
   .option("--repo-context", "Inspect a bounded, redacted repository context snapshot (read-only) and exit")
+  .option("--instruction-context", "Inspect the effective, redacted repository instruction context (read-only) and exit")
   .option("--plan <task>", "Produce a bounded, deterministic execution plan for a task (read-only) and exit")
   .option("--verify-task", "Run the repository's canonical verify commands and report a bounded, head-bound pass/fail verdict and exit")
   .option("--review-change", "Review the current change against a base ref and emit a bounded, redacted, head-bound review brief and exit")
@@ -251,6 +253,24 @@ program
           process.stdout.write(JSON.stringify(snapshot) + "\n");
         } else {
           process.stdout.write(formatRepoContext(snapshot) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Instruction-context mode: emit the effective, redacted repository
+      // instruction context (the trusted instruction hierarchy a fresh session
+      // is seeded with). Read-only and never a gate, so it always exits 0.
+      if (opts.instructionContext) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(1);
+        }
+        const snapshot = collectInstructionContext({ workspace: opts.workspace });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(snapshot) + "\n");
+        } else {
+          process.stdout.write(formatInstructionContext(snapshot) + "\n");
         }
         process.exit(0);
       }

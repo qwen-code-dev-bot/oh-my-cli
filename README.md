@@ -122,6 +122,7 @@ without touching other sessions.
 | `--expected-branch <name>` | Expected branch for the `--readiness` branch check |
 | `--remote <name>` | Git remote to probe for `--readiness` (default `origin`) |
 | `--repo-context` | Inspect a bounded, redacted repository context snapshot (read-only) and exit |
+| `--instruction-context` | Inspect the effective, redacted repository instruction context a fresh session is seeded with (read-only) and exit |
 | `--plan <task>` | Produce a bounded, deterministic execution plan for a task (read-only) and exit |
 | `--verify-task` | Run the repository's canonical verify commands and report a bounded, head-bound pass/fail verdict and exit |
 | `--review-change` | Review the current change against a base ref and emit a bounded, redacted, head-bound review brief and exit |
@@ -646,6 +647,45 @@ that a downstream planning or verification step can parse independently. The
 probe is a snapshot, not a gate, so it always exits `0`; an unknown toolchain
 degrades gracefully (reports `unknown` rather than failing).
 
+### Instruction context
+
+Every fresh model-backed session is seeded with the *effective* instruction
+context instead of a generic "you are a helpful coding assistant" prompt. To see
+exactly what a session will load — and why — run a read-only probe:
+
+```bash
+oh-my-cli --instruction-context
+# or point it at another checkout
+oh-my-cli --instruction-context --workspace path/to/repo
+```
+
+It discovers supported instruction files (`QWEN.md`, `AGENTS.md`) from the
+trusted workspace hierarchy — the workspace root plus a bounded walk of its
+ancestor directories — and reports each source's trust class, precedence, byte
+size, and content fingerprint. Files inside the workspace are `workspace` trust;
+files in a strict ancestor directory are `ancestor` trust and lower precedence,
+so an out-of-workspace instruction can never override the workspace's own policy
+on conflict. A symlinked instruction file whose real path escapes its directory
+is rejected (recorded as `symlink-escape`). All content is treated strictly as
+data — it can never activate tools, change configuration, or override any policy
+or safety boundary — and secrets, spoofing characters, and host paths stay
+redacted.
+
+```text
+Instruction context (oh-my-cli.instruction-context v1)
+──────────────────────────────────────────────
+Loaded     : 1 file(s)
+Sources    :
+  [workspace] QWEN.md — prec 91, 348 bytes
+Fingerprint: 9f2c4e…
+```
+
+Add `--output json` for a versioned record (`schema`
+`oh-my-cli.instruction-context`) whose `combinedText` is the framed block injected
+into the session prompt and whose `fingerprint` changes iff that block does. The
+probe is a snapshot, not a gate, so it always exits `0`; an empty workspace
+degrades gracefully (no sources, empty `combinedText`).
+
 ### Task planning
 
 Before entrusting the agent with a task, derive a bounded, deterministic plan
@@ -878,6 +918,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/evidence-archive.ts` — portable, deterministic, signed evidence bundle export/verify (`--export-evidence`/`--verify-evidence`)
 - `src/repo-readiness.ts` — read-only repository-readiness inspection (`--readiness`)
 - `src/repo-context.ts` — read-only, bounded, redacted repository-context snapshot (`--repo-context`)
+- `src/instruction-context.ts` — effective, bounded, redacted repository instruction context seeded into every fresh session (`--instruction-context`)
 - `src/task-plan.ts` — deterministic, bounded, redacted task planner grounded in the repo context (`--plan`)
 - `src/task-verify.ts` — bounded, redacted, head-bound pass/fail verification of the repo's canonical commands (`--verify-task`)
 - `src/change-review.ts` — bounded, redacted, head-bound review brief for the current change against a base ref (`--review-change`)
