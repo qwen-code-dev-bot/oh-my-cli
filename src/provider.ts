@@ -252,7 +252,7 @@ async function* streamOnce(
   }
 }
 
-function toOpenAIMessage(msg: SessionMessage): OpenAI.ChatCompletionMessageParam {
+export function toOpenAIMessage(msg: SessionMessage): OpenAI.ChatCompletionMessageParam {
   if (msg.role === "tool") {
     return {
       role: "tool",
@@ -270,6 +270,24 @@ function toOpenAIMessage(msg: SessionMessage): OpenAI.ChatCompletionMessageParam
         function: { name: tc.function.name, arguments: tc.function.arguments },
       })),
     };
+  }
+  // A user message carrying image data URLs becomes a multimodal content-parts
+  // array (text + image_url) so a vision-capable model receives the images
+  // alongside the prompt. Persisted historical images have no dataUrl (it is
+  // stripped before the session log) and fall through to plain text — their
+  // non-secret reference stays in the transcript, but their bytes are never
+  // re-sent on resume.
+  if (msg.role === "user" && msg.images?.some((img) => img.dataUrl)) {
+    const parts: OpenAI.ChatCompletionContentPart[] = [];
+    if (msg.content) {
+      parts.push({ type: "text", text: msg.content });
+    }
+    for (const img of msg.images) {
+      if (img.dataUrl) {
+        parts.push({ type: "image_url", image_url: { url: img.dataUrl } });
+      }
+    }
+    return { role: "user", content: parts };
   }
   return {
     role: msg.role as "system" | "user" | "assistant",

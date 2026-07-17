@@ -65,6 +65,8 @@ import {
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary } from "./run-summary.js";
+import { loadImageAttachments, imageRef } from "./image-input.js";
+import type { LoadedImage } from "./image-input.js";
 import { parseBudgetUsd } from "./cost.js";
 import {
   readRunSummaryFile,
@@ -92,6 +94,10 @@ program
   .description("A small code-agent CLI with file and shell tools")
   .version("0.1.0")
   .option("-p, --prompt <prompt>", "Run a single non-interactive request")
+  .option(
+    "--image <paths...>",
+    "Attach image file(s) by path for vision-capable analysis (PNG, JPEG, GIF, or WebP)",
+  )
   .option("--resume <session-id>", "Resume a persisted session")
   .option(
     "--approval-mode <mode>",
@@ -712,6 +718,22 @@ program
           process.exit(1);
         }
 
+        // Load image attachments (if any) up front so a missing/oversized/
+        // unsupported file fails with a clear message and a non-zero exit before
+        // any provider call. The data URL stays in memory; only the non-secret
+        // reference is persisted and reported in the summary.
+        let images: LoadedImage[] = [];
+        if (opts.image && opts.image.length > 0) {
+          try {
+            images = loadImageAttachments(opts.image, workspace);
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            process.stderr.write(`Error: ${msg}\n`);
+            process.exit(1);
+          }
+        }
+        const attachmentRefs = images.map(imageRef);
+
         // The run summary (opt-in) points at the session log as its evidence,
         // with the host home directory collapsed to ~ so the path stays private.
         const evidencePath = () => redactHomePath(store.filePath(sessionId));
@@ -735,6 +757,7 @@ program
               budgetUsd,
               compactThreshold,
               mutatingAllowed,
+              images,
             });
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -753,6 +776,7 @@ program
                   tokens: null,
                   sessionId,
                   sessionPath: evidencePath(),
+                  attachments: attachmentRefs,
                 }),
               });
             }
@@ -777,6 +801,7 @@ program
                 estimatedCostUsd: result.estimatedCostUsd,
                 sessionId,
                 sessionPath: evidencePath(),
+                attachments: attachmentRefs,
               }),
             });
           }
@@ -800,6 +825,7 @@ program
           budgetUsd,
           compactThreshold,
           mutatingAllowed,
+          images,
         });
         sealSession();
         // Exit with the run outcome so unattended/CI callers can detect failure;
@@ -819,6 +845,7 @@ program
             estimatedCostUsd: result.estimatedCostUsd,
             sessionId,
             sessionPath: evidencePath(),
+            attachments: attachmentRefs,
           });
           process.stdout.write("\n" + formatRunSummary(summary) + "\n");
         }
@@ -941,6 +968,9 @@ program
         };
         process.stdin.on("data", ctrlKHandler);
 
+        // Images staged via /attach are sent with the next prompt, then cleared.
+        const pendingImages: LoadedImage[] = [];
+
         const prompt = () => {
           rl.question("> ", async (answer) => {
             if (paletteOpen) return;
@@ -953,8 +983,29 @@ program
               rl.close();
               process.exit(0);
             }
+            if (answer.trim().startsWith("/attach")) {
+              const paths = answer.trim().slice("/attach".length).split(/\s+/).filter(Boolean);
+              if (paths.length === 0) {
+                process.stderr.write("Usage: /attach <image-path> [more-paths...]\n");
+              } else {
+                try {
+                  const loaded = loadImageAttachments(paths, workspace);
+                  pendingImages.push(...loaded);
+                  process.stderr.write(
+                    `Attached ${loaded.length} image(s): ` +
+                      `${loaded.map((i) => `${i.name} (${i.mediaType})`).join(", ")}\n`,
+                  );
+                } catch (err: unknown) {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  process.stderr.write(`Error: ${msg}\n`);
+                }
+              }
+              prompt();
+              return;
+            }
             try {
               existingMessages = loadSessionMessages(store, sessionId);
+              const images = pendingImages.splice(0);
               await runAgent(answer, existingMessages.slice(0, -1), {
                 config,
                 workspace,
@@ -964,6 +1015,7 @@ program
                 budgetUsd,
                 compactThreshold,
                 mutatingAllowed,
+                images,
               });
             } catch (err: unknown) {
               const msg = err instanceof Error ? err.message : String(err);
