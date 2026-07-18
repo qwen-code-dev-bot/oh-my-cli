@@ -168,11 +168,14 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--provider-contract` | Inspect the resolved provider extension contract from settings (read-only, redacted) and exit |
 | `--provider <id>` | Provider id to select for `--provider-contract` (defaults to `settings.providers.default` or the sole entry) |
 | `--mcp-contract` | Inspect the resolved MCP server extension contract from settings (read-only, redacted) and exit |
-| `--server <id>` | MCP server id to select for `--mcp-contract` (defaults to `settings.mcp.default` or the sole entry) |
+| `--server <id>` | MCP server id to select for `--mcp-contract` / `--invoke-mcp` (defaults to `settings.mcp.default` or the sole entry) |
+| `--invoke-mcp` | Connect to the resolved-`ready` MCP server from settings once and call one of its tools, gated by approval mode and command policy, confined and redacted, and exit |
+| `--mcp-tool <name>` | Tool name to call for `--invoke-mcp` (defaults to the sole exposed tool) |
+| `--mcp-arg <key=value>` | Argument for the MCP tool call (repeatable), parsed as `key=value` with string values |
 | `--tool-contract` | Inspect the resolved tool extension contract from settings (read-only, redacted) and exit |
 | `--tool <id>` | Tool id to select for `--tool-contract` / `--invoke-tool` (defaults to `settings.tools.default` or the sole entry) |
 | `--invoke-tool` | Invoke the resolved-`ready` tool extension from settings once, gated by approval mode and command policy, confined and redacted, and exit |
-| `--invoke-timeout <ms>` | Hard timeout in milliseconds for `--invoke-tool` (default `30000`, max `300000`) |
+| `--invoke-timeout <ms>` | Hard timeout in milliseconds for `--invoke-tool` / `--invoke-mcp` (default `30000`, max `300000`) |
 | `--discover-extensions` | Discover the declared provider, MCP, and tool extension contracts and readiness from settings (read-only, redacted) and exit |
 | `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` / `--tool-contract` / `--discover-extensions` / `--trust-posture` and report the declared state |
 | `--list-workflows` | List the reusable workflows declared in user settings (read-only, redacted) and exit |
@@ -1282,6 +1285,52 @@ tool, a policy denial, or a missing approval (refused before execution); `1` for
 a tool runtime failure (timeout, oversized output, non-zero exit, or a spawn
 error) — the run never crashes.
 
+### MCP invocation
+
+`--mcp-contract` is read-only — it resolves a server's lifecycle state but never
+connects. `--invoke-mcp` is the governed next step: it connects to **one**
+resolved-`ready` MCP server over the safe local **stdio** transport, performs the
+`initialize` handshake, lists tools, and calls **one** tool once,
+non-interactively — reusing the same `mcp` contract and the command trust policy
+(`--command-policy`), without changing core code.
+
+```bash
+# connect to the default (or sole) ready server and call its sole tool
+oh-my-cli --invoke-mcp --approval-mode yolo --workspace ./project
+
+# select a server and one of its tools, with arguments, as versioned JSON
+oh-my-cli --invoke-mcp --server filesystem --mcp-tool read_file \
+  --mcp-arg path=README.md --approval-mode yolo --output json
+
+# bound a slow server with a shorter hard timeout
+oh-my-cli --invoke-mcp --approval-mode yolo --invoke-timeout 5000
+```
+
+Every gate runs before connecting and fails closed:
+
+- **Readiness** — only a `ready` server is connected; a `declared` or `isolated`
+  server (disabled, misconfigured, or command missing) is refused.
+- **Command policy** — the declared `command` and `args` are evaluated as
+  untrusted input, confined to the workspace; a denied command (destructive git,
+  credential access, path escape, destructive removal, device overwrite) is not
+  spawned.
+- **Approval mode** — connecting to a server is gated as a shell mutation, so
+  `default` and `auto-edit` require approval (an interactive terminal may grant
+  it); a non-interactive run is refused unless the mode is `yolo`.
+
+The server command runs directly (no shell, so arguments cannot be
+reinterpreted), confined to the workspace; the whole session (connect, handshake,
+list, and call) is bounded by a single hard timeout (`--invoke-timeout`, default
+30s, max 300s) and an output-size cap. The tool result is redacted (secrets and
+home/workspace paths) in both text and JSON, and only `text` content parts are
+captured. Tool selection is deterministic: an explicit `--mcp-tool` wins,
+otherwise the sole exposed tool is used; ambiguity or an unknown name fails
+closed. Exit codes: `0` on a successful tool call; `2` for a
+contract/selection/version error, a non-`ready` server, a policy denial, or a
+missing approval (refused before connecting); `1` for a session runtime failure
+(handshake failure, timeout, oversized output, tool-selection ambiguity, a
+tool-level error, or a spawn error) — the run never crashes.
+
 ### Extension discovery
 
 Once providers (`--provider-contract`), MCP servers (`--mcp-contract`), and tools
@@ -1480,6 +1529,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/delivery-brief.ts` — bounded, redacted, head-bound completion verdict composing plan + verify + review + handoff with a CI result (`--delivery-brief`)
 - `src/provider-contract.ts` — versioned, redacted provider extension contract: declare providers in settings, negotiate the contract version, select one, and resolve its non-secret config (`--provider-contract`)
 - `src/mcp-contract.ts` — versioned, redacted MCP server extension contract: declare servers in settings, negotiate the contract version, select one, and resolve its lifecycle state (declared/ready/isolated) with safe failure defaults (`--mcp-contract`)
+- `src/mcp-invocation.ts` — governed, non-interactive connection to one resolved-`ready` MCP server over safe local stdio: initialize handshake, tool listing, and one tool call, gated by readiness, the command trust policy, and approval mode, confined to the workspace, bounded by a hard timeout and output cap, redacted in text and JSON, and fail-closed on every error (`--invoke-mcp`)
 - `src/tool-contract.ts` — versioned, redacted tool extension contract: declare tools in settings, negotiate the contract version, select one, and resolve its readiness state (declared/ready/isolated) with safe failure defaults (`--tool-contract`)
 - `src/tool-invocation.ts` — governed, non-interactive invocation of one resolved-`ready` tool extension through its contract: gated by readiness, the command trust policy, and approval mode, confined to the workspace, bounded by a hard timeout and output cap, redacted in text and JSON, and fail-closed on every error (`--invoke-tool`)
 - `src/extension-discovery.ts` — read-only discovery view composing the provider, MCP, and tool contract resolvers into one redacted report of which extension surfaces are declared and ready, without core changes (`--discover-extensions`)

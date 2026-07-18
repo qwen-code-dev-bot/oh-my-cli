@@ -44,6 +44,11 @@ import {
   formatToolInvocation,
   invocationExitCode,
 } from "./tool-invocation.js";
+import {
+  invokeMcpServer,
+  formatMcpInvocation,
+  mcpInvocationExitCode,
+} from "./mcp-invocation.js";
 import { collectExtensionDiscovery, formatExtensionDiscovery } from "./extension-discovery.js";
 import { collectTrustPosture, formatTrustPosture } from "./trust-posture.js";
 import {
@@ -154,11 +159,19 @@ program
   .option("--provider-contract", "Inspect the resolved provider extension contract from settings (read-only, redacted) and exit")
   .option("--provider <id>", "Provider id to select for --provider-contract (defaults to settings.providers.default or the sole entry)")
   .option("--mcp-contract", "Inspect the resolved MCP server extension contract from settings (read-only, redacted) and exit")
-  .option("--server <id>", "MCP server id to select for --mcp-contract (defaults to settings.mcp.default or the sole entry)")
+  .option("--server <id>", "MCP server id to select for --mcp-contract / --invoke-mcp (defaults to settings.mcp.default or the sole entry)")
+  .option("--invoke-mcp", "Connect to the resolved-ready MCP server from settings once and call one of its tools, gated by approval mode and command policy, confined and redacted, and exit")
+  .option("--mcp-tool <name>", "Tool name to call for --invoke-mcp (defaults to the sole exposed tool)")
+  .option(
+    "--mcp-arg <key=value>",
+    "Argument for the MCP tool call (repeatable), parsed as key=value with string values",
+    (value: string, previous: string[]) => previous.concat([value]),
+    [] as string[],
+  )
   .option("--tool-contract", "Inspect the resolved tool extension contract from settings (read-only, redacted) and exit")
   .option("--tool <id>", "Tool id to select for --tool-contract / --invoke-tool (defaults to settings.tools.default or the sole entry)")
   .option("--invoke-tool", "Invoke the resolved-ready tool extension from settings once, gated by approval mode and command policy, confined and redacted, and exit")
-  .option("--invoke-timeout <ms>", "Hard timeout in milliseconds for --invoke-tool (default 30000, max 300000)")
+  .option("--invoke-timeout <ms>", "Hard timeout in milliseconds for --invoke-tool / --invoke-mcp (default 30000, max 300000)")
   .option("--discover-extensions", "Discover the declared provider, MCP, and tool extension contracts and readiness from settings (read-only, redacted) and exit")
   .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract / --tool-contract / --discover-extensions / --trust-posture and report the declared state")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
@@ -616,6 +629,70 @@ program
           process.stdout.write(formatToolInvocation(report) + "\n");
         }
         process.exit(invocationExitCode(report));
+      }
+
+      // MCP-invocation mode: governed, non-interactive connection to exactly one
+      // resolved-`ready` MCP server through its contract (#120), the initialize
+      // handshake and tool listing over the safe local stdio transport, and the
+      // call of exactly one tool — gated by the command trust policy (#51) and the
+      // approval mode, confined to the workspace, bounded by a hard timeout and an
+      // output-size cap, and redacted. Exit 0 on a successful tool call; 2 for a
+      // contract/selection/version error, a non-`ready` server, a policy denial,
+      // or a missing approval (refused before connecting); 1 for a session runtime
+      // failure (handshake failure, timeout, oversized output, tool-selection
+      // ambiguity, tool error, or spawn error) — never crashing the run.
+      if (opts.invokeMcp) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const approvalMode = String(opts.approvalMode ?? "default");
+        if (!["default", "auto-edit", "yolo"].includes(approvalMode)) {
+          process.stderr.write(`Error: invalid approval mode "${approvalMode}"\n`);
+          process.exit(2);
+        }
+        let timeoutMs: number | undefined;
+        if (opts.invokeTimeout !== undefined) {
+          timeoutMs = Number(opts.invokeTimeout);
+          if (!Number.isFinite(timeoutMs)) {
+            process.stderr.write(`Error: invalid --invoke-timeout "${opts.invokeTimeout}"\n`);
+            process.exit(2);
+          }
+        }
+        const toolArguments: Record<string, string> = {};
+        for (const raw of opts.mcpArg ?? []) {
+          const eq = raw.indexOf("=");
+          const key = eq < 0 ? "" : raw.slice(0, eq);
+          if (eq < 0 || key === "") {
+            process.stderr.write(`Error: invalid --mcp-arg "${raw}" (expected key=value)\n`);
+            process.exit(2);
+          }
+          toolArguments[key] = raw.slice(eq + 1);
+        }
+        let report;
+        try {
+          report = await invokeMcpServer({
+            settingsPath: resolveSettingsPath(opts.settings),
+            env: process.env,
+            serverId: opts.server,
+            toolName: opts.mcpTool,
+            toolArguments,
+            workspace: opts.workspace,
+            approvalMode: approvalMode as ApprovalMode,
+            timeoutMs,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatMcpInvocation(report) + "\n");
+        }
+        process.exit(mcpInvocationExitCode(report));
       }
 
       // Extension-discovery mode: a single read-only view across the versioned
