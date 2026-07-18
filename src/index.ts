@@ -39,6 +39,11 @@ import {
 import { collectProviderContract, formatProviderContract } from "./provider-contract.js";
 import { collectMcpContract, formatMcpContract } from "./mcp-contract.js";
 import { collectToolContract, formatToolContract } from "./tool-contract.js";
+import {
+  invokeTool,
+  formatToolInvocation,
+  invocationExitCode,
+} from "./tool-invocation.js";
 import { collectExtensionDiscovery, formatExtensionDiscovery } from "./extension-discovery.js";
 import { collectTrustPosture, formatTrustPosture } from "./trust-posture.js";
 import {
@@ -151,7 +156,9 @@ program
   .option("--mcp-contract", "Inspect the resolved MCP server extension contract from settings (read-only, redacted) and exit")
   .option("--server <id>", "MCP server id to select for --mcp-contract (defaults to settings.mcp.default or the sole entry)")
   .option("--tool-contract", "Inspect the resolved tool extension contract from settings (read-only, redacted) and exit")
-  .option("--tool <id>", "Tool id to select for --tool-contract (defaults to settings.tools.default or the sole entry)")
+  .option("--tool <id>", "Tool id to select for --tool-contract / --invoke-tool (defaults to settings.tools.default or the sole entry)")
+  .option("--invoke-tool", "Invoke the resolved-ready tool extension from settings once, gated by approval mode and command policy, confined and redacted, and exit")
+  .option("--invoke-timeout <ms>", "Hard timeout in milliseconds for --invoke-tool (default 30000, max 300000)")
   .option("--discover-extensions", "Discover the declared provider, MCP, and tool extension contracts and readiness from settings (read-only, redacted) and exit")
   .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract / --tool-contract / --discover-extensions / --trust-posture and report the declared state")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
@@ -559,6 +566,56 @@ program
           process.stdout.write(formatToolContract(report) + "\n");
         }
         process.exit(0);
+      }
+
+      // Tool-invocation mode: governed, non-interactive execution of exactly one
+      // resolved-`ready` tool extension through its contract (#135), gated by the
+      // command trust policy (#51) and the approval mode, confined to the
+      // workspace, bounded by a hard timeout and an output-size cap, and redacted.
+      // Exit 0 on a successful invocation; 2 for a contract/selection/version
+      // error, a non-`ready` tool, a policy denial, or a missing approval (refused
+      // before execution); 1 for a tool runtime failure (timeout, oversized
+      // output, non-zero exit, or spawn error) — never crashing the run.
+      if (opts.invokeTool) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const approvalMode = String(opts.approvalMode ?? "default");
+        if (!["default", "auto-edit", "yolo"].includes(approvalMode)) {
+          process.stderr.write(`Error: invalid approval mode "${approvalMode}"\n`);
+          process.exit(2);
+        }
+        let timeoutMs: number | undefined;
+        if (opts.invokeTimeout !== undefined) {
+          timeoutMs = Number(opts.invokeTimeout);
+          if (!Number.isFinite(timeoutMs)) {
+            process.stderr.write(`Error: invalid --invoke-timeout "${opts.invokeTimeout}"\n`);
+            process.exit(2);
+          }
+        }
+        let report;
+        try {
+          report = await invokeTool({
+            settingsPath: resolveSettingsPath(opts.settings),
+            env: process.env,
+            toolId: opts.tool,
+            workspace: opts.workspace,
+            approvalMode: approvalMode as ApprovalMode,
+            timeoutMs,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatToolInvocation(report) + "\n");
+        }
+        process.exit(invocationExitCode(report));
       }
 
       // Extension-discovery mode: a single read-only view across the versioned
