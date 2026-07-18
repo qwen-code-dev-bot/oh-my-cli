@@ -398,20 +398,35 @@ export function buildToolContractReport(facts: {
   };
 }
 
-// Read the user settings file, negotiate the tool contract, select one tool,
-// resolve its readiness state, and build the redacted report. Throws a redacted
-// error when no `tools` section exists or the contract is invalid (exit 2). A
-// tool that is disabled or whose command is unavailable resolves to `isolated`
-// (a successful resolution, not an error) so the consumer can apply safe failure
-// defaults.
-export function collectToolContract(
-  opts: {
-    settingsPath?: string;
-    env?: Record<string, string | undefined>;
-    toolId?: string;
-    probe?: boolean;
-  } = {},
-): ToolContractReport {
+export interface ToolResolutionOptions {
+  settingsPath?: string;
+  env?: Record<string, string | undefined>;
+  toolId?: string;
+  probe?: boolean;
+}
+
+// The resolved, unredacted facts for one selected tool: the negotiated contract
+// version, the chosen entry (command and args), its readiness state, and the
+// settings location. Shared by the read-only report (collectToolContract) and the
+// governed invocation path (tool-invocation.ts) so both reuse the same version
+// negotiation, deterministic selection, and readiness resolution rather than
+// re-reading or re-parsing the contract. Throws the same redacted errors as
+// collectToolContract when no `tools` section exists or the contract is invalid.
+export interface ResolvedTool {
+  contractVersion: number;
+  entry: ToolEntry;
+  readiness: ToolReadiness;
+  settingsPath: string;
+  settingsFound: boolean;
+}
+
+// Read the user settings file, negotiate the tool contract, deterministically
+// select one tool, and resolve its readiness state — returning the raw facts.
+// Throws a redacted error when no `tools` section exists or the contract is
+// invalid (exit 2). A tool that is disabled or whose command is unavailable
+// resolves to `isolated` (a successful resolution, not an error) so the consumer
+// can apply safe failure defaults.
+export function resolveSelectedTool(opts: ToolResolutionOptions = {}): ResolvedTool {
   const settingsPath = resolveSettingsPath(opts.settingsPath);
   const { found, section } = readToolsSection(settingsPath);
   if (section === undefined) {
@@ -426,12 +441,29 @@ export function collectToolContract(
   const probe = opts.probe ?? true;
   const deadline = probe ? Date.now() + clampProbeTimeout(entry.probeTimeoutMs) : undefined;
   const readiness = resolveToolReadiness(entry, { probe, deadline });
-  return buildToolContractReport({
+  return {
     contractVersion: contract.contractVersion,
     entry,
     readiness,
     settingsPath,
     settingsFound: found,
+  };
+}
+
+// Read the user settings file, negotiate the tool contract, select one tool,
+// resolve its readiness state, and build the redacted report. Throws a redacted
+// error when no `tools` section exists or the contract is invalid (exit 2). A
+// tool that is disabled or whose command is unavailable resolves to `isolated`
+// (a successful resolution, not an error) so the consumer can apply safe failure
+// defaults.
+export function collectToolContract(opts: ToolResolutionOptions = {}): ToolContractReport {
+  const resolved = resolveSelectedTool(opts);
+  return buildToolContractReport({
+    contractVersion: resolved.contractVersion,
+    entry: resolved.entry,
+    readiness: resolved.readiness,
+    settingsPath: resolved.settingsPath,
+    settingsFound: resolved.settingsFound,
   });
 }
 
