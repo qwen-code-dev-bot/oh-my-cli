@@ -35,6 +35,7 @@ import {
 } from "./delivery-brief.js";
 import { collectProviderContract, formatProviderContract } from "./provider-contract.js";
 import { collectMcpContract, formatMcpContract } from "./mcp-contract.js";
+import { collectExtensionDiscovery, formatExtensionDiscovery } from "./extension-discovery.js";
 import {
   readRecoveryCheckpoint,
   readEvidenceFile,
@@ -140,7 +141,8 @@ program
   .option("--provider <id>", "Provider id to select for --provider-contract (defaults to settings.providers.default or the sole entry)")
   .option("--mcp-contract", "Inspect the resolved MCP server extension contract from settings (read-only, redacted) and exit")
   .option("--server <id>", "MCP server id to select for --mcp-contract (defaults to settings.mcp.default or the sole entry)")
-  .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract and report the declared state")
+  .option("--discover-extensions", "Discover the declared provider and MCP extension contracts and readiness from settings (read-only, redacted) and exit")
+  .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract / --discover-extensions and report the declared state")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
   .option("--task-identity <id>", "Stable task identity (used by --recover and worktree leases)")
@@ -510,6 +512,38 @@ program
           process.stdout.write(JSON.stringify(report) + "\n");
         } else {
           process.stdout.write(formatMcpContract(report) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Extension-discovery mode: a single read-only view across the versioned
+      // extension contracts. Composes the provider (#118) and MCP (#120) contract
+      // resolvers into one redacted report of which extension surfaces are declared
+      // and ready — without re-probing every integration (health inventory) and
+      // without changing core code. An absent surface is reported (not an error);
+      // a missing settings file reports every surface absent. Exit 0 on success,
+      // 2 on an invalid contract (fail closed) or an invalid output format.
+      if (opts.discoverExtensions) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let report;
+        try {
+          report = collectExtensionDiscovery({
+            settingsPath: resolveSettingsPath(opts.settings),
+            probe: opts.probe,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatExtensionDiscovery(report) + "\n");
         }
         process.exit(0);
       }

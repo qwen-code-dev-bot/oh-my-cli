@@ -169,7 +169,8 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--provider <id>` | Provider id to select for `--provider-contract` (defaults to `settings.providers.default` or the sole entry) |
 | `--mcp-contract` | Inspect the resolved MCP server extension contract from settings (read-only, redacted) and exit |
 | `--server <id>` | MCP server id to select for `--mcp-contract` (defaults to `settings.mcp.default` or the sole entry) |
-| `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` and report the declared state |
+| `--discover-extensions` | Discover the declared provider and MCP extension contracts and readiness from settings (read-only, redacted) and exit |
+| `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` / `--discover-extensions` and report the declared state |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -1141,6 +1142,55 @@ Add `--output json` for a versioned record (`schema` `oh-my-cli.mcp-contract`)
 carrying the negotiated `contractVersion`, the selected `serverId`, `transport`,
 `command`, `argCount`, the resolved `state` and `reason`, and `probeMs`.
 
+### Extension discovery
+
+Once providers (`--provider-contract`) and MCP servers (`--mcp-contract`) are
+declared as versioned contracts, `--discover-extensions` composes both resolvers
+into a single read-only, redacted view of which extension surfaces are declared
+and ready — without re-probing every integration (`--health`) and without
+changing core code. It reads the same unified settings file and reports, per
+surface, the negotiated contract version, declared entry count, default, and the
+entry a consumer would select (plus the MCP selected entry's lifecycle state).
+
+```bash
+oh-my-cli --discover-extensions
+oh-my-cli --discover-extensions --output json
+# resolve the declarations without probing (MCP reported as declared)
+oh-my-cli --discover-extensions --no-probe
+```
+
+A surface with no declared section is reported as **absent** (not an error), and
+a missing settings file reports every surface absent — the command still exits
+`0`. An invalid contract (unsupported version, raw credential field, malformed
+section) fails closed and exits `2`, the same guarantee each contract provides on
+its own. Multiple entries with no default are reported as ambiguous (no
+selection) rather than failing — discovery never picks on your behalf. No secret
+value, argument value, or remote response body is ever printed; only counts, ids,
+negotiated versions, and lifecycle state appear, with the home path collapsed to
+`~`.
+
+```text
+Extension Discovery
+────────────────────────────────────────
+Settings:  ~/.oh-my-cli/settings.json
+Schema:    oh-my-cli.extension-discovery v1
+
+Provider contract: 2 entries (contract version 1)
+  Default:  primary
+  Selected: primary
+
+MCP contract: 1 entry (contract version 1)
+  Default:  filesystem
+  Selected: filesystem
+  State:    ready [command resolved]
+```
+
+Add `--output json` for a versioned record (`schema`
+`oh-my-cli.extension-discovery`) whose `surfaces` array carries one entry per
+contract (`kind` `provider` / `mcp`), each flagged `present`, with its
+`contractVersion`, `entryCount`, `default`, `selectedId`, and — for MCP — the
+resolved `state`, `stateReason`, and `probeMs`.
+
 ## Built-in tools
 
 | Tool | Category | Description |
@@ -1229,6 +1279,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/delivery-brief.ts` — bounded, redacted, head-bound completion verdict composing plan + verify + review + handoff with a CI result (`--delivery-brief`)
 - `src/provider-contract.ts` — versioned, redacted provider extension contract: declare providers in settings, negotiate the contract version, select one, and resolve its non-secret config (`--provider-contract`)
 - `src/mcp-contract.ts` — versioned, redacted MCP server extension contract: declare servers in settings, negotiate the contract version, select one, and resolve its lifecycle state (declared/ready/isolated) with safe failure defaults (`--mcp-contract`)
+- `src/extension-discovery.ts` — read-only discovery view composing the provider and MCP contract resolvers into one redacted report of which extension surfaces are declared and ready, without core changes (`--discover-extensions`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests
