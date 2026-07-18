@@ -19,7 +19,8 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run tests/unit",
-    "test:integration": "vitest run tests/integration",
+    "test:integration": "vitest run tests/integration && npm run test:desktop",
+    "test:desktop": "npm run build && timeout 30 xvfb-run -a electron --no-sandbox --disable-gpu scripts/test-desktop.mjs",
     "smoke": "vitest run tests/smoke",
     "desktop": "npm run build && electron .",
     "postbuild": "node scripts/build-desktop.mjs"
