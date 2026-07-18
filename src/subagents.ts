@@ -54,6 +54,12 @@ export type SubagentWorker = (signal: AbortSignal) => Promise<string>;
 export interface SubagentManagerOptions {
   /** Maximum number of children running at once. Bounded; defaults to 4. */
   maxConcurrent?: number;
+  /**
+   * Maximum number of children a single manager may spawn over its whole
+   * lifetime. Bounded; defaults to 200. Terminal children still count toward
+   * this ceiling, so a churn of short-lived children cannot evade it.
+   */
+  maxTotalSpawns?: number;
   /** Injectable clock for deterministic tests. Defaults to Date.now. */
   clock?: () => number;
   /**
@@ -81,6 +87,9 @@ export interface SubagentLaunchOptions {
 }
 
 const DEFAULT_MAX_CONCURRENT = 4;
+// Default ceiling on cumulative subagent spawns over a manager's lifetime. A
+// sane bound for unattended use, overridable via maxTotalSpawns.
+const DEFAULT_MAX_TOTAL_SPAWNS = 200;
 const MAX_RESULT = 4096;
 
 interface Entry {
@@ -130,9 +139,24 @@ function toRecord(entry: Entry): SubagentRecord {
   return record;
 }
 
+/**
+ * Thrown by the subagent launcher once a session has spawned its lifetime
+ * maximum of children. The message is a static, deterministic bound notice —
+ * it never carries secrets, host paths, or untrusted content.
+ */
+export class SubagentSpawnCapError extends Error {
+  readonly reason = "spawn_cap" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "SubagentSpawnCapError";
+  }
+}
+
 export class SubagentManager {
   private readonly entries = new Map<string, Entry>();
   private readonly maxConcurrent: number;
+  private readonly maxTotalSpawns: number;
   private readonly clock: () => number;
   private readonly parentWorkspace?: string;
   private readonly parentIdentity?: WorkspaceIdentity;
@@ -144,6 +168,11 @@ export class SubagentManager {
       throw new Error("maxConcurrent must be a positive integer");
     }
     this.maxConcurrent = max;
+    const total = opts.maxTotalSpawns ?? DEFAULT_MAX_TOTAL_SPAWNS;
+    if (!Number.isInteger(total) || total < 1) {
+      throw new Error("maxTotalSpawns must be a positive integer");
+    }
+    this.maxTotalSpawns = total;
     this.clock = opts.clock ?? (() => Date.now());
     if (opts.parentWorkspace !== undefined) {
       this.parentWorkspace = opts.parentWorkspace;
@@ -155,6 +184,11 @@ export class SubagentManager {
    * Register a child. It enters the queued state and is promoted to running as
    * soon as a concurrency slot is free. Returns the child's stable id.
    *
+   * Once the manager has spawned its lifetime maximum (maxTotalSpawns) of
+   * children, further spawns are refused here — before any id is assigned — by
+   * throwing {@link SubagentSpawnCapError} with a deterministic, content-free
+   * message. Terminal children still count, so short-lived churn cannot evade it.
+   *
    * When the manager was configured with a parent workspace, a mutating child
    * that would share that workspace is refused here — before any id is assigned
    * or the worker runs — by throwing {@link SharedWorkspaceLaunchError}. This is
@@ -163,6 +197,11 @@ export class SubagentManager {
   spawn(worker: SubagentWorker, opts: SubagentLaunchOptions = {}): string {
     if (typeof worker !== "function") {
       throw new Error("worker must be a function");
+    }
+    if (this.seq >= this.maxTotalSpawns) {
+      throw new SubagentSpawnCapError(
+        `Refusing to spawn a delegated agent: session subagent cap of ${this.maxTotalSpawns} reached`,
+      );
     }
     const mode: WorkspaceMode = opts.mode ?? "mutating";
     if (this.parentIdentity) {

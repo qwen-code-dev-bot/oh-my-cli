@@ -8,6 +8,7 @@ import {
   countByState,
   TERMINAL_SUBAGENT_STATES,
   SharedWorkspaceLaunchError,
+  SubagentSpawnCapError,
 } from "../../src/subagents.js";
 import type { SubagentRecord } from "../../src/subagents.js";
 
@@ -410,5 +411,84 @@ describe("SubagentManager: shared-workspace guard", () => {
     expect(mgr.get(id)?.state).toBe("running");
     expect(mgr.cancel(id)).toBe(true);
     expect(mgr.get(id)?.state).toBe("cancelled");
+  });
+});
+
+describe("SubagentManager: spawn cap", () => {
+  it("spawns up to the ceiling then refuses the next", () => {
+    const mgr = new SubagentManager({ maxConcurrent: 8, maxTotalSpawns: 3 });
+    const ids = [
+      mgr.spawn(() => deferred<string>().promise),
+      mgr.spawn(() => deferred<string>().promise),
+      mgr.spawn(() => deferred<string>().promise),
+    ];
+    expect(ids).toEqual(["sub-001", "sub-002", "sub-003"]);
+    expect(() => mgr.spawn(() => deferred<string>().promise)).toThrow(SubagentSpawnCapError);
+    // The refused spawn registered no child.
+    expect(mgr.list()).toHaveLength(3);
+  });
+
+  it("an override raises the ceiling", () => {
+    const mgr = new SubagentManager({ maxConcurrent: 16, maxTotalSpawns: 5 });
+    for (let i = 0; i < 5; i++) mgr.spawn(() => deferred<string>().promise);
+    expect(mgr.list()).toHaveLength(5);
+    expect(() => mgr.spawn(() => deferred<string>().promise)).toThrow(SubagentSpawnCapError);
+  });
+
+  it("uses a high default ceiling that does not interfere with ordinary runs", () => {
+    const mgr = new SubagentManager({ maxConcurrent: 64 });
+    for (let i = 0; i < 50; i++) mgr.spawn(() => deferred<string>().promise);
+    expect(mgr.list()).toHaveLength(50);
+  });
+
+  it("throws on a non-positive or non-integer maxTotalSpawns", () => {
+    expect(() => new SubagentManager({ maxTotalSpawns: 0 })).toThrow(/positive integer/);
+    expect(() => new SubagentManager({ maxTotalSpawns: -1 })).toThrow(/positive integer/);
+    expect(() => new SubagentManager({ maxTotalSpawns: 1.5 })).toThrow(/positive integer/);
+  });
+
+  it("counts terminal children toward the ceiling (completed, failed, cancelled)", async () => {
+    const mgr = new SubagentManager({ maxConcurrent: 4, maxTotalSpawns: 3 });
+    const ok = mgr.spawn(async () => "done");
+    const bad = mgr.spawn(async () => {
+      throw new Error("boom");
+    });
+    const cancelId = mgr.spawn(() => deferred<string>().promise);
+    await flush();
+    expect(mgr.get(ok)?.state).toBe("completed");
+    expect(mgr.get(bad)?.state).toBe("failed");
+    expect(mgr.cancel(cancelId)).toBe(true);
+    // All three slots are consumed by terminal children; churn cannot evade it.
+    expect(() => mgr.spawn(() => deferred<string>().promise)).toThrow(SubagentSpawnCapError);
+    expect(mgr.list()).toHaveLength(3);
+  });
+
+  it("counts queued children too, independent of the concurrency bound", () => {
+    const mgr = new SubagentManager({ maxConcurrent: 1, maxTotalSpawns: 3 });
+    const a = mgr.spawn(() => deferred<string>().promise);
+    const b = mgr.spawn(() => deferred<string>().promise);
+    const c = mgr.spawn(() => deferred<string>().promise);
+    expect(mgr.get(a)?.state).toBe("running");
+    expect(mgr.get(b)?.state).toBe("queued");
+    expect(mgr.get(c)?.state).toBe("queued");
+    expect(() => mgr.spawn(() => deferred<string>().promise)).toThrow(SubagentSpawnCapError);
+  });
+
+  it("refuses with a deterministic, content-free reason (no secret/host/label leak)", () => {
+    const mgr = new SubagentManager({ maxTotalSpawns: 1 });
+    mgr.spawn(() => deferred<string>().promise, { label: "SECRET=abc123 /home/user/keys" });
+    let err: unknown;
+    try {
+      mgr.spawn(() => deferred<string>().promise, { label: "leak this label" });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(SubagentSpawnCapError);
+    expect((err as SubagentSpawnCapError).reason).toBe("spawn_cap");
+    const msg = (err as Error).message;
+    expect(msg).toContain("session subagent cap of 1 reached");
+    expect(msg).not.toContain("leak this label");
+    expect(msg).not.toContain("SECRET");
+    expect(msg).not.toContain("/home/user");
   });
 });

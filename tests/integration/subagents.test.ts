@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   SubagentManager,
   formatSubagentView,
+  SubagentSpawnCapError,
 } from "../../src/subagents.js";
 
 // End-to-end lifecycle scenarios that exercise the manager the way a parent
@@ -147,5 +148,62 @@ describe("Integration: subagent lifecycle dogfood", () => {
     expect(mgr.get(badId)?.error).toBe("child crashed");
     expect(mgr.get(goodId)?.state).toBe("completed");
     expect(mgr.get(goodId)?.result).toBe("child ok");
+  });
+});
+
+describe("Integration: subagent spawn cap dogfood", () => {
+  it("a run within the ceiling completes unchanged", async () => {
+    const mgr = new SubagentManager({ maxConcurrent: 4, maxTotalSpawns: 3 });
+    const a = deferred<string>();
+    const b = deferred<string>();
+    const idA = mgr.spawn(() => a.promise, { label: "alpha" });
+    const idB = mgr.spawn(() => b.promise, { label: "beta" });
+
+    a.resolve("alpha done");
+    b.resolve("beta done");
+    await flush();
+
+    expect(mgr.get(idA)?.state).toBe("completed");
+    expect(mgr.get(idB)?.state).toBe("completed");
+    expect(mgr.counts().completed).toBe(2);
+  });
+
+  it("fails closed at the ceiling and reports a bounded, content-free reason", async () => {
+    const mgr = new SubagentManager({ maxConcurrent: 2, maxTotalSpawns: 2 });
+    const a = deferred<string>();
+    const b = deferred<string>();
+    mgr.spawn(() => a.promise, { label: "alpha" });
+    mgr.spawn(() => b.promise, { label: "beta" });
+
+    // A runaway delegation attempt beyond the ceiling fails closed.
+    let err: unknown;
+    try {
+      mgr.spawn(() => deferred<string>().promise, {
+        label: "SECRET=abc123 /home/user run rm",
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(SubagentSpawnCapError);
+    expect((err as SubagentSpawnCapError).reason).toBe("spawn_cap");
+
+    // The bounded reason a headless run would report: deterministic, and free
+    // of the spawn attempt's label, secrets, or host paths.
+    const reason = (err as Error).message;
+    expect(reason).toContain("session subagent cap of 2 reached");
+    expect(reason).not.toContain("SECRET");
+    expect(reason).not.toContain("/home/user");
+    expect(reason).not.toContain("run rm");
+
+    // The summary surface shows only the two registered children — the refused
+    // spawn added nothing and leaked nothing.
+    a.resolve("alpha done");
+    b.resolve("beta done");
+    await flush();
+    const view = formatSubagentView(mgr.list());
+    expect(view).toContain("alpha");
+    expect(view).toContain("beta");
+    expect(view).not.toContain("SECRET");
+    expect(view).toMatch(/2 total/);
   });
 });
