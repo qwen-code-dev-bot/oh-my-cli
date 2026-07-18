@@ -37,6 +37,14 @@ const MCP_READY = {
   },
 };
 
+const TOOL_READY = {
+  tools: {
+    contractVersion: 1,
+    default: "rg",
+    entries: [{ id: "rg", command: NODE_BIN, args: ["--version", "should-not-appear"] }],
+  },
+};
+
 describe("Integration: trust posture", () => {
   let tmpRoot: string;
 
@@ -113,6 +121,23 @@ describe("Integration: trust posture", () => {
     expect(r.code).toBe(0);
     const mcp = JSON.parse(r.stdout).extensions.surfaces.find((s: { kind: string }) => s.kind === "mcp");
     expect(mcp.state).toBe("declared");
+  });
+
+  it("reports the tool surface as ready, and declared via --no-probe", async () => {
+    const home = homeWith(TOOL_READY);
+    const ws = workspaceDir();
+    const probed = await runCli(["--trust-posture", "--workspace", ws, "--output", "json"], { HOME: home });
+    expect(probed.code).toBe(0);
+    const tool = JSON.parse(probed.stdout).extensions.surfaces.find((s: { kind: string }) => s.kind === "tool");
+    expect(tool.present).toBe(true);
+    expect(tool.selectedId).toBe("rg");
+    expect(tool.state).toBe("ready");
+    expect(probed.stdout + probed.stderr).not.toContain("should-not-appear");
+
+    const noProbe = await runCli(["--trust-posture", "--workspace", ws, "--no-probe", "--output", "json"], { HOME: home });
+    expect(noProbe.code).toBe(0);
+    const toolNoProbe = JSON.parse(noProbe.stdout).extensions.surfaces.find((s: { kind: string }) => s.kind === "tool");
+    expect(toolNoProbe.state).toBe("declared");
   });
 
   it("still exits 0 and surfaces an invalid contract as a warning (audit, not a gate)", async () => {
