@@ -173,6 +173,8 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--tool <id>` | Tool id to select for `--tool-contract` (defaults to `settings.tools.default` or the sole entry) |
 | `--discover-extensions` | Discover the declared provider, MCP, and tool extension contracts and readiness from settings (read-only, redacted) and exit |
 | `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` / `--tool-contract` / `--discover-extensions` / `--trust-posture` and report the declared state |
+| `--list-workflows` | List the reusable workflows declared in user settings (read-only, redacted) and exit |
+| `--run-workflow <name>` | Run a named workflow from user settings non-interactively (sequential headless steps; a failing step halts) and exit |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -1294,6 +1296,61 @@ contract (`kind` `provider` / `mcp` / `tool`), each flagged `present`, with its
 `contractVersion`, `entryCount`, `default`, `selectedId`, and — for MCP and tool —
 the resolved `state`, `stateReason`, and `probeMs`.
 
+### Reusable workflows
+
+Encode a repeatable, non-interactive automation (for example a CI sequence) as a
+**versioned workflow** in the same unified settings file
+(`~/.oh-my-cli/settings.json`, or `--settings <path>`), then run it by name. A
+workflow is a named, ordered list of steps and each step is a bounded prompt run
+through the existing headless `-p` path in its own process — so steps are
+isolated and there is no core-code change per consumer. `--list-workflows`
+inventories the declared workflows (read-only, redacted); `--run-workflow <name>`
+runs one non-interactively.
+
+```json
+{
+  "workflows": {
+    "contractVersion": 1,
+    "definitions": {
+      "ci-readonly": {
+        "description": "Two read-only checks",
+        "steps": [
+          { "prompt": "List the files in this directory" },
+          { "prompt": "Summarize README.md" }
+        ]
+      }
+    }
+  }
+}
+```
+
+```bash
+oh-my-cli --list-workflows
+oh-my-cli --run-workflow ci-readonly
+oh-my-cli --run-workflow ci-readonly --output json
+```
+
+Steps run sequentially in declared order. **Safe failure defaults:** the first
+failing step halts the run with a bounded non-zero verdict and the remaining
+steps do not run. The contract is untrusted input read only from the user-owned
+scope — a project-local settings file can never define or run a workflow. A raw
+credential field (in a workflow or a step), an unknown/misspelled key, a
+malformed step, or an unsupported `contractVersion` fails closed and exits `2`
+before any side effect. A completed run exits `0`; a halted run exits `1`.
+
+Output is redacted in both modes — secrets, credentials, and home/workspace
+paths never appear — and each step reports pass/fail and bounded wall-clock time.
+Human mode streams one line per step; `--output json` emits a single record
+(`schema` `oh-my-cli.workflow-contract`) with the `workflow` name, `result`
+(`completed` or `failed`), `stepsRun`/`stepsTotal`, and a `steps` array carrying
+each step's redacted `prompt`, `ok`, `exitCode`, and `elapsedMs`.
+
+```text
+  Step 1/2: List the files in this directory — ok (615ms)
+  Step 2/2: Summarize README.md — ok (718ms)
+Workflow "ci-readonly": completed (2/2 steps, 1340ms)
+```
+
 ## Built-in tools
 
 | Tool | Category | Description |
@@ -1384,6 +1441,8 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/mcp-contract.ts` — versioned, redacted MCP server extension contract: declare servers in settings, negotiate the contract version, select one, and resolve its lifecycle state (declared/ready/isolated) with safe failure defaults (`--mcp-contract`)
 - `src/tool-contract.ts` — versioned, redacted tool extension contract: declare tools in settings, negotiate the contract version, select one, and resolve its readiness state (declared/ready/isolated) with safe failure defaults (`--tool-contract`)
 - `src/extension-discovery.ts` — read-only discovery view composing the provider, MCP, and tool contract resolvers into one redacted report of which extension surfaces are declared and ready, without core changes (`--discover-extensions`)
+- `src/workflow-contract.ts` — versioned, redacted workflow contract: declare reusable named workflows (ordered steps) in user settings, negotiate the contract version, select one by name, and list them (`--list-workflows`)
+- `src/workflow-runner.ts` — run a named workflow non-interactively, each step a bounded prompt through the headless `-p` path in its own process; steps run in declared order, a failing step halts the run, and output is redacted in human and machine modes (`--run-workflow`)
 - `src/trust-posture.ts` — read-only posture view composing folder trust, sandbox isolation, approval mode, and extension readiness into one redacted audit of what a run will be allowed to do, without core changes (`--trust-posture`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)

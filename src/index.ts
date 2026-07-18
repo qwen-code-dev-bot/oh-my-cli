@@ -3,6 +3,8 @@
 import { Command } from "commander";
 import { resolveModelConfig, resolveSettingsPath, describeResolvedConfig } from "./settings.js";
 import { resolveEffectiveSettings, formatEffectiveSettings } from "./effective-settings.js";
+import { collectWorkflowList, formatWorkflowList } from "./workflow-contract.js";
+import { runWorkflow, formatWorkflowStepLine } from "./workflow-runner.js";
 import { Workspace } from "./workspace.js";
 import { SessionStore } from "./session.js";
 import { runAgent } from "./agent.js";
@@ -126,6 +128,8 @@ program
   .option("--health", "Show MCP server and extension health inventory and exit")
   .option("--settings <path>", "Unified settings file for model config and --health (default ~/.oh-my-cli/settings.json)")
   .option("--effective-settings", "Show the effective, redacted, hierarchical settings snapshot (user + trusted project, validated; read-only) and exit")
+  .option("--list-workflows", "List declared workflows from user settings (read-only, redacted) and exit")
+  .option("--run-workflow <name>", "Run a named workflow from user settings non-interactively (sequential headless steps) and exit")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
   .option("--compact <session-id>", "Compact a session into a bounded summary sidecar (original preserved) and exit")
   .option("--compact-threshold <tokens>", "Auto-compact the in-memory transcript when the latest prompt size reaches this (env: OMC_COMPACT_THRESHOLD)")
@@ -845,6 +849,89 @@ program
           process.stdout.write(formatEffectiveSettings(snapshot) + "\n");
         }
         process.exit(0);
+      }
+
+      // List-workflows mode: a read-only, redacted inventory of the workflows
+      // declared in the user-owned settings scope (workflow-contract.ts). The
+      // project scope is never read, so an untrusted repository cannot surface a
+      // workflow. Exits 0 on success; a malformed/unknown contract or an invalid
+      // output format exits 2 as a usage/input error.
+      if (opts.listWorkflows) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let report;
+        try {
+          report = collectWorkflowList({ settingsPath: resolveSettingsPath(opts.settings) });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatWorkflowList(report) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Run-workflow mode: run a named workflow from the user-owned settings scope
+      // non-interactively (workflow-runner.ts). Each step is a bounded prompt run
+      // through the existing headless `-p` path in its own process; steps run in
+      // declared order and the first failing step halts the run. Output is
+      // redacted in both human (streamed per-step) and machine (single summary)
+      // modes. Resolution/usage errors exit 2; a completed run exits 0 and a
+      // halted run exits 1 (matching the headless run-outcome convention).
+      if (opts.runWorkflow !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const name = String(opts.runWorkflow ?? "").trim();
+        if (name === "") {
+          process.stderr.write("Error: --run-workflow requires a workflow name\n");
+          process.exit(2);
+        }
+        let report;
+        try {
+          report = await runWorkflow({
+            name,
+            settingsPath: resolveSettingsPath(opts.settings),
+            workspace: opts.workspace,
+            env: process.env,
+            onStepEnd:
+              format === "text"
+                ? (step, stepsTotal) => {
+                    process.stdout.write(formatWorkflowStepLine(step, stepsTotal) + "\n");
+                    if (!step.ok && step.reason) {
+                      process.stdout.write(`    reason: ${step.reason}\n`);
+                    }
+                  }
+                : undefined,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          if (report.stepsRun < report.stepsTotal) {
+            process.stdout.write(
+              `  Steps ${report.stepsRun + 1}-${report.stepsTotal}: skipped (halted)\n`,
+            );
+          }
+          process.stdout.write(
+            `Workflow "${report.workflow}": ${report.result} ` +
+              `(${report.stepsRun}/${report.stepsTotal} steps, ${report.elapsedMs}ms)\n`,
+          );
+        }
+        process.exit(report.result === "completed" ? 0 : 1);
       }
 
       if (opts.trustWorkspace) {
