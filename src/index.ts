@@ -49,6 +49,11 @@ import {
   formatMcpInvocation,
   mcpInvocationExitCode,
 } from "./mcp-invocation.js";
+import {
+  invokeProvider,
+  formatProviderInvocation,
+  providerInvocationExitCode,
+} from "./provider-invocation.js";
 import { collectExtensionDiscovery, formatExtensionDiscovery } from "./extension-discovery.js";
 import { collectTrustPosture, formatTrustPosture } from "./trust-posture.js";
 import {
@@ -157,7 +162,9 @@ program
   .option("--delivery-brief", "Compose plan, verify, review, and CI handoff into a bounded, redacted, head-bound completion verdict and exit")
   .option("--ci-result <state>", "CI outcome for --delivery-brief: pass, fail, or pending (default pending)")
   .option("--provider-contract", "Inspect the resolved provider extension contract from settings (read-only, redacted) and exit")
-  .option("--provider <id>", "Provider id to select for --provider-contract (defaults to settings.providers.default or the sole entry)")
+  .option("--provider <id>", "Provider id to select for --provider-contract / --invoke-provider (defaults to settings.providers.default or the sole entry)")
+  .option("--invoke-provider", "Issue one bounded model request to the resolved-ready provider from settings once, gated by approval mode, bounded and redacted, and exit")
+  .option("--provider-prompt <text>", "Prompt to send for --invoke-provider (defaults to a minimal safe ping)")
   .option("--mcp-contract", "Inspect the resolved MCP server extension contract from settings (read-only, redacted) and exit")
   .option("--server <id>", "MCP server id to select for --mcp-contract / --invoke-mcp (defaults to settings.mcp.default or the sole entry)")
   .option("--invoke-mcp", "Connect to the resolved-ready MCP server from settings once and call one of its tools, gated by approval mode and command policy, confined and redacted, and exit")
@@ -171,7 +178,7 @@ program
   .option("--tool-contract", "Inspect the resolved tool extension contract from settings (read-only, redacted) and exit")
   .option("--tool <id>", "Tool id to select for --tool-contract / --invoke-tool (defaults to settings.tools.default or the sole entry)")
   .option("--invoke-tool", "Invoke the resolved-ready tool extension from settings once, gated by approval mode and command policy, confined and redacted, and exit")
-  .option("--invoke-timeout <ms>", "Hard timeout in milliseconds for --invoke-tool / --invoke-mcp (default 30000, max 300000)")
+  .option("--invoke-timeout <ms>", "Hard timeout in milliseconds for --invoke-tool / --invoke-mcp / --invoke-provider (default 30000, max 300000)")
   .option("--discover-extensions", "Discover the declared provider, MCP, and tool extension contracts and readiness from settings (read-only, redacted) and exit")
   .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract / --tool-contract / --discover-extensions / --trust-posture and report the declared state")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
@@ -693,6 +700,59 @@ program
           process.stdout.write(formatMcpInvocation(report) + "\n");
         }
         process.exit(mcpInvocationExitCode(report));
+      }
+
+      // Provider-invocation mode: governed, non-interactive issuance of exactly
+      // one bounded model request to one resolved-`ready` provider through its
+      // contract (#118), gated by readiness (credential available, endpoint
+      // valid) and the approval mode, bounded by a hard timeout, a bounded
+      // generation, and an output-size cap, and redacted. The credential value is
+      // never printed. Exit 0 on a successful response; 2 for a
+      // contract/selection/version error, a non-`ready` provider, or a missing
+      // approval (refused before calling); 1 for a request runtime failure (empty
+      // response, auth rejection, rate limit, network/API error, timeout, or
+      // oversized output) — never crashing the run.
+      if (opts.invokeProvider) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const approvalMode = String(opts.approvalMode ?? "default");
+        if (!["default", "auto-edit", "yolo"].includes(approvalMode)) {
+          process.stderr.write(`Error: invalid approval mode "${approvalMode}"\n`);
+          process.exit(2);
+        }
+        let timeoutMs: number | undefined;
+        if (opts.invokeTimeout !== undefined) {
+          timeoutMs = Number(opts.invokeTimeout);
+          if (!Number.isFinite(timeoutMs)) {
+            process.stderr.write(`Error: invalid --invoke-timeout "${opts.invokeTimeout}"\n`);
+            process.exit(2);
+          }
+        }
+        let report;
+        try {
+          report = await invokeProvider({
+            settingsPath: resolveSettingsPath(opts.settings),
+            env: process.env,
+            providerId: opts.provider,
+            prompt: opts.providerPrompt,
+            workspace: opts.workspace,
+            approvalMode: approvalMode as ApprovalMode,
+            timeoutMs,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatProviderInvocation(report) + "\n");
+        }
+        process.exit(providerInvocationExitCode(report));
       }
 
       // Extension-discovery mode: a single read-only view across the versioned

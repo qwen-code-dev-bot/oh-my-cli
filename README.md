@@ -166,7 +166,9 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--delivery-brief` | Compose plan, verify, review, and CI handoff into a bounded, redacted, head-bound completion verdict and exit |
 | `--ci-result <state>` | CI outcome for `--delivery-brief`: `pass`, `fail`, or `pending` (default `pending`) |
 | `--provider-contract` | Inspect the resolved provider extension contract from settings (read-only, redacted) and exit |
-| `--provider <id>` | Provider id to select for `--provider-contract` (defaults to `settings.providers.default` or the sole entry) |
+| `--provider <id>` | Provider id to select for `--provider-contract` / `--invoke-provider` (defaults to `settings.providers.default` or the sole entry) |
+| `--invoke-provider` | Issue one bounded model request to the resolved-`ready` provider from settings once, gated by approval mode, bounded and redacted, and exit |
+| `--provider-prompt <text>` | Prompt to send for `--invoke-provider` (defaults to a minimal safe ping) |
 | `--mcp-contract` | Inspect the resolved MCP server extension contract from settings (read-only, redacted) and exit |
 | `--server <id>` | MCP server id to select for `--mcp-contract` / `--invoke-mcp` (defaults to `settings.mcp.default` or the sole entry) |
 | `--invoke-mcp` | Connect to the resolved-`ready` MCP server from settings once and call one of its tools, gated by approval mode and command policy, confined and redacted, and exit |
@@ -175,7 +177,7 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--tool-contract` | Inspect the resolved tool extension contract from settings (read-only, redacted) and exit |
 | `--tool <id>` | Tool id to select for `--tool-contract` / `--invoke-tool` (defaults to `settings.tools.default` or the sole entry) |
 | `--invoke-tool` | Invoke the resolved-`ready` tool extension from settings once, gated by approval mode and command policy, confined and redacted, and exit |
-| `--invoke-timeout <ms>` | Hard timeout in milliseconds for `--invoke-tool` / `--invoke-mcp` (default `30000`, max `300000`) |
+| `--invoke-timeout <ms>` | Hard timeout in milliseconds for `--invoke-tool` / `--invoke-mcp` / `--invoke-provider` (default `30000`, max `300000`) |
 | `--discover-extensions` | Discover the declared provider, MCP, and tool extension contracts and readiness from settings (read-only, redacted) and exit |
 | `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` / `--tool-contract` / `--discover-extensions` / `--trust-posture` and report the declared state |
 | `--list-workflows` | List the reusable workflows declared in user settings (read-only, redacted) and exit |
@@ -1246,6 +1248,65 @@ Add `--output json` for a versioned record (`schema` `oh-my-cli.tool-contract`)
 carrying the negotiated `contractVersion`, the selected `toolId`, `kind`,
 `command`, `argCount`, the resolved `state` and `reason`, and `probeMs`.
 
+### Provider invocation
+
+`--provider-contract` is read-only — it resolves a provider's configuration but
+never issues a request. `--invoke-provider` is the governed next step: it issues
+**one** bounded model request to **one** resolved-`ready` provider once,
+non-interactively, reusing the same `providers` contract, without changing core
+code.
+
+```bash
+# invoke the default (or sole) ready provider with a minimal safe ping
+oh-my-cli --invoke-provider --approval-mode yolo
+
+# select one explicitly, send a prompt, and emit a versioned JSON result
+oh-my-cli --invoke-provider --provider alt --provider-prompt "hello" --output json
+
+# bound a slow provider with a shorter hard timeout
+oh-my-cli --invoke-provider --approval-mode yolo --invoke-timeout 5000
+```
+
+Every gate runs before the request and fails closed:
+
+- **Readiness** — only a `ready` provider is called; one whose credential
+  environment variable is unset or whose endpoint is not a valid URL is refused.
+- **Approval mode** — a provider request is a network call to an external model
+  API (it can spend credit and read whatever the endpoint returns), so it is
+  gated as the most cautious category: `default` and `auto-edit` require approval
+  (an interactive terminal may grant it); a non-interactive run is refused unless
+  the mode is `yolo`.
+
+The request is bounded in three ways: a hard timeout (`--invoke-timeout`, default
+30s, max 300s) aborts the in-flight call, a bounded generation (`max tokens`)
+caps what the provider returns, and an output-size cap bounds what enters the
+report. The credential is supplied by an environment-variable name and its value
+is never printed, logged, or sent through the approval prompt — only the variable
+name is reported. The endpoint is reduced to its host, the prompt is reported as
+a character count (never echoed), and the response is redacted (secrets and
+home/workspace paths) in both text and JSON. Exit codes: `0` on a response with
+content; `2` for a contract/selection/version error, a non-`ready` provider, or a
+missing approval (refused before calling); `1` for a request runtime failure (an
+empty response, auth rejection, unsupported model, rate limiting, network/API
+error, timeout, or oversized output) — the run never crashes.
+
+```text
+Provider:     alt
+Contract:     oh-my-cli.provider-invocation v1 (settings contract version 1)
+Endpoint:     alt.example (settings)
+Model:        alt-model
+Credential:   ALT_KEY
+Prompt:       4 chars
+Gate:         passed
+Invoked:      true
+Outcome:      called
+Tokens:       8 (prompt 3, completion 5)
+Bounds:       123ms (timeout 30000ms, max tokens 256, output cap 65536 bytes)
+Reason:       provider returned a response
+Result:       pong
+Settings:     ~/.oh-my-cli/settings.json
+```
+
 ### Tool invocation
 
 `--tool-contract` is read-only — it resolves readiness but never runs the tool.
@@ -1528,6 +1589,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/ci-handoff.ts` — bounded, redacted, head-bound CI handoff brief composing verify + review (`--ci-handoff`)
 - `src/delivery-brief.ts` — bounded, redacted, head-bound completion verdict composing plan + verify + review + handoff with a CI result (`--delivery-brief`)
 - `src/provider-contract.ts` — versioned, redacted provider extension contract: declare providers in settings, negotiate the contract version, select one, and resolve its non-secret config (`--provider-contract`)
+- `src/provider-invocation.ts` — governed, non-interactive issuance of one bounded model request to one resolved-`ready` provider through its contract: gated by readiness (credential available, endpoint valid) and approval mode, bounded by a hard timeout, a bounded generation, and an output-size cap, redacted in text and JSON with the credential value never printed, and fail-closed on every error (`--invoke-provider`)
 - `src/mcp-contract.ts` — versioned, redacted MCP server extension contract: declare servers in settings, negotiate the contract version, select one, and resolve its lifecycle state (declared/ready/isolated) with safe failure defaults (`--mcp-contract`)
 - `src/mcp-invocation.ts` — governed, non-interactive connection to one resolved-`ready` MCP server over safe local stdio: initialize handshake, tool listing, and one tool call, gated by readiness, the command trust policy, and approval mode, confined to the workspace, bounded by a hard timeout and output cap, redacted in text and JSON, and fail-closed on every error (`--invoke-mcp`)
 - `src/tool-contract.ts` — versioned, redacted tool extension contract: declare tools in settings, negotiate the contract version, select one, and resolve its readiness state (declared/ready/isolated) with safe failure defaults (`--tool-contract`)

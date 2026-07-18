@@ -327,6 +327,91 @@ export function buildProviderContractReport(facts: {
   };
 }
 
+export interface ProviderResolutionOptions {
+  settingsPath?: string;
+  env?: Record<string, string | undefined>;
+  providerId?: string;
+}
+
+// The selected provider entry plus the settings context it was resolved from.
+// Readiness (credential availability, endpoint validity) is decided separately
+// by resolveProviderReadiness so the read-only report can surface it without
+// gating while the invocation path can gate on it.
+export interface ResolvedProvider {
+  contractVersion: number;
+  entry: ProviderEntry;
+  settingsPath: string;
+  settingsFound: boolean;
+}
+
+// Read the user settings file, negotiate the provider contract, and select one
+// provider entry — the shared resolution step behind both the read-only contract
+// report (collectProviderContract) and the governed invocation path
+// (provider-invocation.ts). Throws the same redacted contract/selection/version
+// errors; readiness is decided by the caller, not here.
+export function resolveSelectedProvider(opts: ProviderResolutionOptions = {}): ResolvedProvider {
+  const settingsPath = resolveSettingsPath(opts.settingsPath);
+  const { found, section } = readProvidersSection(settingsPath);
+  if (section === undefined) {
+    throw new Error(
+      found
+        ? "Provider error: settings file has no settings.providers section"
+        : `Provider error: settings file not found at ${redactHomePath(settingsPath)}`,
+    );
+  }
+  const contract = parseProviderContract(section);
+  const entry = selectProviderEntry(contract, { providerId: opts.providerId });
+  return { contractVersion: contract.contractVersion, entry, settingsPath, settingsFound: found };
+}
+
+// A provider is `ready` to be invoked when its endpoint is a valid URL and its
+// credential environment variable is currently exported; otherwise it is
+// `not-ready`. No secret value is read or returned — only the variable name and
+// whether it is set. This is the gate the invocation path (#149) applies before
+// issuing a request; the read-only report surfaces the same facts without gating.
+export type ProviderReadinessState = "ready" | "not-ready";
+
+export interface ProviderReadiness {
+  state: ProviderReadinessState;
+  reason: string;
+  baseUrl: string;
+  endpointSource: "settings" | "default";
+  endpointValid: boolean;
+  credentialVariable: string;
+  credentialFromSettings: boolean;
+  credentialAvailable: boolean;
+}
+
+export function resolveProviderReadiness(
+  entry: ProviderEntry,
+  opts: { env?: Record<string, string | undefined> } = {},
+): ProviderReadiness {
+  const env = opts.env ?? process.env;
+  const baseUrl = entry.baseUrl ?? DEFAULT_BASE_URL;
+  const endpointValid = isValidUrl(baseUrl);
+  const credentialVariable = entry.apiKeyEnv ?? "OPENAI_API_KEY";
+  const credentialAvailable = envValue(env, credentialVariable) !== undefined;
+  let state: ProviderReadinessState = "ready";
+  let reason = "credential available and endpoint valid";
+  if (!endpointValid) {
+    state = "not-ready";
+    reason = `provider "${entry.id}" base URL is not a valid URL`;
+  } else if (!credentialAvailable) {
+    state = "not-ready";
+    reason = `credential environment variable ${credentialVariable} for provider "${entry.id}" is not set`;
+  }
+  return {
+    state,
+    reason,
+    baseUrl,
+    endpointSource: entry.baseUrl ? "settings" : "default",
+    endpointValid,
+    credentialVariable,
+    credentialFromSettings: entry.apiKeyEnv !== undefined,
+    credentialAvailable,
+  };
+}
+
 // Read the user settings file, negotiate the provider contract, select one
 // provider, and build the redacted report. Throws a redacted error when no
 // `providers` section exists or the contract is invalid. Credential availability
@@ -340,29 +425,23 @@ export function collectProviderContract(
   } = {},
 ): ProviderContractReport {
   const env = opts.env ?? process.env;
-  const settingsPath = resolveSettingsPath(opts.settingsPath);
-  const { found, section } = readProvidersSection(settingsPath);
-  if (section === undefined) {
-    throw new Error(
-      found
-        ? "Provider error: settings file has no settings.providers section"
-        : `Provider error: settings file not found at ${redactHomePath(settingsPath)}`,
-    );
-  }
-  const contract = parseProviderContract(section);
-  const entry = selectProviderEntry(contract, { providerId: opts.providerId });
-  const baseUrl = entry.baseUrl ?? DEFAULT_BASE_URL;
-  const credentialVariable = entry.apiKeyEnv ?? "OPENAI_API_KEY";
+  const resolved = resolveSelectedProvider({
+    settingsPath: opts.settingsPath,
+    env,
+    providerId: opts.providerId,
+  });
+  const entry = resolved.entry;
+  const readiness = resolveProviderReadiness(entry, { env });
   return buildProviderContractReport({
-    contractVersion: contract.contractVersion,
+    contractVersion: resolved.contractVersion,
     entry,
-    baseUrl,
-    endpointSource: entry.baseUrl ? "settings" : "default",
-    credentialVariable,
-    credentialFromSettings: entry.apiKeyEnv !== undefined,
-    credentialAvailable: envValue(env, credentialVariable) !== undefined,
-    settingsPath,
-    settingsFound: found,
+    baseUrl: readiness.baseUrl,
+    endpointSource: readiness.endpointSource,
+    credentialVariable: readiness.credentialVariable,
+    credentialFromSettings: readiness.credentialFromSettings,
+    credentialAvailable: readiness.credentialAvailable,
+    settingsPath: resolved.settingsPath,
+    settingsFound: resolved.settingsFound,
   });
 }
 
