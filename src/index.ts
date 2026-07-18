@@ -36,6 +36,7 @@ import {
 import { collectProviderContract, formatProviderContract } from "./provider-contract.js";
 import { collectMcpContract, formatMcpContract } from "./mcp-contract.js";
 import { collectExtensionDiscovery, formatExtensionDiscovery } from "./extension-discovery.js";
+import { collectTrustPosture, formatTrustPosture } from "./trust-posture.js";
 import {
   readRecoveryCheckpoint,
   readEvidenceFile,
@@ -119,6 +120,7 @@ program
   .option("--trust", "Trust this workspace for this run only (not persisted)")
   .option("--trust-workspace", "Persist trust for this workspace in the user trust store and exit")
   .option("--enforce-folder-trust", "Deny mutating tools when the workspace is untrusted (env: OMC_ENFORCE_FOLDER_TRUST=1)")
+  .option("--trust-posture", "Show the effective, redacted workspace trust, sandbox, approval, and extension posture (read-only) and exit")
   .option("--health", "Show MCP server and extension health inventory and exit")
   .option("--settings <path>", "Unified settings file for model config and --health (default ~/.oh-my-cli/settings.json)")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
@@ -142,7 +144,7 @@ program
   .option("--mcp-contract", "Inspect the resolved MCP server extension contract from settings (read-only, redacted) and exit")
   .option("--server <id>", "MCP server id to select for --mcp-contract (defaults to settings.mcp.default or the sole entry)")
   .option("--discover-extensions", "Discover the declared provider and MCP extension contracts and readiness from settings (read-only, redacted) and exit")
-  .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract / --discover-extensions and report the declared state")
+  .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract / --discover-extensions / --trust-posture and report the declared state")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
   .option("--task-identity <id>", "Stable task identity (used by --recover and worktree leases)")
@@ -732,6 +734,43 @@ program
             enforcing,
           }) + "\n",
         );
+        process.exit(0);
+      }
+
+      // Trust-posture mode: compose the folder-trust decision, sandbox isolation,
+      // approval mode, and extension readiness into one redacted, read-only view
+      // (folder-trust.ts + sandbox-diag.ts + approval.ts + extension-discovery.ts).
+      // It is an audit, not a gate: it never mutates the trust store or settings
+      // and always exits 0 — even an invalid extension contract is surfaced as a
+      // visible warning rather than thrown. Exit 2 only on a usage error.
+      if (opts.trustPosture) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const approvalMode = String(opts.approvalMode ?? "default");
+        if (!["default", "auto-edit", "yolo"].includes(approvalMode)) {
+          process.stderr.write(`Error: invalid approval mode "${approvalMode}"\n`);
+          process.exit(2);
+        }
+        const enforcing =
+          Boolean(opts.enforceFolderTrust) || process.env.OMC_ENFORCE_FOLDER_TRUST === "1";
+        const report = collectTrustPosture({
+          workspacePath: opts.workspace,
+          approvalMode: approvalMode as ApprovalMode,
+          settingsPath: resolveSettingsPath(opts.settings),
+          env: process.env,
+          trustThisRun: Boolean(opts.trust),
+          enforcing,
+          isTTY: Boolean(process.stdin.isTTY),
+          probe: opts.probe,
+        });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatTrustPosture(report) + "\n");
+        }
         process.exit(0);
       }
 

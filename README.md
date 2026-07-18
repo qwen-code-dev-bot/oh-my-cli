@@ -170,7 +170,7 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--mcp-contract` | Inspect the resolved MCP server extension contract from settings (read-only, redacted) and exit |
 | `--server <id>` | MCP server id to select for `--mcp-contract` (defaults to `settings.mcp.default` or the sole entry) |
 | `--discover-extensions` | Discover the declared provider and MCP extension contracts and readiness from settings (read-only, redacted) and exit |
-| `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` / `--discover-extensions` and report the declared state |
+| `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` / `--discover-extensions` / `--trust-posture` and report the declared state |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -197,6 +197,7 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--trust` | Trust this workspace for this run only (not persisted) |
 | `--trust-workspace` | Persist trust for this workspace in the user trust store and exit |
 | `--enforce-folder-trust` | Deny mutating tools when the workspace is untrusted (env: `OMC_ENFORCE_FOLDER_TRUST=1`) |
+| `--trust-posture` | Show the effective, redacted workspace trust, sandbox, approval, and extension posture (read-only) and exit |
 
 Color is enabled by default in the interactive REPL and command palette. Pass
 `--no-color` or set a non-empty `NO_COLOR` environment variable (per
@@ -281,6 +282,27 @@ The trust store fails closed on any missing, malformed, or wrong-schema file
 (nothing trusted) rather than widening trust. All diagnostics redact the host
 home directory to `~` and never emit secrets. `--trust-info` is a read-only
 diagnostic (always exit `0`), not a gate.
+
+**Trust posture.** Before running unattended or delegating mutating work,
+`--trust-posture` composes the folder-trust decision, sandbox isolation, approval
+mode, and extension readiness (`--discover-extensions`) into one redacted,
+read-only view — answering "is this run confined the way I expect, and what will
+it be allowed to do?" without running each diagnostic separately.
+
+```bash
+oh-my-cli --trust-posture --workspace path/to/repo
+oh-my-cli --trust-posture --workspace path/to/repo --output json
+# show the approval dimension and resolve extensions without probing
+oh-my-cli --trust-posture --approval-mode yolo --no-probe
+```
+
+It is an **audit, not a gate**: it never mutates the trust store or settings and
+always exits `0`. The approval mode is reported as subordinate to folder trust —
+the mutation line states `permitted`, `DENIED (fail closed)` (untrusted while
+enforcing), or `would be denied if enforcement were on` (untrusted, advisory). An
+invalid extension contract is surfaced as a visible warning rather than thrown
+(the runtime contract resolvers still fail closed on their own). Add
+`--output json` for a versioned record (`schema` `oh-my-cli.trust-posture`).
 
 ### Headless JSON protocol
 
@@ -1280,6 +1302,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/provider-contract.ts` — versioned, redacted provider extension contract: declare providers in settings, negotiate the contract version, select one, and resolve its non-secret config (`--provider-contract`)
 - `src/mcp-contract.ts` — versioned, redacted MCP server extension contract: declare servers in settings, negotiate the contract version, select one, and resolve its lifecycle state (declared/ready/isolated) with safe failure defaults (`--mcp-contract`)
 - `src/extension-discovery.ts` — read-only discovery view composing the provider and MCP contract resolvers into one redacted report of which extension surfaces are declared and ready, without core changes (`--discover-extensions`)
+- `src/trust-posture.ts` — read-only posture view composing folder trust, sandbox isolation, approval mode, and extension readiness into one redacted audit of what a run will be allowed to do, without core changes (`--trust-posture`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)
 - `tests/fake-provider.ts` — fake OpenAI-compatible HTTP server for tests
