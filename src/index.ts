@@ -146,7 +146,7 @@ program
   .option("--server <id>", "MCP server id to select for --mcp-contract (defaults to settings.mcp.default or the sole entry)")
   .option("--tool-contract", "Inspect the resolved tool extension contract from settings (read-only, redacted) and exit")
   .option("--tool <id>", "Tool id to select for --tool-contract (defaults to settings.tools.default or the sole entry)")
-  .option("--discover-extensions", "Discover the declared provider and MCP extension contracts and readiness from settings (read-only, redacted) and exit")
+  .option("--discover-extensions", "Discover the declared provider, MCP, and tool extension contracts and readiness from settings (read-only, redacted) and exit")
   .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract / --tool-contract / --discover-extensions / --trust-posture and report the declared state")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
