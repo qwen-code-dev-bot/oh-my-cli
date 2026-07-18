@@ -35,6 +35,7 @@ import {
 } from "./delivery-brief.js";
 import { collectProviderContract, formatProviderContract } from "./provider-contract.js";
 import { collectMcpContract, formatMcpContract } from "./mcp-contract.js";
+import { collectToolContract, formatToolContract } from "./tool-contract.js";
 import { collectExtensionDiscovery, formatExtensionDiscovery } from "./extension-discovery.js";
 import { collectTrustPosture, formatTrustPosture } from "./trust-posture.js";
 import {
@@ -143,8 +144,10 @@ program
   .option("--provider <id>", "Provider id to select for --provider-contract (defaults to settings.providers.default or the sole entry)")
   .option("--mcp-contract", "Inspect the resolved MCP server extension contract from settings (read-only, redacted) and exit")
   .option("--server <id>", "MCP server id to select for --mcp-contract (defaults to settings.mcp.default or the sole entry)")
+  .option("--tool-contract", "Inspect the resolved tool extension contract from settings (read-only, redacted) and exit")
+  .option("--tool <id>", "Tool id to select for --tool-contract (defaults to settings.tools.default or the sole entry)")
   .option("--discover-extensions", "Discover the declared provider and MCP extension contracts and readiness from settings (read-only, redacted) and exit")
-  .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract / --discover-extensions / --trust-posture and report the declared state")
+  .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract / --tool-contract / --discover-extensions / --trust-posture and report the declared state")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
   .option("--task-identity <id>", "Stable task identity (used by --recover and worktree leases)")
@@ -514,6 +517,40 @@ program
           process.stdout.write(JSON.stringify(report) + "\n");
         } else {
           process.stdout.write(formatMcpContract(report) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Tool-contract mode: inspect the resolved tool extension contract declared
+      // in the user settings file (versioned, redacted, read-only). Completes the
+      // provider/tool/MCP contract triad — declare tools in settings, negotiate
+      // the contract version, deterministically select one, and resolve its
+      // readiness state (declared / ready / isolated) with safe failure defaults —
+      // without changing core code. A disabled or unavailable tool resolves to
+      // "isolated" (exit 0); a contract/usage error exits 2.
+      if (opts.toolContract) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let report;
+        try {
+          report = collectToolContract({
+            settingsPath: resolveSettingsPath(opts.settings),
+            env: process.env,
+            toolId: opts.tool,
+            probe: opts.probe,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatToolContract(report) + "\n");
         }
         process.exit(0);
       }
