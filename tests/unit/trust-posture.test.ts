@@ -50,6 +50,12 @@ const PROVIDER_SECTION = {
   entries: [{ id: "primary", model: "model-a", apiKeyEnv: "KEY_A" }],
 };
 
+const TOOL_SECTION = {
+  contractVersion: 1,
+  default: "rg",
+  entries: [{ id: "rg", command: NODE_BIN, args: ["--version", "should-not-appear"] }],
+};
+
 let prevHome: string | undefined;
 let home: string;
 let workspace: string;
@@ -213,6 +219,40 @@ describe("collectTrustPosture: extension readiness", () => {
     const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
     expect(report.extensions.surfaces.find((s) => s.kind === "mcp")!.state).toBe("isolated");
   });
+
+  it("reports a declared tool resolved to ready", () => {
+    const settings = writeSettings({ tools: TOOL_SECTION });
+    const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    const tool = report.extensions.surfaces.find((s) => s.kind === "tool")!;
+    expect(tool.present).toBe(true);
+    expect(tool.selectedId).toBe("rg");
+    expect(tool.state).toBe("ready");
+  });
+
+  it("reports an absent tool surface when only a provider is declared", () => {
+    const settings = writeSettings({ providers: PROVIDER_SECTION });
+    const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    expect(report.extensions.surfaces.find((s) => s.kind === "tool")!.present).toBe(false);
+  });
+
+  it("reports the tool surface as declared without probing", () => {
+    const settings = writeSettings({ tools: TOOL_SECTION });
+    const report = collectTrustPosture({
+      workspacePath: workspace,
+      env: {},
+      settingsPath: settings,
+      probe: false,
+    });
+    expect(report.extensions.surfaces.find((s) => s.kind === "tool")!.state).toBe("declared");
+  });
+
+  it("isolates a disabled tool", () => {
+    const settings = writeSettings({
+      tools: { contractVersion: 1, entries: [{ id: "rg", command: NODE_BIN, enabled: false }] },
+    });
+    const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    expect(report.extensions.surfaces.find((s) => s.kind === "tool")!.state).toBe("isolated");
+  });
 });
 
 describe("collectTrustPosture: invalid contract surfaces as a warning, not a throw", () => {
@@ -289,5 +329,14 @@ describe("formatTrustPosture", () => {
     const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
     expect(formatTrustPosture(report)).toContain("Invalid:");
     expect(formatTrustPosture(report)).toContain("not supported");
+  });
+
+  it("renders the tool surface with its readiness state", () => {
+    const settings = writeSettings({ tools: TOOL_SECTION });
+    const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    const out = formatTrustPosture(report);
+    expect(out).toContain("Tool:");
+    expect(out).toContain("rg — ready");
+    expect(out).not.toContain("should-not-appear");
   });
 });

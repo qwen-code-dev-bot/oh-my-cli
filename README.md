@@ -287,9 +287,10 @@ diagnostic (always exit `0`), not a gate.
 
 **Trust posture.** Before running unattended or delegating mutating work,
 `--trust-posture` composes the folder-trust decision, sandbox isolation, approval
-mode, and extension readiness (`--discover-extensions`) into one redacted,
-read-only view — answering "is this run confined the way I expect, and what will
-it be allowed to do?" without running each diagnostic separately.
+mode, and extension readiness (`--discover-extensions`, spanning the provider,
+MCP, and tool contracts) into one redacted, read-only view — answering "is this
+run confined the way I expect, and what will it be allowed to do?" without
+running each diagnostic separately.
 
 ```bash
 oh-my-cli --trust-posture --workspace path/to/repo

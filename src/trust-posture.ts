@@ -25,6 +25,7 @@ import { needsApproval } from "./approval.js";
 import type { ApprovalMode, ToolCategory } from "./approval.js";
 import { collectExtensionDiscovery } from "./extension-discovery.js";
 import type { McpLifecycleState } from "./mcp-contract.js";
+import type { ToolReadinessState } from "./tool-contract.js";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
 
 export const TRUST_POSTURE_SCHEMA = "oh-my-cli.trust-posture";
@@ -53,12 +54,12 @@ export interface ApprovalPosture {
 }
 
 // A compact per-surface extension readiness summary: declared or not, which entry
-// a consumer would select, and (for MCP) the lifecycle state.
+// a consumer would select, and (for MCP and tool) the lifecycle/readiness state.
 export interface PostureExtensionSurface {
-  kind: "provider" | "mcp";
+  kind: "provider" | "mcp" | "tool";
   present: boolean;
   selectedId: string | null;
-  state: McpLifecycleState | null;
+  state: McpLifecycleState | ToolReadinessState | null;
 }
 
 export interface TrustPostureReport {
@@ -124,20 +125,15 @@ export function collectTrustPosture(opts: CollectTrustPostureOptions): TrustPost
     const discovery = collectExtensionDiscovery({ settingsPath: opts.settingsPath, probe });
     extensions = {
       settingsFound: discovery.settingsFound,
-      // The posture view (#124) reports only the provider and MCP surfaces; the
-      // tool surface added by #137 is intentionally excluded here until a later
-      // slice extends the posture contract.
-      surfaces: discovery.surfaces
-        .filter(
-          (surface): surface is typeof surface & { kind: "provider" | "mcp" } =>
-            surface.kind === "provider" || surface.kind === "mcp",
-        )
-        .map((surface) => ({
-          kind: surface.kind,
-          present: surface.present,
-          selectedId: surface.selectedId ?? null,
-          state: surface.state ?? null,
-        })),
+      // The posture view composes every extension surface discovery reports —
+      // provider, MCP, and tool (#139) — so the audit reflects the full set of
+      // declared contracts an unattended run could select.
+      surfaces: discovery.surfaces.map((surface) => ({
+        kind: surface.kind,
+        present: surface.present,
+        selectedId: surface.selectedId ?? null,
+        state: surface.state ?? null,
+      })),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -215,10 +211,11 @@ export function formatTrustPosture(report: TrustPostureReport): string {
       lines.push("  Settings:  (not found)");
     }
     for (const surface of report.extensions.surfaces) {
-      const label = surface.kind === "provider" ? "Provider" : "MCP";
+      const label =
+        surface.kind === "provider" ? "Provider" : surface.kind === "mcp" ? "MCP" : "Tool";
       if (!surface.present) {
         lines.push(`  ${label}:   not declared`);
-      } else if (surface.kind === "mcp") {
+      } else if (surface.kind === "mcp" || surface.kind === "tool") {
         lines.push(`  ${label}:   ${surface.selectedId ?? "(ambiguous)"} — ${surface.state}`);
       } else {
         lines.push(`  ${label}:   ${surface.selectedId ?? "(ambiguous)"}`);
