@@ -171,7 +171,7 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--server <id>` | MCP server id to select for `--mcp-contract` (defaults to `settings.mcp.default` or the sole entry) |
 | `--tool-contract` | Inspect the resolved tool extension contract from settings (read-only, redacted) and exit |
 | `--tool <id>` | Tool id to select for `--tool-contract` (defaults to `settings.tools.default` or the sole entry) |
-| `--discover-extensions` | Discover the declared provider and MCP extension contracts and readiness from settings (read-only, redacted) and exit |
+| `--discover-extensions` | Discover the declared provider, MCP, and tool extension contracts and readiness from settings (read-only, redacted) and exit |
 | `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` / `--tool-contract` / `--discover-extensions` / `--trust-posture` and report the declared state |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
@@ -1240,18 +1240,19 @@ carrying the negotiated `contractVersion`, the selected `toolId`, `kind`,
 
 ### Extension discovery
 
-Once providers (`--provider-contract`) and MCP servers (`--mcp-contract`) are
-declared as versioned contracts, `--discover-extensions` composes both resolvers
-into a single read-only, redacted view of which extension surfaces are declared
-and ready — without re-probing every integration (`--health`) and without
-changing core code. It reads the same unified settings file and reports, per
-surface, the negotiated contract version, declared entry count, default, and the
-entry a consumer would select (plus the MCP selected entry's lifecycle state).
+Once providers (`--provider-contract`), MCP servers (`--mcp-contract`), and tools
+(`--tool-contract`) are declared as versioned contracts, `--discover-extensions`
+composes all three resolvers into a single read-only, redacted view of which
+extension surfaces are declared and ready — without re-probing every integration
+(`--health`) and without changing core code. It reads the same unified settings
+file and reports, per surface, the negotiated contract version, declared entry
+count, default, and the entry a consumer would select (plus the MCP and tool
+selected entries' lifecycle/readiness state).
 
 ```bash
 oh-my-cli --discover-extensions
 oh-my-cli --discover-extensions --output json
-# resolve the declarations without probing (MCP reported as declared)
+# resolve the declarations without probing (MCP and tool reported as declared)
 oh-my-cli --discover-extensions --no-probe
 ```
 
@@ -1279,13 +1280,18 @@ MCP contract: 1 entry (contract version 1)
   Default:  filesystem
   Selected: filesystem
   State:    ready [command resolved]
+
+Tool contract: 1 entry (contract version 1)
+  Default:  ripgrep
+  Selected: ripgrep
+  State:    ready [command resolved]
 ```
 
 Add `--output json` for a versioned record (`schema`
 `oh-my-cli.extension-discovery`) whose `surfaces` array carries one entry per
-contract (`kind` `provider` / `mcp`), each flagged `present`, with its
-`contractVersion`, `entryCount`, `default`, `selectedId`, and — for MCP — the
-resolved `state`, `stateReason`, and `probeMs`.
+contract (`kind` `provider` / `mcp` / `tool`), each flagged `present`, with its
+`contractVersion`, `entryCount`, `default`, `selectedId`, and — for MCP and tool —
+the resolved `state`, `stateReason`, and `probeMs`.
 
 ## Built-in tools
 
@@ -1376,7 +1382,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/provider-contract.ts` — versioned, redacted provider extension contract: declare providers in settings, negotiate the contract version, select one, and resolve its non-secret config (`--provider-contract`)
 - `src/mcp-contract.ts` — versioned, redacted MCP server extension contract: declare servers in settings, negotiate the contract version, select one, and resolve its lifecycle state (declared/ready/isolated) with safe failure defaults (`--mcp-contract`)
 - `src/tool-contract.ts` — versioned, redacted tool extension contract: declare tools in settings, negotiate the contract version, select one, and resolve its readiness state (declared/ready/isolated) with safe failure defaults (`--tool-contract`)
-- `src/extension-discovery.ts` — read-only discovery view composing the provider and MCP contract resolvers into one redacted report of which extension surfaces are declared and ready, without core changes (`--discover-extensions`)
+- `src/extension-discovery.ts` — read-only discovery view composing the provider, MCP, and tool contract resolvers into one redacted report of which extension surfaces are declared and ready, without core changes (`--discover-extensions`)
 - `src/trust-posture.ts` — read-only posture view composing folder trust, sandbox isolation, approval mode, and extension readiness into one redacted audit of what a run will be allowed to do, without core changes (`--trust-posture`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)

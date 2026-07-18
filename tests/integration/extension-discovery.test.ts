@@ -49,6 +49,18 @@ const MCP_SECTION = {
   ],
 };
 
+const TOOL_SECTION = {
+  contractVersion: 1,
+  default: "rg",
+  entries: [
+    {
+      id: "rg",
+      command: NODE_BIN,
+      args: ["--version", "should-not-appear"],
+    },
+  ],
+};
+
 function surface(report: { surfaces: Array<Record<string, unknown>> }, kind: string) {
   return report.surfaces.find((s) => s.kind === kind) as Record<string, unknown>;
 }
@@ -71,24 +83,28 @@ describe("Integration: extension discovery", () => {
     return home;
   }
 
-  it("discovers both declared contracts as redacted JSON and exits 0", async () => {
-    const home = homeWith({ providers: PROVIDER_SECTION, mcp: MCP_SECTION });
+  it("discovers all three declared contracts as redacted JSON and exits 0", async () => {
+    const home = homeWith({ providers: PROVIDER_SECTION, mcp: MCP_SECTION, tools: TOOL_SECTION });
     const r = await runCli(["--discover-extensions", "--output", "json"], { HOME: home });
     expect(r.code).toBe(0);
     const report = JSON.parse(r.stdout);
     expect(report.schema).toBe("oh-my-cli.extension-discovery");
     const provider = surface(report, "provider");
     const mcp = surface(report, "mcp");
+    const tool = surface(report, "tool");
     expect(provider.present).toBe(true);
     expect(provider.selectedId).toBe("primary");
     expect(mcp.present).toBe(true);
     expect(mcp.selectedId).toBe("fs");
     expect(mcp.state).toBe("ready");
+    expect(tool.present).toBe(true);
+    expect(tool.selectedId).toBe("rg");
+    expect(tool.state).toBe("ready");
     // Redaction: argument values never appear in output.
     expect(r.stdout + r.stderr).not.toContain("should-not-appear");
   });
 
-  it("reports both surfaces absent (exit 0) when neither contract is declared", async () => {
+  it("reports every surface absent (exit 0) when no contract is declared", async () => {
     const home = homeWith({ model: { name: "m", apiKeyEnv: "K" } });
     const r = await runCli(["--discover-extensions", "--output", "json"], { HOME: home });
     expect(r.code).toBe(0);
@@ -96,6 +112,7 @@ describe("Integration: extension discovery", () => {
     expect(report.settingsFound).toBe(true);
     expect(surface(report, "provider").present).toBe(false);
     expect(surface(report, "mcp").present).toBe(false);
+    expect(surface(report, "tool").present).toBe(false);
   });
 
   it("reports every surface absent (exit 0) when the settings file is missing", async () => {
@@ -106,6 +123,7 @@ describe("Integration: extension discovery", () => {
     expect(report.settingsFound).toBe(false);
     expect(surface(report, "provider").present).toBe(false);
     expect(surface(report, "mcp").present).toBe(false);
+    expect(surface(report, "tool").present).toBe(false);
   });
 
   it("reports the MCP surface as declared without probing via --no-probe", async () => {
@@ -126,6 +144,26 @@ describe("Integration: extension discovery", () => {
     const mcp = surface(JSON.parse(r.stdout), "mcp");
     expect(mcp.state).toBe("isolated");
     expect(mcp.stateReason).toBe("disabled");
+  });
+
+  it("reports the tool surface as declared without probing via --no-probe", async () => {
+    const home = homeWith({ tools: TOOL_SECTION });
+    const r = await runCli(["--discover-extensions", "--no-probe", "--output", "json"], { HOME: home });
+    expect(r.code).toBe(0);
+    const tool = surface(JSON.parse(r.stdout), "tool");
+    expect(tool.state).toBe("declared");
+    expect(tool.probeMs).toBeNull();
+  });
+
+  it("isolates a disabled tool and still exits 0", async () => {
+    const home = homeWith({
+      tools: { contractVersion: 1, entries: [{ id: "rg", command: NODE_BIN, enabled: false }] },
+    });
+    const r = await runCli(["--discover-extensions", "--output", "json"], { HOME: home });
+    expect(r.code).toBe(0);
+    const tool = surface(JSON.parse(r.stdout), "tool");
+    expect(tool.state).toBe("isolated");
+    expect(tool.stateReason).toBe("disabled");
   });
 
   it("emits a human-readable text report by default", async () => {
@@ -161,6 +199,25 @@ describe("Integration: extension discovery", () => {
   it("exits 2 (fail closed) on a raw credential field in an MCP entry", async () => {
     const home = homeWith({
       mcp: { contractVersion: 1, entries: [{ id: "fs", command: "node", apiKey: "sk-leaked" }] },
+    });
+    const r = await runCli(["--discover-extensions"], { HOME: home });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("raw credential field");
+    expect(r.stdout + r.stderr).not.toContain("sk-leaked");
+  });
+
+  it("exits 2 (fail closed) on an unsupported tool contract version", async () => {
+    const home = homeWith({
+      tools: { contractVersion: 99, entries: [{ id: "rg", command: "node" }] },
+    });
+    const r = await runCli(["--discover-extensions"], { HOME: home });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("not supported");
+  });
+
+  it("exits 2 (fail closed) on a raw credential field in a tool entry", async () => {
+    const home = homeWith({
+      tools: { contractVersion: 1, entries: [{ id: "rg", command: "node", token: "sk-leaked" }] },
     });
     const r = await runCli(["--discover-extensions"], { HOME: home });
     expect(r.code).toBe(2);

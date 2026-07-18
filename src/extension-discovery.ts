@@ -1,10 +1,10 @@
 // Extension discovery: a single read-only view across the versioned extension
-// contracts. Now that providers (provider-contract.ts) and MCP servers
-// (mcp-contract.ts) are declared through their own contracts, this module
-// composes those resolvers into one redacted report of which extension surfaces
-// are declared and ready — without re-probing every integration (health-
-// inventory.ts) and without changing core code. It is the "discovery" stage of
-// the secure-extensibility roadmap (Issue #34).
+// contracts. Now that providers (provider-contract.ts), tools
+// (tool-contract.ts), and MCP servers (mcp-contract.ts) are declared through
+// their own contracts, this module composes those resolvers into one redacted
+// report of which extension surfaces are declared and ready — without re-probing
+// every integration (health-inventory.ts) and without changing core code. It is
+// the "discovery" stage of the secure-extensibility roadmap (Issue #34).
 //
 // Trust boundary: discovery reads only the user-owned settings file (or an
 // explicit path), never a project-local file. It composes the existing contract
@@ -22,23 +22,26 @@ import { PROVIDER_CONTRACT_SCHEMA, parseProviderContract } from "./provider-cont
 import type { ProviderContract } from "./provider-contract.js";
 import { MCP_CONTRACT_SCHEMA, parseMcpContract, resolveMcpLifecycle } from "./mcp-contract.js";
 import type { McpContract, McpLifecycleState } from "./mcp-contract.js";
+import { TOOL_CONTRACT_SCHEMA, parseToolContract, resolveToolReadiness } from "./tool-contract.js";
+import type { ToolContract, ToolReadinessState } from "./tool-contract.js";
 
 export const EXTENSION_DISCOVERY_SCHEMA = "oh-my-cli.extension-discovery";
 export const EXTENSION_DISCOVERY_VERSION = 1;
 
 // One discovered extension surface. An absent surface carries only `kind` and
 // `present: false`. A present surface reports its negotiated contract version,
-// declared entry count, and default/selected entry id; the MCP surface also
-// reports the selected entry's lifecycle state (composed from mcp-contract.ts).
+// declared entry count, and default/selected entry id; the MCP and tool surfaces
+// also report the selected entry's lifecycle/readiness state (composed from
+// mcp-contract.ts and tool-contract.ts respectively).
 export interface DiscoverySurface {
-  kind: "provider" | "mcp";
+  kind: "provider" | "mcp" | "tool";
   present: boolean;
   schema?: string;
   contractVersion?: number;
   entryCount?: number;
   default?: string | null;
   selectedId?: string | null;
-  state?: McpLifecycleState | null;
+  state?: McpLifecycleState | ToolReadinessState | null;
   stateReason?: string | null;
   probeMs?: number | null;
 }
@@ -131,12 +134,38 @@ function buildMcpSurface(contract: McpContract, probe: boolean): DiscoverySurfac
   return surface;
 }
 
+function buildToolSurface(contract: ToolContract, probe: boolean): DiscoverySurface {
+  const selectedId = selectedEntryId(contract);
+  const surface: DiscoverySurface = {
+    kind: "tool",
+    present: true,
+    schema: TOOL_CONTRACT_SCHEMA,
+    contractVersion: contract.contractVersion,
+    entryCount: contract.entries.length,
+    default: contract.default ?? null,
+    selectedId,
+    state: null,
+    stateReason: null,
+    probeMs: null,
+  };
+  if (selectedId !== null) {
+    const entry = contract.entries.find((e) => e.id === selectedId);
+    if (entry) {
+      const readiness = resolveToolReadiness(entry, { probe });
+      surface.state = readiness.state;
+      surface.stateReason = readiness.reason;
+      surface.probeMs = readiness.probeMs;
+    }
+  }
+  return surface;
+}
+
 // Discover the declared extension surfaces from the user settings file. Composes
-// the provider (#118) and MCP (#120) contract parsers: a present section is
-// validated (fail closed on an invalid contract) and summarized; an absent
-// section is reported as absent. A missing settings file reports every surface
-// absent and is not an error. `probe: false` reports the MCP selected entry as
-// `declared` without probing.
+// the provider (#118), MCP (#120), and tool (#135) contract parsers: a present
+// section is validated (fail closed on an invalid contract) and summarized; an
+// absent section is reported as absent. A missing settings file reports every
+// surface absent and is not an error. `probe: false` reports the MCP and tool
+// selected entries as `declared` without probing.
 export function collectExtensionDiscovery(
   opts: { settingsPath?: string; probe?: boolean } = {},
 ): ExtensionDiscoveryReport {
@@ -153,6 +182,7 @@ export function collectExtensionDiscovery(
       surfaces: [
         { kind: "provider", present: false },
         { kind: "mcp", present: false },
+        { kind: "tool", present: false },
       ],
     };
   }
@@ -165,13 +195,17 @@ export function collectExtensionDiscovery(
     root.mcp !== undefined
       ? buildMcpSurface(parseMcpContract(root.mcp), probe)
       : { kind: "mcp" as const, present: false };
+  const tool =
+    root.tools !== undefined
+      ? buildToolSurface(parseToolContract(root.tools), probe)
+      : { kind: "tool" as const, present: false };
 
   return {
     schema: EXTENSION_DISCOVERY_SCHEMA,
     version: EXTENSION_DISCOVERY_VERSION,
     settings: redactHomePath(settingsPath),
     settingsFound: true,
-    surfaces: [provider, mcp],
+    surfaces: [provider, mcp, tool],
   };
 }
 
@@ -187,7 +221,12 @@ export function formatExtensionDiscovery(report: ExtensionDiscoveryReport): stri
   ];
   for (const surface of report.surfaces) {
     lines.push("");
-    const label = surface.kind === "provider" ? "Provider contract" : "MCP contract";
+    const label =
+      surface.kind === "provider"
+        ? "Provider contract"
+        : surface.kind === "mcp"
+          ? "MCP contract"
+          : "Tool contract";
     if (!surface.present) {
       lines.push(`${label}: not declared`);
       continue;
@@ -202,7 +241,7 @@ export function formatExtensionDiscovery(report: ExtensionDiscoveryReport): stri
         surface.selectedId ? redactSecrets(surface.selectedId).text : "(ambiguous — set a default)"
       }`,
     );
-    if (surface.kind === "mcp" && surface.state) {
+    if ((surface.kind === "mcp" || surface.kind === "tool") && surface.state) {
       lines.push(`  State:    ${surface.state} [${redactSecrets(surface.stateReason ?? "").text}]`);
     }
   }

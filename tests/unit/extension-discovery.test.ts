@@ -59,7 +59,19 @@ const MCP_SECTION = {
   ],
 };
 
-function surface(report: ExtensionDiscoveryReport, kind: "provider" | "mcp") {
+const TOOL_SECTION = {
+  contractVersion: 1,
+  default: "rg",
+  entries: [
+    {
+      id: "rg",
+      command: NODE_BIN,
+      args: ["--version", "should-not-appear"],
+    },
+  ],
+};
+
+function surface(report: ExtensionDiscoveryReport, kind: "provider" | "mcp" | "tool") {
   const found = report.surfaces.find((s) => s.kind === kind);
   if (!found) throw new Error(`missing surface ${kind}`);
   return found;
@@ -85,20 +97,22 @@ describe("collectExtensionDiscovery: settings source", () => {
     expect(report.settings).toContain("(not found)");
     expect(surface(report, "provider").present).toBe(false);
     expect(surface(report, "mcp").present).toBe(false);
+    expect(surface(report, "tool").present).toBe(false);
   });
 
-  it("reports both surfaces absent when neither contract is declared", () => {
+  it("reports every surface absent when no contract is declared", () => {
     const settings = writeSettings({ model: { name: "m", apiKeyEnv: "K" } });
     const report = collectExtensionDiscovery({ settingsPath: settings });
     expect(report.settingsFound).toBe(true);
     expect(surface(report, "provider").present).toBe(false);
     expect(surface(report, "mcp").present).toBe(false);
+    expect(surface(report, "tool").present).toBe(false);
   });
 
-  it("always reports both surfaces, provider first then mcp", () => {
+  it("always reports all three surfaces, provider then mcp then tool", () => {
     const settings = writeSettings({ model: { name: "m", apiKeyEnv: "K" } });
     const report = collectExtensionDiscovery({ settingsPath: settings });
-    expect(report.surfaces.map((s) => s.kind)).toEqual(["provider", "mcp"]);
+    expect(report.surfaces.map((s) => s.kind)).toEqual(["provider", "mcp", "tool"]);
   });
 });
 
@@ -200,13 +214,80 @@ describe("collectExtensionDiscovery: mcp surface", () => {
   });
 });
 
-describe("collectExtensionDiscovery: both surfaces declared", () => {
-  it("summarizes both contracts in one report", () => {
-    const settings = writeSettings({ providers: PROVIDER_SECTION, mcp: MCP_SECTION });
+describe("collectExtensionDiscovery: tool surface", () => {
+  it("summarizes a declared tool contract and resolves the selected tool to ready", () => {
+    const settings = writeSettings({ tools: TOOL_SECTION });
+    const tool = surface(collectExtensionDiscovery({ settingsPath: settings }), "tool");
+    expect(tool.present).toBe(true);
+    expect(tool.schema).toBe("oh-my-cli.tool-contract");
+    expect(tool.contractVersion).toBe(1);
+    expect(tool.entryCount).toBe(1);
+    expect(tool.selectedId).toBe("rg");
+    expect(tool.state).toBe("ready");
+    expect(typeof tool.probeMs).toBe("number");
+  });
+
+  it("reports declared without probing when probe is false", () => {
+    const settings = writeSettings({ tools: TOOL_SECTION });
+    const tool = surface(
+      collectExtensionDiscovery({ settingsPath: settings, probe: false }),
+      "tool",
+    );
+    expect(tool.state).toBe("declared");
+    expect(tool.probeMs).toBeNull();
+  });
+
+  it("isolates a disabled tool (a safe resolution, not an error)", () => {
+    const settings = writeSettings({
+      tools: { contractVersion: 1, entries: [{ id: "rg", command: NODE_BIN, enabled: false }] },
+    });
+    const tool = surface(collectExtensionDiscovery({ settingsPath: settings }), "tool");
+    expect(tool.state).toBe("isolated");
+    expect(tool.stateReason).toBe("disabled");
+  });
+
+  it("isolates a tool whose command is not found", () => {
+    const settings = writeSettings({
+      tools: {
+        contractVersion: 1,
+        entries: [{ id: "ghost", command: "definitely-not-a-real-binary-xyz-123" }],
+      },
+    });
+    const tool = surface(collectExtensionDiscovery({ settingsPath: settings }), "tool");
+    expect(tool.state).toBe("isolated");
+    expect(tool.stateReason).toBe("command not found");
+  });
+
+  it("reports no selection or state when tools are ambiguous", () => {
+    const settings = writeSettings({
+      tools: {
+        contractVersion: 1,
+        entries: [
+          { id: "a", command: NODE_BIN },
+          { id: "b", command: NODE_BIN },
+        ],
+      },
+    });
+    const tool = surface(collectExtensionDiscovery({ settingsPath: settings }), "tool");
+    expect(tool.entryCount).toBe(2);
+    expect(tool.selectedId).toBeNull();
+    expect(tool.state).toBeNull();
+  });
+});
+
+describe("collectExtensionDiscovery: all surfaces declared", () => {
+  it("summarizes the provider, MCP, and tool contracts in one report", () => {
+    const settings = writeSettings({
+      providers: PROVIDER_SECTION,
+      mcp: MCP_SECTION,
+      tools: TOOL_SECTION,
+    });
     const report = collectExtensionDiscovery({ settingsPath: settings });
     expect(surface(report, "provider").present).toBe(true);
     expect(surface(report, "mcp").present).toBe(true);
     expect(surface(report, "mcp").state).toBe("ready");
+    expect(surface(report, "tool").present).toBe(true);
+    expect(surface(report, "tool").state).toBe("ready");
   });
 });
 
@@ -227,6 +308,22 @@ describe("collectExtensionDiscovery: fail closed on an invalid contract", () => 
     );
   });
 
+  it("throws on an unsupported tool contract version", () => {
+    const settings = writeSettings({
+      tools: { contractVersion: 99, entries: [{ id: "rg", command: "node" }] },
+    });
+    expect(() => collectExtensionDiscovery({ settingsPath: settings })).toThrow(/not supported/);
+  });
+
+  it("throws on a raw credential field in a tool entry", () => {
+    const settings = writeSettings({
+      tools: { contractVersion: 1, entries: [{ id: "rg", command: "node", token: "sk-leaked" }] },
+    });
+    expect(() => collectExtensionDiscovery({ settingsPath: settings })).toThrow(
+      /raw credential field/,
+    );
+  });
+
   it("throws on invalid JSON", () => {
     const settings = writeRawSettings("{ not valid json");
     expect(() => collectExtensionDiscovery({ settingsPath: settings })).toThrow(/invalid JSON/);
@@ -241,16 +338,18 @@ describe("collectExtensionDiscovery: fail closed on an invalid contract", () => 
 });
 
 describe("collectExtensionDiscovery: backward compatibility and redaction", () => {
-  it("coexists with the model, providers, mcp, and mcpServers sections", () => {
+  it("coexists with the model, providers, mcp, tools, and mcpServers sections", () => {
     const settings = writeSettings({
       model: { name: "model-name", apiKeyEnv: "MODEL_KEY" },
       providers: PROVIDER_SECTION,
       mcp: MCP_SECTION,
+      tools: TOOL_SECTION,
       mcpServers: { legacy: { command: "node" } },
     });
     const report = collectExtensionDiscovery({ settingsPath: settings });
     expect(surface(report, "provider").selectedId).toBe("primary");
     expect(surface(report, "mcp").selectedId).toBe("fs");
+    expect(surface(report, "tool").selectedId).toBe("rg");
   });
 
   it("collapses the home path and never leaks argument values", () => {
@@ -260,7 +359,7 @@ describe("collectExtensionDiscovery: backward compatibility and redaction", () =
     try {
       const settingsPath = path.join(home, ".oh-my-cli", "settings.json");
       fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-      fs.writeFileSync(settingsPath, JSON.stringify({ mcp: MCP_SECTION }));
+      fs.writeFileSync(settingsPath, JSON.stringify({ mcp: MCP_SECTION, tools: TOOL_SECTION }));
       const report = collectExtensionDiscovery({ settingsPath });
       expect(report.settings).toBe("~/.oh-my-cli/settings.json");
       const json = JSON.stringify(report);
@@ -273,14 +372,23 @@ describe("collectExtensionDiscovery: backward compatibility and redaction", () =
 });
 
 describe("formatExtensionDiscovery", () => {
-  it("renders both surfaces, marks absent ones, and shows MCP state without secrets", () => {
-    const settings = writeSettings({ mcp: MCP_SECTION });
+  it("renders declared surfaces, marks absent ones, and shows state without secrets", () => {
+    const settings = writeSettings({ mcp: MCP_SECTION, tools: TOOL_SECTION });
     const report = collectExtensionDiscovery({ settingsPath: settings });
     const out = formatExtensionDiscovery(report);
     expect(out).toContain(EXTENSION_DISCOVERY_SCHEMA);
     expect(out).toContain("Provider contract: not declared");
     expect(out).toContain("MCP contract:");
+    expect(out).toContain("Tool contract:");
     expect(out).toContain("ready");
+    expect(out).not.toContain("should-not-appear");
+  });
+
+  it("renders the tool surface with its readiness state", () => {
+    const settings = writeSettings({ tools: TOOL_SECTION });
+    const out = formatExtensionDiscovery(collectExtensionDiscovery({ settingsPath: settings }));
+    expect(out).toContain("Tool contract: 1 entry (contract version 1)");
+    expect(out).toContain("State:    ready");
     expect(out).not.toContain("should-not-appear");
   });
 

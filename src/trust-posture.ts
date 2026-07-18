@@ -124,12 +124,20 @@ export function collectTrustPosture(opts: CollectTrustPostureOptions): TrustPost
     const discovery = collectExtensionDiscovery({ settingsPath: opts.settingsPath, probe });
     extensions = {
       settingsFound: discovery.settingsFound,
-      surfaces: discovery.surfaces.map((surface) => ({
-        kind: surface.kind,
-        present: surface.present,
-        selectedId: surface.selectedId ?? null,
-        state: surface.state ?? null,
-      })),
+      // The posture view (#124) reports only the provider and MCP surfaces; the
+      // tool surface added by #137 is intentionally excluded here until a later
+      // slice extends the posture contract.
+      surfaces: discovery.surfaces
+        .filter(
+          (surface): surface is typeof surface & { kind: "provider" | "mcp" } =>
+            surface.kind === "provider" || surface.kind === "mcp",
+        )
+        .map((surface) => ({
+          kind: surface.kind,
+          present: surface.present,
+          selectedId: surface.selectedId ?? null,
+          state: surface.state ?? null,
+        })),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
