@@ -169,8 +169,10 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--provider <id>` | Provider id to select for `--provider-contract` (defaults to `settings.providers.default` or the sole entry) |
 | `--mcp-contract` | Inspect the resolved MCP server extension contract from settings (read-only, redacted) and exit |
 | `--server <id>` | MCP server id to select for `--mcp-contract` (defaults to `settings.mcp.default` or the sole entry) |
+| `--tool-contract` | Inspect the resolved tool extension contract from settings (read-only, redacted) and exit |
+| `--tool <id>` | Tool id to select for `--tool-contract` (defaults to `settings.tools.default` or the sole entry) |
 | `--discover-extensions` | Discover the declared provider and MCP extension contracts and readiness from settings (read-only, redacted) and exit |
-| `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` / `--discover-extensions` / `--trust-posture` and report the declared state |
+| `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` / `--tool-contract` / `--discover-extensions` / `--trust-posture` and report the declared state |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -1164,6 +1166,78 @@ Add `--output json` for a versioned record (`schema` `oh-my-cli.mcp-contract`)
 carrying the negotiated `contractVersion`, the selected `serverId`, `transport`,
 `command`, `argCount`, the resolved `state` and `reason`, and `probeMs`.
 
+### Tool contract
+
+The built-in tool registry defines the agent's own capabilities (read, write,
+shell). To *depend on* an external tool as a governed extension — a local
+executable an operator declares for the core and non-interactive automation to
+hand off to — declare it as a **versioned contract** in the same unified settings
+file (`~/.oh-my-cli/settings.json`, or `--settings <path>`). `--tool-contract`
+negotiates the contract version, deterministically selects one tool, and resolves
+its readiness state — read-only, redacted, and without changing core code. It
+completes the provider/tool/MCP contract triad alongside `--provider-contract`
+and `--mcp-contract`.
+
+```json
+{
+  "tools": {
+    "contractVersion": 1,
+    "default": "ripgrep",
+    "entries": [
+      {
+        "id": "ripgrep",
+        "kind": "command",
+        "command": "rg",
+        "args": ["--json"],
+        "capabilities": { "readOnly": true, "filesystem": true }
+      }
+    ]
+  }
+}
+```
+
+```bash
+oh-my-cli --tool-contract
+# select one explicitly when several are declared
+oh-my-cli --tool-contract --tool ripgrep --output json
+# resolve the declaration without probing (declared state)
+oh-my-cli --tool-contract --no-probe
+```
+
+This slice is limited to the safe local `command` kind: a tool's `command` is
+resolved on `PATH` but **never executed**, so probing cannot run arbitrary code.
+Remote or network tools (a `url` field or a non-`command` kind) are refused (fail
+closed) in contract version 1. The contract is untrusted input — a raw credential
+field inside an entry is rejected rather than ignored, and an unsupported
+`contractVersion` fails closed instead of being silently coerced. Selection is
+deterministic: an explicit `--tool` id wins, then `settings.tools.default`, then
+the sole entry; ambiguity or an unknown id fails with a clear reason.
+
+The selected tool resolves to one readiness state with safe failure defaults:
+`declared` (valid contract, not probed — via `--no-probe`), `ready` (the command
+is resolvable), or `isolated` (disabled, misconfigured, command missing, or the
+bounded probe timed out). A disabled or unavailable tool resolves to `isolated`
+and the command still exits `0` — the consumer skips it without crashing. A
+contract/usage error exits `2`. Argument values are never printed (only their
+count) and the home path is collapsed to `~`.
+
+```text
+Tool:         ripgrep
+Contract:     oh-my-cli.tool-contract v1 (settings contract version 1)
+Kind:         command
+Command:      rg
+Arguments:    1
+Enabled:      true
+State:        ready [command resolved]
+Probe:        1ms (timeout 3000ms)
+Capabilities: readOnly, filesystem
+Settings:     ~/.oh-my-cli/settings.json
+```
+
+Add `--output json` for a versioned record (`schema` `oh-my-cli.tool-contract`)
+carrying the negotiated `contractVersion`, the selected `toolId`, `kind`,
+`command`, `argCount`, the resolved `state` and `reason`, and `probeMs`.
+
 ### Extension discovery
 
 Once providers (`--provider-contract`) and MCP servers (`--mcp-contract`) are
@@ -1301,6 +1375,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/delivery-brief.ts` — bounded, redacted, head-bound completion verdict composing plan + verify + review + handoff with a CI result (`--delivery-brief`)
 - `src/provider-contract.ts` — versioned, redacted provider extension contract: declare providers in settings, negotiate the contract version, select one, and resolve its non-secret config (`--provider-contract`)
 - `src/mcp-contract.ts` — versioned, redacted MCP server extension contract: declare servers in settings, negotiate the contract version, select one, and resolve its lifecycle state (declared/ready/isolated) with safe failure defaults (`--mcp-contract`)
+- `src/tool-contract.ts` — versioned, redacted tool extension contract: declare tools in settings, negotiate the contract version, select one, and resolve its readiness state (declared/ready/isolated) with safe failure defaults (`--tool-contract`)
 - `src/extension-discovery.ts` — read-only discovery view composing the provider and MCP contract resolvers into one redacted report of which extension surfaces are declared and ready, without core changes (`--discover-extensions`)
 - `src/trust-posture.ts` — read-only posture view composing folder trust, sandbox isolation, approval mode, and extension readiness into one redacted audit of what a run will be allowed to do, without core changes (`--trust-posture`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
