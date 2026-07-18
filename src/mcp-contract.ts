@@ -400,20 +400,35 @@ export function buildMcpContractReport(facts: {
   };
 }
 
-// Read the user settings file, negotiate the MCP contract, select one server,
-// resolve its lifecycle state, and build the redacted report. Throws a redacted
-// error when no `mcp` section exists or the contract is invalid (exit 2). A
-// server that is disabled or whose command is unavailable resolves to `isolated`
-// (a successful resolution, not an error) so the consumer can apply safe failure
-// defaults.
-export function collectMcpContract(
-  opts: {
-    settingsPath?: string;
-    env?: Record<string, string | undefined>;
-    serverId?: string;
-    probe?: boolean;
-  } = {},
-): McpContractReport {
+export interface McpResolutionOptions {
+  settingsPath?: string;
+  env?: Record<string, string | undefined>;
+  serverId?: string;
+  probe?: boolean;
+}
+
+// The resolved, unredacted facts for one selected server: the negotiated
+// contract version, the chosen entry (command and args), its lifecycle state,
+// and the settings location. Shared by the read-only report (collectMcpContract)
+// and the governed invocation path (mcp-invocation.ts) so both reuse the same
+// version negotiation, deterministic selection, and lifecycle resolution rather
+// than re-reading or re-parsing the contract. Throws the same redacted errors as
+// collectMcpContract when no `mcp` section exists or the contract is invalid.
+export interface ResolvedMcpServer {
+  contractVersion: number;
+  entry: McpServerEntry;
+  lifecycle: McpLifecycle;
+  settingsPath: string;
+  settingsFound: boolean;
+}
+
+// Read the user settings file, negotiate the MCP contract, deterministically
+// select one server, and resolve its lifecycle state — returning the raw facts.
+// Throws a redacted error when no `mcp` section exists or the contract is
+// invalid (exit 2). A server that is disabled or whose command is unavailable
+// resolves to `isolated` (a successful resolution, not an error) so the consumer
+// can apply safe failure defaults.
+export function resolveSelectedMcpServer(opts: McpResolutionOptions = {}): ResolvedMcpServer {
   const settingsPath = resolveSettingsPath(opts.settingsPath);
   const { found, section } = readMcpSection(settingsPath);
   if (section === undefined) {
@@ -428,12 +443,29 @@ export function collectMcpContract(
   const probe = opts.probe ?? true;
   const deadline = probe ? Date.now() + clampProbeTimeout(entry.probeTimeoutMs) : undefined;
   const lifecycle = resolveMcpLifecycle(entry, { probe, deadline });
-  return buildMcpContractReport({
+  return {
     contractVersion: contract.contractVersion,
     entry,
     lifecycle,
     settingsPath,
     settingsFound: found,
+  };
+}
+
+// Read the user settings file, negotiate the MCP contract, select one server,
+// resolve its lifecycle state, and build the redacted report. Throws a redacted
+// error when no `mcp` section exists or the contract is invalid (exit 2). A
+// server that is disabled or whose command is unavailable resolves to `isolated`
+// (a successful resolution, not an error) so the consumer can apply safe failure
+// defaults.
+export function collectMcpContract(opts: McpResolutionOptions = {}): McpContractReport {
+  const resolved = resolveSelectedMcpServer(opts);
+  return buildMcpContractReport({
+    contractVersion: resolved.contractVersion,
+    entry: resolved.entry,
+    lifecycle: resolved.lifecycle,
+    settingsPath: resolved.settingsPath,
+    settingsFound: resolved.settingsFound,
   });
 }
 
