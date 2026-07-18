@@ -2,6 +2,7 @@
 
 import { Command } from "commander";
 import { resolveModelConfig, resolveSettingsPath, describeResolvedConfig } from "./settings.js";
+import { resolveEffectiveSettings, formatEffectiveSettings } from "./effective-settings.js";
 import { Workspace } from "./workspace.js";
 import { SessionStore } from "./session.js";
 import { runAgent } from "./agent.js";
@@ -124,6 +125,7 @@ program
   .option("--trust-posture", "Show the effective, redacted workspace trust, sandbox, approval, and extension posture (read-only) and exit")
   .option("--health", "Show MCP server and extension health inventory and exit")
   .option("--settings <path>", "Unified settings file for model config and --health (default ~/.oh-my-cli/settings.json)")
+  .option("--effective-settings", "Show the effective, redacted, hierarchical settings snapshot (user + trusted project, validated; read-only) and exit")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
   .option("--compact <session-id>", "Compact a session into a bounded summary sidecar (original preserved) and exit")
   .option("--compact-threshold <tokens>", "Auto-compact the in-memory transcript when the latest prompt size reaches this (env: OMC_COMPACT_THRESHOLD)")
@@ -807,6 +809,40 @@ program
           process.stdout.write(JSON.stringify(report) + "\n");
         } else {
           process.stdout.write(formatTrustPosture(report) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Effective-settings mode: the one immutable, validated, hierarchical
+      // settings snapshot — defaults < user settings < trusted project settings <
+      // environment overrides < CLI overrides — with redacted provenance
+      // (effective-settings.ts). The project scope is considered only after folder
+      // trust and can never set a credential endpoint or security-policy field. It
+      // is a read-only audit that exits 0; a malformed or unknown settings field
+      // exits 2 as a usage/input error.
+      if (opts.effectiveSettings) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let snapshot;
+        try {
+          snapshot = resolveEffectiveSettings({
+            userSettingsPath: resolveSettingsPath(opts.settings),
+            workspacePath: opts.workspace,
+            env: process.env,
+            trustThisRun: Boolean(opts.trust),
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(snapshot) + "\n");
+        } else {
+          process.stdout.write(formatEffectiveSettings(snapshot) + "\n");
         }
         process.exit(0);
       }
