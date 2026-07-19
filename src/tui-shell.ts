@@ -23,6 +23,7 @@ import { runPalette } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
 import { MEDIUM_MARK, VERSION, WIDE_WORDMARK } from "./product-banner.js";
+import type { ColorDepth } from "./product-banner.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -219,6 +220,12 @@ export interface ShellState {
   composer: ComposerState;
   status: StatusInfo;
   color: boolean;
+  // Refines the palette when color is on: the terminal's advertised color depth
+  // (basic/256/truecolor) so a reduced-color terminal gets portable 16-color SGR
+  // instead of indexed codes it cannot map (Issue #164, criterion 3). Optional so
+  // pure render callers and tests can omit it; composeScreen falls back to the
+  // `color` boolean (true → "256", false → "none").
+  colorDepth?: ColorDepth;
   // Active-turn lifecycle phase, rendered in place by the composer's state rule.
   turn: TurnState;
   // Indices of transcript blocks the user has expanded to full height; long
@@ -280,9 +287,28 @@ export interface ComposedScreen {
 // Style + small text helpers
 // ---------------------------------------------------------------------------
 
-export function shellStyle(color: boolean): ShellStyle {
-  if (!color) {
+// Resolve the shell's color palette from a color depth. The shell honors the same
+// capability model as the startup banner (product-banner): "none" emits no ANSI
+// (NO_COLOR / --no-color); "basic" uses the portable 16-color SGR set so a
+// reduced-color terminal renders distinct hues instead of indexed codes it cannot
+// map; "256"/"truecolor" use the richer indexed palette. Every shell state also
+// carries a glyph + ASCII label, so color is always a bonus cue, never the sole
+// signal (Issue #164, criterion 3). Accepts a legacy boolean (true → "256",
+// false → "none") so existing callers and tests are unaffected.
+export function shellStyle(color: boolean | ColorDepth): ShellStyle {
+  const depth: ColorDepth = typeof color === "boolean" ? (color ? "256" : "none") : color;
+  if (depth === "none") {
     return { bold: "", dim: "", accent: "", accentSoft: "", success: "", reset: "" };
+  }
+  if (depth === "basic") {
+    return {
+      bold: "\x1b[1m",
+      dim: "\x1b[2m",
+      accent: "\x1b[36m", // cyan
+      accentSoft: "\x1b[35m", // magenta
+      success: "\x1b[32m", // green
+      reset: "\x1b[0m",
+    };
   }
   return {
     bold: "\x1b[1m",
@@ -335,6 +361,38 @@ export function clipLine(line: string, width: number): string {
   if (chars.length <= width) return line;
   if (width === 1) return "…";
   return chars.slice(0, width - 1).join("") + "…";
+}
+
+// Clip a line that may carry SGR color escapes to a visible cell width, preserving
+// the escapes verbatim and appending an ellipsis only when the *visible* text is
+// truncated. Unlike clipLine (which counts raw characters), color codes never cause
+// an earlier-than-intended truncation, so a colored panel reads identically to its
+// no-color form (Issue #164, criterion 3).
+export function clipVisible(line: string, width: number): string {
+  if (width <= 0) return "";
+  if (visibleWidth(line) <= width) return line;
+  if (width === 1) return "…";
+  const target = width - 1; // reserve one cell for the ellipsis
+  let out = "";
+  let cells = 0;
+  let i = 0;
+  const n = line.length;
+  while (i < n) {
+    // Emit a CSI/SGR escape verbatim; it occupies no visible cell.
+    if (line[i] === "\x1b" && line[i + 1] === "[") {
+      let j = i + 2;
+      while (j < n && !(line[j] >= "@" && line[j] <= "~")) j++;
+      out += line.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    if (cells >= target) break;
+    const ch = String.fromCodePoint(line.codePointAt(i)!);
+    out += ch;
+    cells += 1;
+    i += ch.length;
+  }
+  return out + "…";
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,7 +1082,9 @@ function diffBodyTone(line: string, style: ShellStyle): string {
 
 function panelLine(text: string, width: number, style: ShellStyle): string {
   const inner = Math.max(0, width - 4);
-  const body = clipLine(text, inner);
+  // The panel body carries inline color codes, so clip by visible cells (not raw
+  // characters) to keep the colored panel aligned with its no-color form.
+  const body = clipVisible(text, inner);
   return `${style.accent}│${style.reset} ${body}${" ".repeat(Math.max(0, inner - visibleWidth(body)))} ${style.accent}│${style.reset}`;
 }
 
@@ -1084,7 +1144,7 @@ export function renderStatusLine(
   info: StatusInfo,
   layout: ShellLayout,
   style: ShellStyle,
-  opts: { learned?: boolean } = {},
+  opts: { learned?: boolean; scroll?: number } = {},
 ): string[] {
   const height = layout.status.end - layout.status.start;
   if (height <= 0) return [];
@@ -1094,7 +1154,13 @@ export function renderStatusLine(
   const primary = [info.workspace, info.model, info.contextUsage].filter((p): p is string => Boolean(p));
   const first = `${style.success}→${style.reset} ${style.dim}${clipLine(primary.join("  ·  "), Math.max(0, cols - 2))}${style.reset}`;
   if (height === 1) return [first];
-  const second = `  ${style.dim}${clipLine(`approval ${info.approvalMode}  ·  ${footerHints(opts.learned ?? false)}`, Math.max(0, cols - 2))}${style.reset}`;
+  // When the transcript is scrolled up from the newest, a textual marker gives the
+  // navigation a visible focus (and names how far up) so keyboard-only users know
+  // they are inspecting earlier content rather than the live tail (Issue #164,
+  // criterion 4). It is plain ASCII so it reads with or without color.
+  const scrolled = (opts.scroll ?? 0) > 0 ? `↑ ${opts.scroll} up  ·  ` : "";
+  const secondInner = `${scrolled}approval ${info.approvalMode}  ·  ${footerHints(opts.learned ?? false)}`;
+  const second = `  ${style.dim}${clipLine(secondInner, Math.max(0, cols - 2))}${style.reset}`;
   return [first, second];
 }
 
@@ -1303,6 +1369,46 @@ export function scrollToKeepAnchor(params: {
   return clamp(Math.floor(raw), 0, maxScroll);
 }
 
+// Scroll offset (lines up from the bottom) that keeps the transcript's top-visible
+// entry in place across a terminal resize, so reflowing the same content at a new
+// width/height never displaces what the user was reading (Issue #164, criterion 5).
+// A bottom-pinned view (scroll 0) stays bottom-pinned so a resize never yanks the
+// user into earlier content; the height change is accounted for explicitly so a
+// shorter or taller transcript region keeps the anchor at the same viewport row.
+export function resizeScrollOffset(params: {
+  entries: TranscriptEntry[];
+  expanded?: ReadonlySet<number>;
+  oldCols: number;
+  newCols: number;
+  scrollBefore: number;
+  heightBefore: number;
+  heightAfter: number;
+}): number {
+  const { entries, oldCols, newCols, scrollBefore, heightBefore, heightAfter } = params;
+  if (scrollBefore <= 0 || heightAfter <= 0 || entries.length === 0) return 0;
+  const expanded = params.expanded ?? new Set<number>();
+  const beforeStarts = entryStartLines(entries, oldCols, { expanded });
+  const flatLenBefore = flattenTranscript(entries, oldCols, { expanded }).length;
+  const flatLenAfter = flattenTranscript(entries, newCols, { expanded }).length;
+  const afterStarts = entryStartLines(entries, newCols, { expanded });
+  // The window's top flat-line index before the resize, and the newest entry whose
+  // block starts at or above it (the anchor whose position we hold).
+  const startBefore = Math.max(0, flatLenBefore - scrollBefore - heightBefore);
+  const topIndex = clamp(startBefore, 0, Math.max(0, flatLenBefore - 1));
+  let anchor = 0;
+  for (let i = 0; i < beforeStarts.length; i++) {
+    if ((beforeStarts[i] ?? 0) <= topIndex) anchor = i;
+    else break;
+  }
+  // Hold the anchor's first line at its current viewport row: row = startLine -
+  // windowTop. Solving for the after-scroll that preserves that row (allowing for
+  // the region height changing) gives the offset below, clamped to the valid range.
+  const rowBefore = (beforeStarts[anchor] ?? 0) - startBefore;
+  const raw = flatLenAfter - heightAfter - (afterStarts[anchor] ?? 0) + rowBefore;
+  const maxScroll = Math.max(0, flatLenAfter - heightAfter);
+  return clamp(Math.floor(raw), 0, maxScroll);
+}
+
 function renderRule(label: string, cols: number, style: ShellStyle): string {
   const labelCells = Array.from(label).length;
   if (cols <= labelCells) return clipLine(label, cols);
@@ -1365,7 +1471,7 @@ export function renderComposer(
 // ---------------------------------------------------------------------------
 
 export function composeScreen(state: ShellState): ComposedScreen {
-  const style = shellStyle(state.color);
+  const style = shellStyle(state.colorDepth ?? state.color);
   const composerRows = composerTotalRows(state.composer.text);
   const layout = computeLayout(state.viewport, { composerRows });
 
@@ -1379,7 +1485,10 @@ export function composeScreen(state: ShellState): ComposedScreen {
           style,
         });
   const composerLines = renderComposer(state.composer, layout, style, { turn: state.turn });
-  const statusLines = renderStatusLine(state.status, layout, style, { learned: state.hintsLearned ?? false });
+  const statusLines = renderStatusLine(state.status, layout, style, {
+    learned: state.hintsLearned ?? false,
+    scroll: state.scroll,
+  });
 
   const lines: string[] = [];
   lines.push(...identityLines, ...transcriptLines, ...composerLines, ...statusLines);
@@ -1454,6 +1563,10 @@ export interface ConversationShellOptions {
   // mode). Defaults to true so a non-enforcing run is unchanged.
   mutatingAllowed?: boolean;
   color: boolean;
+  // The terminal's advertised color depth, so the shell renders with a palette the
+  // terminal can actually display (basic 16-color on reduced-color terminals).
+  // Optional; when omitted the shell derives depth from `color` (true → "256").
+  colorDepth?: ColorDepth;
   paletteCommands: PaletteCommand[];
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
@@ -1518,6 +1631,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       contextUsage: null,
     },
     color: opts.color,
+    colorDepth: opts.colorDepth,
     turn: { phase: "idle" },
     expanded,
     scroll: 0,
@@ -2162,8 +2276,24 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   }
 
   function onResize(): void {
+    // Re-anchor the transcript to the entry currently at the top of the window so a
+    // resize reflows the same content in place instead of displacing it. The draft,
+    // expanded blocks, active turn, and execution state all live in `state` and
+    // survive untouched (Issue #164, criteria 2, 5).
+    const oldCols = state.viewport.cols;
+    const heightBefore = transcriptHeight();
+    const scrollBefore = clamp(state.scroll ?? 0, 0, Math.max(0, flattenedLen() - heightBefore));
     state.viewport.rows = stdout.rows ?? state.viewport.rows;
     state.viewport.cols = stdout.columns ?? state.viewport.cols;
+    state.scroll = resizeScrollOffset({
+      entries: state.transcript,
+      expanded,
+      oldCols,
+      newCols: state.viewport.cols,
+      scrollBefore,
+      heightBefore,
+      heightAfter: transcriptHeight(),
+    });
     scheduleRender();
   }
 

@@ -14,6 +14,7 @@ import {
   wrapLine,
   wrapText,
   clipLine,
+  clipVisible,
   visibleWidth,
   entryGlyph,
   entryLabel,
@@ -51,6 +52,7 @@ import {
   renderFailureSummary,
   entryStartLines,
   scrollToKeepAnchor,
+  resizeScrollOffset,
   COMPOSER_MAX_ROWS,
   TRANSCRIPT_PREVIEW_LINES,
 } from "../../src/tui-shell.js";
@@ -1224,5 +1226,304 @@ describe("tui-shell: a diff and a recoverable failure render in context at 120x3
       expect(joined).toContain("action: shell tscx"); // affected action
       expect(joined).toContain("next: verify the command exists and is on PATH"); // safe next step
     }
+  });
+});
+
+describe("tui-shell: coherent layout across compact, standard, and wide terminals (Issue #164, criterion 1)", () => {
+  const sizes = [
+    { rows: 24, cols: 80 }, // compact / standard
+    { rows: 36, cols: 120 }, // standard
+    { rows: 48, cols: 160 }, // wide
+  ];
+
+  function richState(rows: number, cols: number): ShellState {
+    const op = makeToolOperation({ name: "edit", state: "running", turnId: 1 });
+    return baseState({
+      viewport: { rows, cols },
+      transcript: [
+        { kind: "user", text: "Refactor the layout helper and add tests." },
+        { kind: "assistant", text: "Sure, here is the change to computeLayout that keeps the regions contiguous." },
+        { kind: "tool", text: "", tool: op },
+      ],
+      composer: { mode: "streaming", text: "", placeholder: "Ask a question" },
+      turn: { phase: "running-tool", detail: "edit" },
+      status: { model: "fake-model", workspace: "~/proj", approvalMode: "default", contextUsage: "tokens 1234" },
+    });
+  }
+
+  it("partitions every size into contiguous regions that sum to the row count", () => {
+    for (const { rows, cols } of sizes) {
+      const layout = computeLayout({ rows, cols }, { composerRows: composerTotalRows("") });
+      expect(layout.identityRows + layout.transcriptRows + layout.composerRows + layout.statusRows).toBe(rows);
+      expect(layout.identity.end).toBe(layout.transcript.start);
+      expect(layout.transcript.end).toBe(layout.composer.start);
+      expect(layout.composer.end).toBe(layout.status.start);
+      expect(layout.status.end).toBe(rows);
+      // The composer and status footer are always present at these sizes (no hidden
+      // critical state).
+      expect(layout.composerRows).toBeGreaterThan(0);
+      expect(layout.statusRows).toBe(2);
+    }
+  });
+
+  it("renders every size with the exact row count and no horizontal overflow", () => {
+    for (const { rows, cols } of sizes) {
+      const screen = composeScreen(richState(rows, cols));
+      expect(screen.lines).toHaveLength(rows);
+      for (const line of screen.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(cols);
+    }
+  });
+
+  it("keeps critical state visible at every size: active turn, tool, and status footer", () => {
+    for (const { rows, cols } of sizes) {
+      const joined = composeScreen(richState(rows, cols)).lines.join("\n");
+      expect(joined).toContain("running tool"); // active turn indicator, rendered in place
+      expect(joined).toContain("edit"); // the running tool / turn detail
+      expect(joined).toContain("approval default"); // status footer
+      expect(joined).toContain("fake-model"); // model in identity/status
+    }
+  });
+});
+
+describe("tui-shell: color modes — none, basic (reduced), and 256 (Issue #164, criterion 3)", () => {
+  it("emits no ANSI for NO_COLOR / color:false", () => {
+    const s = shellStyle(false);
+    expect(s.accent).toBe("");
+    expect(s.success).toBe("");
+    const screen = composeScreen(baseState({ color: false })).lines.join("");
+    expect(screen).not.toMatch(ANSI);
+  });
+
+  it("uses the portable 16-color SGR set for a basic (reduced-color) terminal", () => {
+    const basic = shellStyle("basic");
+    expect(basic.accent).toBe("\x1b[36m"); // cyan
+    expect(basic.accentSoft).toBe("\x1b[35m"); // magenta
+    expect(basic.success).toBe("\x1b[32m"); // green
+    // Never the indexed 256-color form a reduced-color terminal cannot map.
+    expect(basic.accent).not.toContain("38;5");
+    expect(basic.success).not.toContain("38;5");
+  });
+
+  it("uses the indexed 256-color palette for 256/truecolor and legacy boolean true", () => {
+    expect(shellStyle("256").accent).toBe("\x1b[38;5;81m");
+    expect(shellStyle("truecolor").accent).toBe("\x1b[38;5;81m");
+    expect(shellStyle(true).accent).toBe("\x1b[38;5;81m");
+  });
+
+  it("clips colored text by visible cells so color codes never truncate early", () => {
+    const colored = "\x1b[1m>_ OH MY CLI\x1b[0m  \x1b[2m(v0.1.0)\x1b[0m";
+    // clipLine counts raw chars (incl. escapes) and would cut the version short;
+    // clipVisible counts only visible cells, so the full text fits at its width.
+    expect(visibleWidth(colored)).toBe(22);
+    expect(clipVisible(colored, 30)).toBe(colored); // 22 visible cells <= 30, untouched
+    expect(clipVisible(colored, 30)).toContain("(v0.1.0)");
+    // When genuinely too long, it ellipsizes by visible width and keeps escapes intact.
+    const clipped = clipVisible(colored, 12);
+    expect(visibleWidth(clipped)).toBe(12); // 11 cells + ellipsis
+    expect(clipped.endsWith("…")).toBe(true);
+    expect(clipped).not.toContain("[1m…"); // no broken escape fragment
+  });
+
+  it("communicates every state through text + structure identically across depths", () => {
+    const op = makeToolOperation({ name: "edit", state: "succeeded", turnId: 1, output: "ok" });
+    op.diff = deriveFileDiff("edit", { path: "a.ts", oldText: "x", newText: "y" });
+    const entries: TranscriptEntry[] = [{ kind: "tool", text: "", tool: op }];
+    const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+    const render = (depth: "none" | "basic" | "256"): string =>
+      composeScreen(
+        baseState({ colorDepth: depth, turn: { phase: "completed" }, transcript: entries, expanded: new Set([0]) }),
+      )
+        .lines.map(strip)
+        .join("\n");
+    const none = render("none");
+    // Only the (stripped) ANSI differs between depths; the text/structure is identical.
+    expect(render("basic")).toBe(none);
+    expect(render("256")).toBe(none);
+    // State is conveyed by structure/text alone, with no color at all.
+    expect(none).toContain("✓"); // tool succeeded glyph
+    expect(none).toContain("succeeded"); // tool label
+    expect(none).toContain("a.ts  +1 -1"); // diff magnitude
+    expect(none).toContain("+ "); // diff addition prefix (expanded body)
+    expect(none).toContain("completed"); // turn outcome label
+  });
+});
+
+describe("tui-shell: visible textual scroll focus (Issue #164, criterion 4)", () => {
+  const info: StatusInfo = { model: "m", workspace: "~/p", approvalMode: "default", contextUsage: null };
+  const layout = computeLayout({ rows: 24, cols: 80 });
+
+  it("shows no scroll marker when pinned to the newest", () => {
+    const line = renderStatusLine(info, layout, shellStyle(false), { scroll: 0 }).join("");
+    expect(line).not.toContain("up  ·");
+    expect(line).toContain("approval default");
+  });
+
+  it("shows a textual '↑ N up' marker when scrolled up", () => {
+    const line = renderStatusLine(info, layout, shellStyle(false), { scroll: 7 }).join("");
+    expect(line).toContain("↑ 7 up");
+  });
+
+  it("surfaces the marker through composeScreen when the transcript is scrolled", () => {
+    const joined = composeScreen(baseState({ scroll: 5 })).lines.join("\n");
+    expect(joined).toContain("↑ 5 up");
+  });
+});
+
+describe("tui-shell: resize re-anchors the transcript (Issue #164, criteria 2 & 5)", () => {
+  const longEntries: TranscriptEntry[] = Array.from({ length: 12 }, (_, i) => ({
+    kind: "assistant" as const,
+    text: `Answer block number ${i} padded with sufficient words to wrap when the terminal narrows to eighty columns.`,
+  }));
+
+  it("keeps a bottom-pinned view pinned to the newest across a resize", () => {
+    const scroll = resizeScrollOffset({
+      entries: longEntries,
+      oldCols: 120,
+      newCols: 80,
+      scrollBefore: 0,
+      heightBefore: 20,
+      heightAfter: 12,
+    });
+    expect(scroll).toBe(0);
+  });
+
+  it("is the identity when neither width nor height changes", () => {
+    const scroll = resizeScrollOffset({
+      entries: longEntries,
+      oldCols: 100,
+      newCols: 100,
+      scrollBefore: 6,
+      heightBefore: 15,
+      heightAfter: 15,
+    });
+    expect(scroll).toBe(6);
+  });
+
+  it("returns 0 for an empty transcript and always clamps within the scrollable range", () => {
+    expect(
+      resizeScrollOffset({ entries: [], oldCols: 120, newCols: 80, scrollBefore: 9, heightBefore: 10, heightAfter: 10 }),
+    ).toBe(0);
+    const height = 8;
+    const maxScroll = Math.max(0, flattenTranscript(longEntries, 80, {}).length - height);
+    const s = resizeScrollOffset({
+      entries: longEntries,
+      oldCols: 120,
+      newCols: 80,
+      scrollBefore: 999,
+      heightBefore: height,
+      heightAfter: height,
+    });
+    expect(s).toBeGreaterThanOrEqual(0);
+    expect(s).toBeLessThanOrEqual(maxScroll);
+  });
+
+  it("keeps the entry at the top of the window visible after narrowing the terminal", () => {
+    const expanded = new Set<number>();
+    const heightBefore = 10;
+    const heightAfter = 10;
+    const flatBefore = flattenTranscript(longEntries, 120, { expanded }).length;
+    const scrollBefore = flatBefore - heightBefore - 9; // put a middle entry near the top
+    const beforeStarts = entryStartLines(longEntries, 120, { expanded });
+    const startBefore = Math.max(0, flatBefore - scrollBefore - heightBefore);
+    let anchor = 0;
+    for (let i = 0; i < beforeStarts.length; i++) {
+      if ((beforeStarts[i] ?? 0) <= startBefore) anchor = i;
+      else break;
+    }
+    const scrollAfter = resizeScrollOffset({
+      entries: longEntries,
+      expanded,
+      oldCols: 120,
+      newCols: 80,
+      scrollBefore,
+      heightBefore,
+      heightAfter,
+    });
+    const windowAfter = renderTranscript(longEntries, { start: 0, end: heightAfter }, 80, {
+      expanded,
+      scroll: scrollAfter,
+    });
+    expect(windowAfter.join("\n")).toContain(`Answer block number ${anchor}`);
+  });
+
+  it("preserves draft, expansion, and the active turn through a mid-stream resize", () => {
+    // A realistic mid-stream view is bottom-anchored (watching the answer arrive), so
+    // a resize keeps it bottom-anchored; the draft, the expanded tool diff, and the
+    // live streaming turn all survive the reflow at the smaller size.
+    const editOp = makeToolOperation({ name: "edit", state: "succeeded", turnId: 1, output: "ok", durationMs: 9 });
+    editOp.diff = deriveFileDiff("edit", { path: "z.ts", oldText: "a", newText: "b" });
+    const entries: TranscriptEntry[] = [
+      ...longEntries,
+      { kind: "tool", text: "", tool: editOp },
+      { kind: "streaming", text: "Here is the live answer streaming in right now." },
+    ];
+    const expanded = new Set([longEntries.length]); // expand the tool diff near the bottom
+    const draft = "draft prompt in progress";
+    const before = baseState({
+      viewport: { rows: 36, cols: 120 },
+      transcript: entries,
+      expanded,
+      scroll: 0,
+      composer: { mode: "streaming", text: draft, placeholder: "" },
+      turn: { phase: "streaming" },
+    });
+    const after = baseState({
+      viewport: { rows: 24, cols: 80 },
+      transcript: entries,
+      expanded,
+      scroll: 0,
+      composer: { mode: "streaming", text: draft, placeholder: "" },
+      turn: { phase: "streaming" },
+    });
+    for (const st of [before, after]) {
+      const screen = composeScreen(st);
+      expect(screen.lines).toHaveLength(st.viewport.rows);
+      for (const line of screen.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(st.viewport.cols);
+      const joined = screen.lines.join("\n");
+      expect(joined).toContain(draft); // draft preserved
+      expect(joined).toContain("streaming"); // active turn preserved (composer rule)
+      expect(joined).toContain("live answer"); // streaming content still visible
+      expect(joined).toContain("z.ts  +1 -1"); // expanded diff still disclosed
+    }
+  });
+});
+
+describe("tui-shell: keyboard-only traversal reaches every primary action (Issue #164, criteria 4 & 6)", () => {
+  it("Enter submits only editable, non-empty input", () => {
+    expect(submitAllowed("focused", "hello")).toBe(true);
+    expect(submitAllowed("streaming", "hello")).toBe(false); // busy
+    expect(submitAllowed("focused", "   ")).toBe(false); // empty
+  });
+
+  it("Ctrl+C interrupts active work, clears a draft, dismisses an outcome, or exits", () => {
+    expect(cancelDecision({ phase: "streaming" }, false)).toBe("interrupt");
+    expect(cancelDecision({ phase: "idle" }, true)).toBe("clear-draft");
+    expect(cancelDecision({ phase: "completed" }, false)).toBe("dismiss-outcome");
+    expect(cancelDecision({ phase: "idle" }, false)).toBe("exit");
+  });
+
+  it("Up/Down recall prompt history and preserve the in-progress draft", () => {
+    const h = createPromptHistory(["first", "second"]);
+    const older = recallOlder(h, "drafting");
+    expect(older.text).toBe("second");
+    const older2 = recallOlder(older.history, "drafting");
+    expect(older2.text).toBe("first");
+    const newer = recallNewer(older2.history, "first");
+    expect(newer.text).toBe("second");
+    const backToDraft = recallNewer(newer.history, "second");
+    expect(backToDraft.text).toBe("drafting"); // draft restored at the bottom
+  });
+
+  it("Tab expand/collapse holds the selected event's row in place", () => {
+    // Expanding grows the flattened length; the anchor row is held.
+    const scroll = scrollToKeepAnchor({
+      flatLenBefore: 20,
+      flatLenAfter: 30,
+      anchorBefore: 5,
+      anchorAfter: 5,
+      scrollBefore: 4,
+      height: 10,
+    });
+    expect(scroll).toBe(14); // 4 + (30 - 20) - (5 - 5)
   });
 });
