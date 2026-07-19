@@ -92,4 +92,16 @@ describe("Integration: tui-shell non-interactive regression", () => {
     expect(r.stdout).not.toMatch(ALT_SCREEN);
     expect(r.stderr).not.toMatch(ANSI);
   });
+
+  it("never emits the shortcut help panel into non-interactive -p output", async () => {
+    // A `?` in the prompt must not conjure the interactive help panel off the TTY
+    // path (Issue #169): the panel is a full-screen-shell affordance only.
+    server.setResponse({ type: "text", content: "answer with ? mark" });
+    const r = await runCli(["-p", "Hello ?"], baseEnv);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("answer with ? mark");
+    expect(r.stdout).not.toContain("Keyboard shortcuts");
+    expect(r.stderr).not.toContain("Keyboard shortcuts");
+    expect(r.stdout).not.toMatch(ALT_SCREEN);
+  });
 });

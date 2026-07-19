@@ -30,6 +30,10 @@ import {
   submitAllowed,
   cancelDecision,
   footerHints,
+  renderShortcutHelp,
+  questionMarkOpensHelp,
+  SHORTCUT_HELP,
+  SHORTCUT_HELP_TITLE,
   toolOpGlyph,
   toolOpLabel,
   sanitizeToolText,
@@ -766,6 +770,101 @@ describe("tui-shell: footer hints document bindings and compress once learned", 
     const learned = composeScreen(baseState({ hintsLearned: true })).lines.join("\n");
     expect(fresh).toContain("Enter send");
     expect(learned).not.toContain("Enter send");
+  });
+});
+
+describe("tui-shell: keyboard-shortcut help panel (Issue #169)", () => {
+  const STRIP_ANSI = /\x1b\[[0-9;]*m/g;
+
+  it("lists the real active shortcuts under a stable title", () => {
+    const text = renderShortcutHelp(80).join("\n");
+    expect(text).toContain(SHORTCUT_HELP_TITLE);
+    // Every advertised shortcut is one the driver actually honors.
+    for (const entry of SHORTCUT_HELP) {
+      expect(text).toContain(entry.keys.trim());
+      expect(text).toContain(entry.action);
+    }
+    // The headline bindings named in the issue are all present.
+    for (const chord of ["Enter", "Ctrl+K", "Tab", "Ctrl+C", "Ctrl+D", "Ctrl+L"]) {
+      expect(text).toContain(chord);
+    }
+  });
+
+  it("is color-independent: identical visible text across color depths", () => {
+    const plain = renderShortcutHelp(80).join("\n");
+    const colored = renderShortcutHelp(80, shellStyle(true)).join("\n");
+    const reduced = renderShortcutHelp(80, shellStyle("basic")).join("\n");
+    expect(ANSI.test(plain)).toBe(false);
+    // Color is a bonus cue: stripping it yields the exact no-color panel.
+    expect(colored.replace(STRIP_ANSI, "")).toBe(plain);
+    expect(reduced.replace(STRIP_ANSI, "")).toBe(plain);
+  });
+
+  it("never overflows the requested width, even when very narrow", () => {
+    for (const width of [1, 2, 20, 40, 80, 120, 160]) {
+      for (const line of renderShortcutHelp(width)) {
+        expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+      }
+    }
+  });
+
+  it("carries no secret or host path (static content only)", () => {
+    const text = renderShortcutHelp(120).join("\n");
+    expect(text).not.toMatch(/\/Users\/|\/home\/|C:\\Users/i);
+    expect(text).not.toMatch(/api[_-]?key|token|password|secret/i);
+  });
+
+  it("toggle rule: `?` opens help only on an empty composer", () => {
+    expect(questionMarkOpensHelp("")).toBe(true);
+    expect(questionMarkOpensHelp("hi")).toBe(false);
+    expect(questionMarkOpensHelp("?")).toBe(false);
+    expect(questionMarkOpensHelp(" ")).toBe(false);
+  });
+
+  it("composeScreen shows the panel in place, bounded to the viewport at every target size", () => {
+    for (const viewport of [
+      { rows: 24, cols: 80 },
+      { rows: 36, cols: 120 },
+      { rows: 48, cols: 160 },
+    ]) {
+      const { lines } = composeScreen(baseState({ helpOpen: true, viewport }));
+      expect(lines.length).toBe(viewport.rows);
+      const text = lines.join("\n");
+      expect(text).toContain(SHORTCUT_HELP_TITLE);
+      // The full shortcut list is visible at every target size (nothing clipped away).
+      for (const entry of SHORTCUT_HELP) {
+        expect(text).toContain(entry.action);
+      }
+      for (const line of lines) {
+        expect(visibleWidth(line)).toBeLessThanOrEqual(viewport.cols);
+      }
+      // Composer + status stay anchored below the panel.
+      expect(lines[viewport.rows - 1]).toContain("approval default");
+    }
+  });
+
+  it("composeScreen renders the panel with no ANSI when color is disabled", () => {
+    const text = composeScreen(baseState({ helpOpen: true, color: false })).lines.join("\n");
+    expect(ANSI.test(text)).toBe(false);
+    expect(text).toContain(SHORTCUT_HELP_TITLE);
+  });
+
+  it("hides the transcript behind the panel and restores it on close", () => {
+    const withTranscript = baseState({
+      helpOpen: true,
+      transcript: [{ kind: "assistant", text: "hidden answer" }],
+    });
+    const open = composeScreen(withTranscript).lines.join("\n");
+    expect(open).toContain(SHORTCUT_HELP_TITLE);
+    expect(open).not.toContain("hidden answer");
+    const closed = composeScreen({ ...withTranscript, helpOpen: false }).lines.join("\n");
+    expect(closed).not.toContain(SHORTCUT_HELP_TITLE);
+    expect(closed).toContain("hidden answer");
+  });
+
+  it("does not show the panel when helpOpen is unset", () => {
+    const text = composeScreen(baseState()).lines.join("\n");
+    expect(text).not.toContain(SHORTCUT_HELP_TITLE);
   });
 });
 

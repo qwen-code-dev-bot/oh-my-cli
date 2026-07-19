@@ -113,3 +113,34 @@ describe("smoke: shell renders coherently across sizes and color modes (Issue #1
     publish(`${rows}x${cols} (NO_COLOR)`, screen.lines);
   });
 });
+
+describe("smoke: keyboard-shortcut help panel renders coherently (Issue #169)", () => {
+  function helpState(
+    rows: number,
+    cols: number,
+    opts: { color: boolean; colorDepth?: "none" | "basic" | "256" },
+  ): ShellState {
+    return { ...stateFor(rows, cols, opts), helpOpen: true };
+  }
+
+  for (const { rows, cols } of SIZES) {
+    it(`renders the help panel unclipped at ${rows}x${cols}`, () => {
+      const screen = composeScreen(helpState(rows, cols, { color: true, colorDepth: "256" }));
+      expect(screen.lines).toHaveLength(rows);
+      for (const line of screen.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(cols);
+      const joined = screen.lines.join("\n");
+      expect(joined).toContain("Keyboard shortcuts");
+      expect(joined).toContain("Open the command palette"); // Ctrl+K binding advertised
+      expect(joined).toContain("approval default"); // status footer stays anchored
+      publish(`help ${rows}x${cols}`, screen.lines);
+    });
+  }
+
+  it("renders the help panel with no color (text + structure only)", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const screen = composeScreen(helpState(rows, cols, { color: false, colorDepth: "none" }));
+    expect(screen.lines.join("")).not.toMatch(/\x1b\[/);
+    expect(screen.lines.join("\n")).toContain("Keyboard shortcuts");
+    publish(`help ${rows}x${cols} (NO_COLOR)`, screen.lines);
+  });
+});
