@@ -241,6 +241,11 @@ export interface ShellState {
   // or resumed with prior prompts) so the footer hints compress. Optional so
   // pure render callers and tests can omit it (treated as not-yet-learned).
   hintsLearned?: boolean;
+  // Whether the in-place keyboard-shortcut help panel is shown over the main
+  // area (toggled by `?` on an empty composer or the `/help` palette command,
+  // dismissed by `?`/Esc/Ctrl+C). Optional so pure render callers and tests can
+  // omit it (treated as closed).
+  helpOpen?: boolean;
 }
 
 // Options controlling how transcript blocks are flattened/rendered.
@@ -1164,6 +1169,81 @@ export function renderStatusLine(
   return [first, second];
 }
 
+// ---------------------------------------------------------------------------
+// Keyboard-shortcut help panel (Issue #169)
+// ---------------------------------------------------------------------------
+
+// A single shortcut entry: the key chord and what it does. These are the REAL
+// bindings wired into the driver's input loop, so the panel never advertises a
+// shortcut the shell does not honor. Plain ASCII text; color is a bonus cue.
+export interface ShortcutEntry {
+  keys: string;
+  action: string;
+}
+
+// The live shortcut set. `?` and Esc are the panel's own toggle/dismiss; the
+// rest mirror the driver's onData bindings.
+export const SHORTCUT_HELP: ReadonlyArray<ShortcutEntry> = [
+  { keys: "Enter", action: "Send the prompt" },
+  { keys: "Alt+Enter / Shift+Enter", action: "Insert a new line" },
+  { keys: "Ctrl+K", action: "Open the command palette" },
+  { keys: "Tab", action: "Expand or collapse the selected block" },
+  { keys: "Up / Down", action: "Recall a previous prompt" },
+  { keys: "PageUp / PageDown", action: "Scroll the transcript" },
+  { keys: "Ctrl+L", action: "Redraw the screen" },
+  { keys: "Ctrl+C", action: "Interrupt, clear draft, or exit" },
+  { keys: "Ctrl+D", action: "Exit" },
+  { keys: "?", action: "Toggle this help panel" },
+  { keys: "Esc", action: "Close this help panel" },
+];
+
+// Stable title naming the panel; also used by tests to assert the panel never
+// leaks into non-interactive output.
+export const SHORTCUT_HELP_TITLE = "Keyboard shortcuts";
+
+// Whether a `?` keystroke should toggle the help panel instead of inserting the
+// character (Issue #169): only on an empty composer. With any text the `?` is
+// typed as usual. Pure so the toggle rule is unit-testable without a TTY.
+export function questionMarkOpensHelp(composerText: string): boolean {
+  return composerText.length === 0;
+}
+
+// Pure renderer for the in-place keyboard-shortcut help panel (Issue #169).
+// Returns content lines (a title, the real shortcuts, and a dismiss hint), each
+// bounded to `width` visible cells so the panel never overflows horizontally and
+// reads identically with or without color (style may be omitted, and every row
+// carries plain ASCII regardless). The content is static, so it can never carry
+// a secret or a host path.
+export function renderShortcutHelp(width: number, style?: ShellStyle): string[] {
+  const w = Math.max(0, Math.floor(width));
+  const s = style ?? { bold: "", dim: "", accent: "", accentSoft: "", success: "", reset: "" };
+  const keyCol = SHORTCUT_HELP.reduce((m, e) => Math.max(m, visibleWidth(e.keys)), 0);
+  const out: string[] = [];
+  out.push(clipVisible(`${s.bold}${s.accent}? ${SHORTCUT_HELP_TITLE}${s.reset}`, w));
+  out.push(clipVisible(`${s.dim}Press ? or Esc to close${s.reset}`, w));
+  out.push("");
+  for (const e of SHORTCUT_HELP) {
+    const keys = e.keys.padEnd(keyCol, " ");
+    out.push(clipVisible(`  ${s.accent}${keys}${s.reset}  ${s.dim}${e.action}${s.reset}`, w));
+  }
+  return out;
+}
+
+// Fill a region of `height` rows with the centered help panel, clipping the
+// content when the region is shorter than the panel so it never overflows.
+function renderShortcutHelpPanel(height: number, cols: number, style: ShellStyle): string[] {
+  const h = Math.max(0, Math.floor(height));
+  if (h === 0) return [];
+  const content = renderShortcutHelp(cols, style);
+  const body = content.slice(0, h);
+  const padTop = Math.floor((h - body.length) / 2);
+  const out: string[] = [];
+  for (let i = 0; i < padTop; i++) out.push("");
+  out.push(...body);
+  while (out.length < h) out.push("");
+  return out;
+}
+
 function renderEmptyTranscript(region: Region, _cols: number, _style: ShellStyle): string[] {
   const height = Math.max(0, region.end - region.start);
   if (height === 0) return [];
@@ -1475,15 +1555,6 @@ export function composeScreen(state: ShellState): ComposedScreen {
   const composerRows = composerTotalRows(state.composer.text);
   const layout = computeLayout(state.viewport, { composerRows });
 
-  const identityLines = renderIdentity(layout, style, state.version, state.status);
-  const transcriptLines =
-    state.transcript.length === 0
-      ? renderEmptyTranscript(layout.transcript, layout.viewport.cols, style)
-      : renderTranscript(state.transcript, layout.transcript, layout.viewport.cols, {
-          expanded: state.expanded,
-          scroll: state.scroll,
-          style,
-        });
   const composerLines = renderComposer(state.composer, layout, style, { turn: state.turn });
   const statusLines = renderStatusLine(state.status, layout, style, {
     learned: state.hintsLearned ?? false,
@@ -1491,7 +1562,25 @@ export function composeScreen(state: ShellState): ComposedScreen {
   });
 
   const lines: string[] = [];
-  lines.push(...identityLines, ...transcriptLines, ...composerLines, ...statusLines);
+  if (state.helpOpen) {
+    // The help panel takes over the main area above the composer (identity +
+    // transcript) so the full shortcut list is visible in place; the composer
+    // and status stay anchored, so dismissing it returns to the same
+    // conversation (Issue #169).
+    lines.push(...renderShortcutHelpPanel(layout.composer.start, layout.viewport.cols, style));
+  } else {
+    const identityLines = renderIdentity(layout, style, state.version, state.status);
+    const transcriptLines =
+      state.transcript.length === 0
+        ? renderEmptyTranscript(layout.transcript, layout.viewport.cols, style)
+        : renderTranscript(state.transcript, layout.transcript, layout.viewport.cols, {
+            expanded: state.expanded,
+            scroll: state.scroll,
+            style,
+          });
+    lines.push(...identityLines, ...transcriptLines);
+  }
+  lines.push(...composerLines, ...statusLines);
 
   const total = state.viewport.rows;
   while (lines.length < total) lines.push("");
@@ -1636,6 +1725,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     expanded,
     scroll: 0,
     hintsLearned: history.entries.length > 0,
+    helpOpen: false,
   };
 
   let running = true;
@@ -1719,6 +1809,26 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     state.composer.text = state.composer.text.slice(0, -1);
     history = commitDraft(history, state.composer.text);
     refreshMode();
+    scheduleRender();
+  }
+
+  // In-place keyboard-shortcut help panel (Issue #169). `?` on an empty composer
+  // toggles it; `?` again, Esc, or Ctrl+C dismisses it. While open the panel is
+  // modal: every other key is ignored so nothing is typed behind it.
+  function openHelp(): void {
+    if (state.helpOpen) return;
+    state.helpOpen = true;
+    scheduleRender();
+  }
+
+  function closeHelp(): void {
+    if (!state.helpOpen) return;
+    state.helpOpen = false;
+    scheduleRender();
+  }
+
+  function toggleHelp(): void {
+    state.helpOpen = !state.helpOpen;
     scheduleRender();
   }
 
@@ -2178,6 +2288,11 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       scheduleRender();
       return;
     }
+    if (cmd.name === "/help") {
+      // Show the same in-place shortcut panel the `?` key toggles (Issue #169).
+      openHelp();
+      return;
+    }
     state.transcript.push({ kind: "notice", text: `${cmd.name} — ${cmd.description}` });
     try {
       await cmd.action();
@@ -2215,6 +2330,17 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     if (paletteOpen) return;
     const s = buf.toString("utf-8");
 
+    // While the help panel is open it is modal: only the dismiss gestures act
+    // (`?` again, Esc, or Ctrl+C); every other key is ignored so nothing is
+    // typed behind the panel (Issue #169).
+    if (state.helpOpen) {
+      if (buf.length === 1) {
+        const b = buf[0];
+        if (b === 0x03 || b === 0x3f || b === 0x1b) return closeHelp();
+      }
+      return;
+    }
+
     if (buf.length === 1) {
       const b = buf[0];
       if (b === 0x03) return onCtrlC(); // Ctrl+C
@@ -2233,6 +2359,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         submit();
         return;
       }
+      // `?` on an empty composer toggles the help panel; with any text it inserts
+      // the character as usual (Issue #169).
+      if (b === 0x3f && questionMarkOpensHelp(state.composer.text)) return toggleHelp();
       if (b >= 0x20 && b < 0x7f) return insert(String.fromCharCode(b));
       return;
     }
