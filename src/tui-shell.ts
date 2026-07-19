@@ -152,6 +152,10 @@ export interface ShellState {
   // blocks otherwise collapse to a preview. Optional so pure render callers and
   // tests can omit it (treated as empty).
   expanded?: ReadonlySet<number>;
+  // Whether the user has learned the basic composer flow (sent at least once,
+  // or resumed with prior prompts) so the footer hints compress. Optional so
+  // pure render callers and tests can omit it (treated as not-yet-learned).
+  hintsLearned?: boolean;
 }
 
 // Options controlling how transcript blocks are flattened/rendered.
@@ -338,6 +342,14 @@ export function composerMarker(mode: ComposerMode): ComposerMarker {
   }
 }
 
+// Whether a submit should proceed (criterion 3). The composer must be editable
+// (not busy: submitting/streaming/disabled) and hold non-empty trimmed text, so
+// busy, empty, and repeated submissions are explicit, non-destructive no-ops.
+export function submitAllowed(mode: ComposerMode, text: string): boolean {
+  const editable = mode !== "submitting" && mode !== "streaming" && mode !== "disabled";
+  return editable && text.trim().length > 0;
+}
+
 // ---------------------------------------------------------------------------
 // Turn lifecycle (pure)
 // ---------------------------------------------------------------------------
@@ -434,6 +446,18 @@ export function advanceTurn(state: TurnState, event: TurnEvent): TurnState {
   }
 }
 
+// Decision for Ctrl+C (criterion 4): distinguish interrupting active work from
+// clearing a draft, dismissing a finished turn's lingering outcome, or exiting.
+// Pure so every branch is unit-testable; the driver acts on the returned outcome.
+export type CancelOutcome = "interrupt" | "clear-draft" | "dismiss-outcome" | "exit";
+
+export function cancelDecision(turn: TurnState, hasDraft: boolean): CancelOutcome {
+  if (isActiveTurn(turn.phase)) return "interrupt";
+  if (hasDraft) return "clear-draft";
+  if (isTerminalTurn(turn.phase)) return "dismiss-outcome";
+  return "exit";
+}
+
 // Rebuild the durable transcript from a persisted conversation so a reconnect or
 // resume shows prior user prompts, assistant answers, and tool results — but no
 // transient turn indicators (the turn always starts `idle`). System prompts and
@@ -460,6 +484,82 @@ export function seedTranscriptFromHistory(
     // system messages are never shown in the transcript.
   }
   return out;
+}
+
+// Extract prior user prompts (chronological, oldest first) from a persisted
+// conversation so the composer can offer prompt-history recall on resume. Empty
+// or whitespace-only prompts are dropped; the text is returned as stored so a
+// recalled prompt reproduces exactly what was sent.
+export function userPromptsFromHistory(
+  messages: ReadonlyArray<{ role: string; content?: string | null }>,
+): string[] {
+  const out: string[] = [];
+  for (const m of messages) {
+    if (m.role !== "user") continue;
+    const content = typeof m.content === "string" ? m.content : "";
+    if (content.trim() !== "") out.push(content);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Prompt history (pure)
+// ---------------------------------------------------------------------------
+
+// Recall model for the composer's prompt history (criterion 2). Pure so the
+// navigation boundaries (already at the oldest entry, already at the draft) are
+// unit-testable without a TTY. `entries` are chronological (oldest first);
+// `position === entries.length` is the live draft slot; `draft` preserves the
+// in-progress text across navigation so recalling an older prompt and returning
+// restores exactly what the user was typing.
+export interface PromptHistory {
+  entries: ReadonlyArray<string>;
+  position: number;
+  draft: string;
+}
+
+export function createPromptHistory(entries: ReadonlyArray<string>): PromptHistory {
+  return { entries: [...entries], position: entries.length, draft: "" };
+}
+
+// Up: recall the previous (older) prompt. On the first upward move the live text
+// is captured as the draft; further moves walk toward the oldest entry. No-op at
+// the oldest boundary.
+export function recallOlder(
+  h: PromptHistory,
+  currentText: string,
+): { history: PromptHistory; text: string } {
+  if (h.entries.length === 0 || h.position <= 0) return { history: h, text: currentText };
+  const atDraft = h.position === h.entries.length;
+  const draft = atDraft ? currentText : h.draft;
+  const position = h.position - 1;
+  return { history: { entries: h.entries, position, draft }, text: h.entries[position] };
+}
+
+// Down: recall the next (newer) prompt, restoring the preserved draft once the
+// bottom boundary is reached. No-op when already at the draft.
+export function recallNewer(
+  h: PromptHistory,
+  currentText: string,
+): { history: PromptHistory; text: string } {
+  if (h.position >= h.entries.length) return { history: h, text: currentText };
+  const position = h.position + 1;
+  const text = position === h.entries.length ? h.draft : h.entries[position];
+  return { history: { entries: h.entries, position, draft: h.draft }, text };
+}
+
+// Editing recalled text commits it as the new draft and leaves navigation, so a
+// recalled prompt the user modifies is not lost on the next recall.
+export function commitDraft(h: PromptHistory, text: string): PromptHistory {
+  return { entries: h.entries, position: h.entries.length, draft: text };
+}
+
+// A successful submit records the prompt as the newest history entry (skipping a
+// consecutive duplicate) and resets navigation to a fresh draft.
+export function pushPromptHistory(h: PromptHistory, text: string): PromptHistory {
+  if (text.trim() === "") return { entries: h.entries, position: h.entries.length, draft: "" };
+  const entries = h.entries[h.entries.length - 1] === text ? h.entries : [...h.entries, text];
+  return { entries, position: entries.length, draft: "" };
 }
 
 // ---------------------------------------------------------------------------
@@ -514,7 +614,22 @@ export function renderIdentity(
   return [`${style.accent}${style.bold}${clipLine(`OH MY CLI  v${version}`, cols)}${style.reset}`];
 }
 
-export function renderStatusLine(info: StatusInfo, layout: ShellLayout, style: ShellStyle): string[] {
+// Composer-facing footer hints (criterion 1). They name the real terminal key
+// behavior and compress once the user has learned the basic flow (sent at least
+// once) so the footer stays calm; the discovery affordances (Tab, ? shortcuts,
+// Ctrl+C) remain in both states. Plain ASCII, color-independent.
+export function footerHints(learned: boolean): string {
+  return learned
+    ? "Tab expand  ·  ? shortcuts  ·  Ctrl+C exit"
+    : "Enter send  ·  Alt+Enter newline  ·  Up history  ·  Tab expand  ·  ? shortcuts  ·  Ctrl+C exit";
+}
+
+export function renderStatusLine(
+  info: StatusInfo,
+  layout: ShellLayout,
+  style: ShellStyle,
+  opts: { learned?: boolean } = {},
+): string[] {
   const height = layout.status.end - layout.status.start;
   if (height <= 0) return [];
   const cols = layout.viewport.cols;
@@ -523,7 +638,7 @@ export function renderStatusLine(info: StatusInfo, layout: ShellLayout, style: S
   const primary = [info.workspace, info.model, info.contextUsage].filter((p): p is string => Boolean(p));
   const first = `${style.success}→${style.reset} ${style.dim}${clipLine(primary.join("  ·  "), Math.max(0, cols - 2))}${style.reset}`;
   if (height === 1) return [first];
-  const second = `  ${style.dim}${clipLine(`approval ${info.approvalMode}  ·  Tab expand  ·  ? shortcuts  ·  Ctrl+C exit`, Math.max(0, cols - 2))}${style.reset}`;
+  const second = `  ${style.dim}${clipLine(`approval ${info.approvalMode}  ·  ${footerHints(opts.learned ?? false)}`, Math.max(0, cols - 2))}${style.reset}`;
   return [first, second];
 }
 
@@ -720,7 +835,7 @@ export function composeScreen(state: ShellState): ComposedScreen {
           style,
         });
   const composerLines = renderComposer(state.composer, layout, style, { turn: state.turn });
-  const statusLines = renderStatusLine(state.status, layout, style);
+  const statusLines = renderStatusLine(state.status, layout, style, { learned: state.hintsLearned ?? false });
 
   const lines: string[] = [];
   lines.push(...identityLines, ...transcriptLines, ...composerLines, ...statusLines);
@@ -827,6 +942,16 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     seededTranscript = [];
   }
 
+  // Seed prompt-history recall from prior user prompts so a resume can recall
+  // them with Up/Down. Returning users (with prior prompts) start with the
+  // compressed footer hints since they have already learned the basic flow.
+  let history: PromptHistory;
+  try {
+    history = createPromptHistory(userPromptsFromHistory(opts.loadHistory()));
+  } catch {
+    history = createPromptHistory([]);
+  }
+
   const state: ShellState = {
     viewport: { rows: stdout.rows ?? 24, cols: stdout.columns ?? 80 },
     version: VERSION,
@@ -841,6 +966,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     color: opts.color,
     turn: { phase: "idle" },
     expanded,
+    hintsLearned: history.entries.length > 0,
   };
 
   let running = true;
@@ -903,6 +1029,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // so the indicator yields back to the editable composer.
     state.turn = advanceTurn(state.turn, { type: "engage" });
     state.composer.text += text;
+    // Editing commits the visible text as the draft and leaves history navigation
+    // so a recalled prompt the user modifies is not lost on the next recall.
+    history = commitDraft(history, state.composer.text);
     refreshMode();
     scheduleRender();
   }
@@ -912,12 +1041,39 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     state.turn = advanceTurn(state.turn, { type: "engage" });
     state.composer.text += "\n";
     state.composer.mode = "multiline";
+    history = commitDraft(history, state.composer.text);
     scheduleRender();
   }
 
   function backspace(): void {
     if (!editable() || state.composer.text.length === 0) return;
     state.composer.text = state.composer.text.slice(0, -1);
+    history = commitDraft(history, state.composer.text);
+    refreshMode();
+    scheduleRender();
+  }
+
+  // Prompt-history recall (criterion 2). This slice keeps the caret at
+  // end-of-input (no intra-text cursor movement), so Up/Down recall previous
+  // prompts without hijacking cursor movement; the in-progress draft is preserved
+  // and restored when returning to the bottom. Recalling is also engaging with
+  // the composer, so it clears a lingering terminal turn outcome.
+  function recallPrevious(): void {
+    if (!editable()) return;
+    state.turn = advanceTurn(state.turn, { type: "engage" });
+    const r = recallOlder(history, state.composer.text);
+    history = r.history;
+    state.composer.text = r.text;
+    refreshMode();
+    scheduleRender();
+  }
+
+  function recallNext(): void {
+    if (!editable()) return;
+    state.turn = advanceTurn(state.turn, { type: "engage" });
+    const r = recallNewer(history, state.composer.text);
+    history = r.history;
+    state.composer.text = r.text;
     refreshMode();
     scheduleRender();
   }
@@ -1073,8 +1229,11 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   const pendingImages: LoadedImage[] = [];
 
   function submit(): void {
+    // Busy, empty, and repeated submissions are explicit non-destructive no-ops
+    // (criterion 3): while a turn is in flight the composer is not editable, so we
+    // never queue a duplicate run; empty/whitespace input sends nothing.
+    if (!submitAllowed(state.composer.mode, state.composer.text)) return;
     const text = state.composer.text.trim();
-    if (!text) return;
     if (text === "/exit" || text === "/quit") {
       shutdown(0);
       return;
@@ -1104,6 +1263,10 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     state.composer.mode = "submitting";
     state.turn = advanceTurn(state.turn, { type: "submit" });
     state.transcript.push({ kind: "user", text });
+    // Record the prompt for future recall and reset navigation to a fresh draft;
+    // the user has now exercised the send flow, so compress the footer hints.
+    history = pushPromptHistory(history, text);
+    state.hintsLearned = true;
     scheduleRender();
     const images = pendingImages.splice(0);
     submitChain = submitChain.then(() => runOne(text, images));
@@ -1150,31 +1313,36 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   }
 
   function onCtrlC(): void {
-    if (isActiveTurn(state.turn.phase)) {
-      // A turn is in flight: request cancellation. It settles to "cancelled" once
-      // the in-flight provider call returns (it cannot be aborted directly), so the
-      // indicator first reads "interrupting" (pending) and then "cancelled".
-      runGeneration++; // stop the in-flight run from contributing further
-      state.turn = advanceTurn(state.turn, { type: "interrupt" });
-      state.composer.mode = "cancelled";
-      scheduleRender();
-      return;
+    // The outcome is decided purely by turn phase and whether a draft exists
+    // (criterion 4): interrupt active work, clear a draft, dismiss a finished
+    // turn's lingering outcome, or exit. Clearing a draft also drops the saved
+    // history draft so a later Up does not restore the cancelled text.
+    switch (cancelDecision(state.turn, state.composer.text.length > 0)) {
+      case "interrupt":
+        // A turn is in flight: request cancellation. It settles to "cancelled"
+        // once the in-flight provider call returns (it cannot be aborted
+        // directly), so the indicator first reads "interrupting" then "cancelled".
+        runGeneration++; // stop the in-flight run from contributing further
+        state.turn = advanceTurn(state.turn, { type: "interrupt" });
+        state.composer.mode = "cancelled";
+        scheduleRender();
+        return;
+      case "clear-draft":
+        state.composer.text = "";
+        history = commitDraft(history, "");
+        refreshMode();
+        scheduleRender();
+        return;
+      case "dismiss-outcome":
+        // Nothing is running to cancel (a finished turn's outcome is still shown):
+        // acknowledge the rejected request and clear the indicator instead of exiting.
+        state.transcript.push({ kind: "notice", text: "nothing to interrupt" });
+        state.turn = { phase: "idle" };
+        scheduleRender();
+        return;
+      case "exit":
+        shutdown(0);
     }
-    if (state.composer.text.length > 0) {
-      state.composer.text = "";
-      refreshMode();
-      scheduleRender();
-      return;
-    }
-    if (isTerminalTurn(state.turn.phase)) {
-      // Nothing is running to cancel (a finished turn's outcome is still shown):
-      // acknowledge the rejected request and clear the indicator instead of exiting.
-      state.transcript.push({ kind: "notice", text: "nothing to interrupt" });
-      state.turn = { phase: "idle" };
-      scheduleRender();
-      return;
-    }
-    shutdown(0);
   }
 
   function shutdown(code: number): void {
@@ -1263,13 +1431,18 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
 
     // Multiline insertion (Alt/Shift+Enter on common terminals).
     if (s === "\x1b\r" || s === "\x1b\n" || s === "\x1b\x0a") return insertNewline();
-    // Cursor / editing sequences we intentionally treat as no-ops (cursor stays
-    // at end-of-input in this slice).
+    // Prompt-history recall (criterion 2): Up/Down recall previous prompts in both
+    // normal (\x1b[A/B) and application (\x1bOA/OB) cursor modes. This slice keeps
+    // the caret at end-of-input, so recall never hijacks intra-text cursor movement.
+    if (s === "\x1b[A" || s === "\x1bOA") return recallPrevious();
+    if (s === "\x1b[B" || s === "\x1bOB") return recallNext();
+    // Left/Right and other cursor/edit sequences remain no-ops (caret stays at
+    // end-of-input in this slice).
     if (
-      s === "\x1b[A" ||
-      s === "\x1b[B" ||
       s === "\x1b[C" ||
       s === "\x1b[D" ||
+      s === "\x1bOC" ||
+      s === "\x1bOD" ||
       s === "\x1b[3~" ||
       s === "\x1b" ||
       s === "\x1bOH" ||

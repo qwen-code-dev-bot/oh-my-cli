@@ -20,11 +20,21 @@ import {
   turnIndicator,
   advanceTurn,
   seedTranscriptFromHistory,
+  userPromptsFromHistory,
+  createPromptHistory,
+  recallOlder,
+  recallNewer,
+  commitDraft,
+  pushPromptHistory,
+  submitAllowed,
+  cancelDecision,
+  footerHints,
   COMPOSER_MAX_ROWS,
   TRANSCRIPT_PREVIEW_LINES,
 } from "../../src/tui-shell.js";
 import type {
   ComposerMode,
+  PromptHistory,
   ShellState,
   StatusInfo,
   TranscriptEntry,
@@ -166,9 +176,16 @@ describe("tui-shell: status line is readable and credential-free", () => {
 
   it("surfaces the Tab expand affordance for collapsed transcript blocks", () => {
     const info: StatusInfo = { model: "m", workspace: "~/w", approvalMode: "default" };
-    const layout = computeLayout({ rows: 24, cols: 80 });
-    const line = renderStatusLine(info, layout, shellStyle(false)).join("");
-    expect(line).toContain("Tab expand");
+    // Steady-state (learned) footer keeps the affordance even at a narrow width.
+    const learned = renderStatusLine(info, computeLayout({ rows: 24, cols: 80 }), shellStyle(false), {
+      learned: true,
+    }).join("");
+    expect(learned).toContain("Tab expand");
+    // The richer unlearned footer also documents it once there is room for the full hint list.
+    const unlearned = renderStatusLine(info, computeLayout({ rows: 24, cols: 120 }), shellStyle(false), {
+      learned: false,
+    }).join("");
+    expect(unlearned).toContain("Tab expand");
   });
 
   it("never carries a credential because none is ever passed in", () => {
@@ -536,5 +553,229 @@ describe("tui-shell: full-screen capability gating", () => {
   it("rejects too-small dimensions", () => {
     expect(isFullScreenCapable({ isTTY: true, rows: 3, cols: 80, env: { TERM: "xterm" } })).toBe(false);
     expect(isFullScreenCapable({ isTTY: true, rows: 24, cols: 10, env: { TERM: "xterm" } })).toBe(false);
+  });
+});
+
+describe("tui-shell: userPromptsFromHistory seeds recall", () => {
+  it("extracts non-empty user prompts in chronological order", () => {
+    const prompts = userPromptsFromHistory([
+      { role: "user", content: "first" },
+      { role: "assistant", content: "reply" },
+      { role: "user", content: "second" },
+      { role: "tool", content: "output" },
+      { role: "user", content: "   " }, // whitespace-only dropped
+      { role: "system", content: "ignored" },
+      { role: "user", content: "third" },
+    ]);
+    expect(prompts).toEqual(["first", "second", "third"]);
+  });
+
+  it("treats missing or non-string content as empty", () => {
+    expect(userPromptsFromHistory([{ role: "user" }, { role: "user", content: null }])).toEqual([]);
+  });
+});
+
+describe("tui-shell: prompt-history navigation preserves the draft", () => {
+  const seeded = (): PromptHistory => createPromptHistory(["a", "b", "c"]);
+
+  it("starts at the draft slot just past the newest entry", () => {
+    const h = createPromptHistory(["a", "b"]);
+    expect(h.position).toBe(2);
+    expect(h.draft).toBe("");
+  });
+
+  it("recalls older prompts and preserves the in-progress draft", () => {
+    let h = seeded();
+    let r = recallOlder(h, "drafting");
+    expect(r.text).toBe("c"); // newest first
+    expect(r.history.draft).toBe("drafting");
+    h = r.history;
+    r = recallOlder(h, "c");
+    expect(r.text).toBe("b");
+    expect(r.history.draft).toBe("drafting"); // draft untouched while navigating
+    h = r.history;
+    r = recallOlder(h, "b");
+    expect(r.text).toBe("a");
+    h = r.history;
+    r = recallOlder(h, "a"); // oldest boundary: no-op
+    expect(r.text).toBe("a");
+    expect(r.history).toBe(h);
+  });
+
+  it("returns toward the draft and restores it at the bottom boundary", () => {
+    let h = seeded();
+    h = recallOlder(h, "drafting").history; // -> c
+    h = recallOlder(h, "c").history; // -> b
+    let r = recallNewer(h, "b"); // -> c
+    expect(r.text).toBe("c");
+    h = r.history;
+    r = recallNewer(h, "c"); // -> draft restored
+    expect(r.text).toBe("drafting");
+    expect(r.history.position).toBe(3);
+    h = r.history;
+    r = recallNewer(h, "drafting"); // draft boundary: no-op
+    expect(r.text).toBe("drafting");
+    expect(r.history).toBe(h);
+  });
+
+  it("keeps an edited recall as the draft on the next recall", () => {
+    let h = seeded();
+    h = recallOlder(h, "draft").history; // viewing "c"
+    h = commitDraft(h, "c edited"); // user typed onto the recalled prompt
+    expect(h.position).toBe(3);
+    expect(h.draft).toBe("c edited");
+    const r = recallOlder(h, "c edited");
+    expect(r.history.draft).toBe("c edited");
+    expect(r.text).toBe("c");
+  });
+
+  it("is a no-op with empty history", () => {
+    const h = createPromptHistory([]);
+    expect(recallOlder(h, "x").history).toBe(h);
+    expect(recallOlder(h, "x").text).toBe("x");
+    expect(recallNewer(h, "x").history).toBe(h);
+  });
+});
+
+describe("tui-shell: pushPromptHistory records sends", () => {
+  it("appends the prompt and resets to a fresh draft", () => {
+    const h = pushPromptHistory(createPromptHistory(["a"]), "b");
+    expect(h.entries).toEqual(["a", "b"]);
+    expect(h.position).toBe(2);
+    expect(h.draft).toBe("");
+  });
+
+  it("skips a consecutive duplicate", () => {
+    expect(pushPromptHistory(createPromptHistory(["a"]), "a").entries).toEqual(["a"]);
+  });
+
+  it("ignores empty/whitespace sends", () => {
+    const h = pushPromptHistory(createPromptHistory(["a"]), "   ");
+    expect(h.entries).toEqual(["a"]);
+    expect(h.position).toBe(1);
+  });
+});
+
+describe("tui-shell: submitAllowed makes busy/empty/repeated submissions no-ops", () => {
+  it("allows an editable composer holding non-empty text", () => {
+    expect(submitAllowed("focused", "hello")).toBe(true);
+    expect(submitAllowed("multiline", "a\nb")).toBe(true);
+    expect(submitAllowed("error", "retry")).toBe(true);
+    expect(submitAllowed("cancelled", "again")).toBe(true);
+  });
+
+  it("rejects busy submission while a turn is in flight", () => {
+    expect(submitAllowed("submitting", "hello")).toBe(false);
+    expect(submitAllowed("streaming", "hello")).toBe(false);
+    expect(submitAllowed("disabled", "hello")).toBe(false);
+  });
+
+  it("rejects empty and whitespace-only submission", () => {
+    expect(submitAllowed("focused", "")).toBe(false);
+    expect(submitAllowed("focused", "   \n ")).toBe(false);
+  });
+});
+
+describe("tui-shell: cancelDecision distinguishes interrupt from clear", () => {
+  it("interrupts an active turn", () => {
+    expect(cancelDecision({ phase: "streaming" }, true)).toBe("interrupt");
+    expect(cancelDecision({ phase: "waiting" }, false)).toBe("interrupt");
+    expect(cancelDecision({ phase: "running-tool", detail: "x" }, false)).toBe("interrupt");
+    expect(cancelDecision({ phase: "awaiting-approval", detail: "y" }, false)).toBe("interrupt");
+  });
+
+  it("clears a draft when no turn is active", () => {
+    expect(cancelDecision({ phase: "idle" }, true)).toBe("clear-draft");
+    expect(cancelDecision({ phase: "completed" }, true)).toBe("clear-draft");
+  });
+
+  it("dismisses a finished turn's lingering outcome when there is no draft", () => {
+    expect(cancelDecision({ phase: "completed" }, false)).toBe("dismiss-outcome");
+    expect(cancelDecision({ phase: "failed" }, false)).toBe("dismiss-outcome");
+    expect(cancelDecision({ phase: "cancelled" }, false)).toBe("dismiss-outcome");
+  });
+
+  it("exits when idle with no draft", () => {
+    expect(cancelDecision({ phase: "idle" }, false)).toBe("exit");
+  });
+});
+
+describe("tui-shell: footer hints document bindings and compress once learned", () => {
+  it("documents send, newline, and history before the flow is learned", () => {
+    const hints = footerHints(false);
+    expect(hints).toContain("Enter send");
+    expect(hints).toContain("Alt+Enter newline");
+    expect(hints).toContain("Up history");
+    expect(hints).toContain("Tab expand");
+  });
+
+  it("compresses to discovery affordances once learned", () => {
+    const hints = footerHints(true);
+    expect(hints).not.toContain("Enter send");
+    expect(hints).not.toContain("Alt+Enter newline");
+    expect(hints).not.toContain("Up history");
+    expect(hints).toContain("Tab expand");
+  });
+
+  it("is plain text with no color escapes", () => {
+    expect(ANSI.test(footerHints(false))).toBe(false);
+    expect(ANSI.test(footerHints(true))).toBe(false);
+  });
+
+  it("renders fuller hints until learned and compresses afterward", () => {
+    const info: StatusInfo = { model: "m", workspace: "~/w", approvalMode: "default" };
+    const layout = computeLayout({ rows: 24, cols: 120 });
+    const unlearned = renderStatusLine(info, layout, shellStyle(false), { learned: false }).join("");
+    const learned = renderStatusLine(info, layout, shellStyle(false), { learned: true }).join("");
+    expect(unlearned).toContain("Enter send");
+    expect(learned).not.toContain("Enter send");
+    for (const line of [unlearned, learned]) {
+      expect(line).toContain("approval default");
+      expect(line).toContain("Tab expand");
+    }
+  });
+
+  it("composeScreen compresses the footer once the flow is learned", () => {
+    const fresh = composeScreen(baseState({ hintsLearned: false })).lines.join("\n");
+    const learned = composeScreen(baseState({ hintsLearned: true })).lines.join("\n");
+    expect(fresh).toContain("Enter send");
+    expect(learned).not.toContain("Enter send");
+  });
+});
+
+describe("tui-shell: composer grows within a bounded height and keeps the viewport stable", () => {
+  it("bounds the composer band regardless of how many lines are typed", () => {
+    const tall = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n");
+    expect(composerTotalRows(tall)).toBe(COMPOSER_MAX_ROWS);
+  });
+
+  it("keeps transcript space when the composer is multiline at 120x36", () => {
+    const tall = Array.from({ length: 20 }, (_, i) => `l${i}`).join("\n");
+    const layout = computeLayout({ rows: 36, cols: 120 }, { composerRows: composerTotalRows(tall) });
+    expect(layout.composerRows).toBeLessThanOrEqual(COMPOSER_MAX_ROWS);
+    expect(layout.transcriptRows).toBeGreaterThanOrEqual(1);
+    expect(layout.status.end).toBe(36);
+  });
+
+  it("renders only the bounded tail of a tall composer so the active line stays visible", () => {
+    const tall = Array.from({ length: 20 }, (_, i) => `line-${i}`).join("\n");
+    const state = baseState({
+      viewport: { rows: 36, cols: 120 },
+      composer: { mode: "multiline", text: tall, placeholder: "" },
+    });
+    const screen = composeScreen(state);
+    const joined = screen.lines.join("\n");
+    expect(joined).toContain("line-19"); // newest line kept
+    expect(joined).not.toContain("line-0"); // oldest scrolled out of the bounded band
+    for (const line of screen.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(120);
+  });
+
+  it("preserves conversation space across a resize to a short terminal", () => {
+    const tall = Array.from({ length: 20 }, (_, i) => `l${i}`).join("\n");
+    const wide = computeLayout({ rows: 36, cols: 120 }, { composerRows: composerTotalRows(tall) });
+    const short = computeLayout({ rows: 10, cols: 120 }, { composerRows: composerTotalRows(tall) });
+    expect(short.composerRows).toBeLessThanOrEqual(COMPOSER_MAX_ROWS);
+    expect(short.transcriptRows).toBeGreaterThanOrEqual(1);
+    expect(wide.transcriptRows).toBeGreaterThan(short.transcriptRows);
   });
 });
