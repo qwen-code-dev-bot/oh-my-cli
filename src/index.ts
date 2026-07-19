@@ -106,7 +106,7 @@ import {
 import type { RegressionThresholds } from "./run-scorecard.js";
 import type { RunSummary } from "./run-summary.js";
 import { colorEnabled, createColorPalette } from "./color.js";
-import { formatProductBanner, VERSION } from "./product-banner.js";
+import { detectColorDepth, formatProductBanner, VERSION } from "./product-banner.js";
 import { runConversationShell, isFullScreenCapable } from "./tui-shell.js";
 import path from "node:path";
 
@@ -1459,6 +1459,14 @@ program
         }
 
         const useColor = colorEnabled({ noColor: opts.color === false, env: process.env });
+        // Match the palette to the terminal's advertised color depth so a
+        // reduced-color terminal renders portable 16-color SGR instead of indexed
+        // codes it cannot map (Issue #164, criterion 3).
+        const colorDepth = detectColorDepth({
+          noColor: opts.color === false,
+          env: process.env,
+          isTTY: Boolean(process.stdout.isTTY),
+        });
 
         // Build palette commands with live context
         const paletteCommands: PaletteCommand[] = [
@@ -1489,6 +1497,7 @@ program
             compactThreshold,
             mutatingAllowed,
             color: useColor,
+            colorDepth,
             paletteCommands,
           });
           return;
