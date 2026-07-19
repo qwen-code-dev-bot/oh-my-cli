@@ -95,9 +95,35 @@ export interface ShellStyle {
 
 export type TranscriptKind = "user" | "assistant" | "tool" | "notice" | "error" | "streaming";
 
+// Lifecycle state of a single tool operation, surfaced as a durable summary row
+// (Issue #162, criterion 1). Each state has a stable glyph + ASCII label so it is
+// identifiable without relying on color.
+export type ToolOpState = "running" | "succeeded" | "failed" | "cancelled" | "approval-blocked";
+
+// A single tool operation rendered as a compact durable summary with progressive
+// disclosure (Issue #162). Every text field is already sanitized (secrets
+// redacted) by makeToolOperation, so the renderer never sees raw tool output
+// (criterion 2). `turnId` attributes the operation to the agent round that owns
+// it so repeated or nested tool activity stays grouped (criterion 4); `receipt`
+// is an explicit pointer to the complete redacted result when `output` is bounded
+// (criterion 5).
+export interface ToolOperation {
+  name: string;
+  state: ToolOpState;
+  turnId: number;
+  input?: string;
+  output?: string;
+  durationMs?: number;
+  receipt?: string;
+}
+
 export interface TranscriptEntry {
   kind: TranscriptKind;
   text: string;
+  // Structured tool operation (Issue #162). When present, the block renders as a
+  // compact durable summary row with progressive disclosure instead of the flat
+  // text body. Optional so existing entries and pure render callers are unaffected.
+  tool?: ToolOperation;
 }
 
 // Lifecycle phase of the active turn. The shell shows exactly one of these in
@@ -563,6 +589,142 @@ export function pushPromptHistory(h: PromptHistory, text: string): PromptHistory
 }
 
 // ---------------------------------------------------------------------------
+// Tool operations (pure) — Issue #162
+// ---------------------------------------------------------------------------
+
+// Stable, color-independent marker per tool-operation state (criterion 1).
+export function toolOpGlyph(state: ToolOpState): string {
+  switch (state) {
+    case "running":
+      return "↻";
+    case "succeeded":
+      return "✓";
+    case "failed":
+      return "✗";
+    case "cancelled":
+      return "⊘";
+    case "approval-blocked":
+      return "⏸";
+    default:
+      return "●";
+  }
+}
+
+// Concise text label per tool-operation state (criterion 1).
+export function toolOpLabel(state: ToolOpState): string {
+  switch (state) {
+    case "running":
+      return "running";
+    case "succeeded":
+      return "succeeded";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    case "approval-blocked":
+      return "approval-blocked";
+    default:
+      return "unknown";
+  }
+}
+
+// Sanitize arbitrary tool text (input/output) for display by dropping
+// credentials and embedded tokens, so neither the collapsed row nor the expanded
+// detail exposes secrets (criterion 2).
+export function sanitizeToolText(text: string): string {
+  return redactSecrets(text).text;
+}
+
+// Human-readable duration so the summary/detail can show how long a tool took.
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+// Bound a tool result for display, preserving an explicit path to the complete
+// redacted receipt when it is truncated (criterion 5). The receipt names the
+// bounded, redacted copy the transcript retains so the full result is never
+// silently lost while the conversation stays readable.
+export function boundToolOutput(
+  output: string,
+  maxChars: number = MAX_TOOL_TRANSCRIPT_CHARS,
+): { output: string; receipt?: string } {
+  if (output.length <= maxChars) return { output };
+  const dropped = output.length - maxChars;
+  return {
+    output: `${output.slice(0, maxChars)}\n… [truncated ${dropped} char${dropped === 1 ? "" : "s"}]`,
+    receipt: `full redacted result retained (${maxChars} char cap)`,
+  };
+}
+
+// Construct a sanitized, bounded tool operation. Input and output are redacted
+// and the output is bounded with an explicit receipt, so every stored operation
+// is safe to render collapsed or expanded (criteria 2, 5).
+export function makeToolOperation(args: {
+  name: string;
+  state: ToolOpState;
+  turnId: number;
+  input?: string;
+  output?: string;
+  durationMs?: number;
+  maxChars?: number;
+}): ToolOperation {
+  const op: ToolOperation = { name: args.name, state: args.state, turnId: args.turnId };
+  if (args.input !== undefined && args.input !== "") op.input = sanitizeToolText(args.input);
+  if (args.durationMs !== undefined) op.durationMs = args.durationMs;
+  if (args.output !== undefined && args.output !== "") {
+    const bounded = boundToolOutput(sanitizeToolText(args.output), args.maxChars);
+    op.output = bounded.output;
+    if (bounded.receipt) op.receipt = bounded.receipt;
+  }
+  return op;
+}
+
+// First non-empty line of a tool's output, bounded — used as a result hint on the
+// collapsed summary row so it communicates the outcome without the full body.
+function toolResultHint(op: ToolOperation, maxLen = 60): string {
+  if (!op.output) return "";
+  const firstLine = (op.output.split("\n").find((l) => l.trim() !== "") ?? "").trim();
+  return firstLine.length > maxLen ? `${firstLine.slice(0, maxLen)}…` : firstLine;
+}
+
+// Collapsed summary row for a tool operation (criteria 1, 2): a stable state
+// glyph + label, the tool's purpose (name), and — when available — duration and a
+// bounded, sanitized result hint. Never includes the full output or a secret.
+export function toolSummaryLine(op: ToolOperation): string {
+  const parts = [`${toolOpGlyph(op.state)} ${op.name}`, toolOpLabel(op.state)];
+  if (typeof op.durationMs === "number") parts.push(formatDuration(op.durationMs));
+  const hint = toolResultHint(op);
+  if (hint) parts.push(hint);
+  return parts.join("  ·  ");
+}
+
+// Expanded detail lines for a tool operation (criterion 3): sanitized input,
+// output, duration, and the explicit receipt pointer. Lines are returned without
+// block indentation; the renderer indents and wraps them.
+export function toolDetailLines(op: ToolOperation): string[] {
+  const lines: string[] = [];
+  const pushSection = (label: string, body: string): void => {
+    const rows = body.split("\n");
+    lines.push(`${label}: ${rows[0]}`);
+    for (let i = 1; i < rows.length; i++) lines.push(rows[i]);
+  };
+  if (op.input && op.input.trim() !== "") pushSection("input", op.input);
+  if (op.output && op.output.trim() !== "") pushSection("output", op.output);
+  if (typeof op.durationMs === "number") lines.push(`duration: ${formatDuration(op.durationMs)}`);
+  if (op.receipt) lines.push(`receipt: ${op.receipt}`);
+  return lines;
+}
+
+// Whether a tool operation has hidden detail that progressive disclosure can
+// reveal (criterion 3). A running operation with no output yet has nothing to
+// expand.
+export function toolOpHasDetail(op: ToolOperation): boolean {
+  return toolDetailLines(op).length > 0;
+}
+
+// ---------------------------------------------------------------------------
 // Region renderers (pure)
 // ---------------------------------------------------------------------------
 
@@ -725,6 +887,25 @@ export function flattenTranscript(
   const lines: string[] = [];
   entries.forEach((entry, index) => {
     if (index > 0) lines.push(""); // rhythm between blocks
+    // Structured tool operation: a compact durable summary row with progressive
+    // disclosure (Issue #162). Collapsed shows the summary plus an expand marker
+    // when there is hidden detail; expanded reveals sanitized input/output/
+    // duration/receipt.
+    if (entry.tool) {
+      const tone = entryTone(entry.kind, style);
+      lines.push(`${tone}${clipLine(toolSummaryLine(entry.tool), cols)}${style.reset}`);
+      if (toolOpHasDetail(entry.tool)) {
+        if (expanded.has(index)) {
+          for (const dl of toolDetailLines(entry.tool)) {
+            for (const w of wrapText(dl, bodyWidth)) lines.push(TRANSCRIPT_INDENT + w);
+          }
+        } else {
+          const marker = clipLine("… [expand for input/output]", bodyWidth);
+          lines.push(`${style.dim}${TRANSCRIPT_INDENT}${marker}${style.reset}`);
+        }
+      }
+      return;
+    }
     const tone = entryTone(entry.kind, style);
     const header = clipLine(`${entryGlyph(entry.kind)} ${entryLabel(entry.kind)}`, cols);
     lines.push(`${tone}${header}${style.reset}`);
@@ -928,6 +1109,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   // exposes it read-only to the pure renderer.
   const expanded = new Set<number>();
 
+  // In-flight tool operations keyed by tool-call id, so each operation updates
+  // its own durable summary row in place (start → result) even when tools repeat
+  // or nest within a round (Issue #162, criterion 4). The start time backs the
+  // duration when the tool does not report elapsedMs itself.
+  const runningTools = new Map<string, { index: number; start: number }>();
+
   // Resume from the persisted conversation: restore prior user/assistant/tool
   // messages as durable transcript blocks (redacted) so a reconnect shows the
   // conversation so far. The turn always starts idle so no stale transient
@@ -1086,7 +1273,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     for (let i = state.transcript.length - 1; i >= 0; i--) {
       const entry = state.transcript[i];
       if (entry.kind === "streaming") continue; // live turn is never collapsed
-      if (wrapText(entry.text, bodyWidth).length > TRANSCRIPT_PREVIEW_LINES) {
+      // A tool operation is expandable when it has hidden detail to disclose; a
+      // flat block is expandable when its body overflows the preview.
+      const expandable = entry.tool
+        ? toolOpHasDetail(entry.tool)
+        : wrapText(entry.text, bodyWidth).length > TRANSCRIPT_PREVIEW_LINES;
+      if (expandable) {
         if (expanded.has(i)) expanded.delete(i);
         else expanded.add(i);
         scheduleRender();
@@ -1133,28 +1325,51 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         commitStreaming(o.final, text);
         scheduleRender();
       },
-      toolStart: ({ name }) => {
+      toolStart: ({ id, name, round }) => {
         if (!mine()) return;
-        // The running tool is shown in place via the turn indicator rather than as
-        // a fresh transcript line; the durable result is appended on toolResult so
-        // tool execution does not flood the conversation.
+        // The running tool is shown in place via the turn indicator AND as a
+        // compact durable summary row (Issue #162). The row starts "running" and
+        // is updated in place on toolResult, so each tool is one row rather than a
+        // flood; attribution follows the agent round (criterion 4).
         state.turn = advanceTurn(state.turn, { type: "tool-start", name });
+        runningTools.set(id, { index: state.transcript.length, start: Date.now() });
+        state.transcript.push({
+          kind: "tool",
+          text: "",
+          tool: { name, state: "running", turnId: round },
+        });
         scheduleRender();
       },
-      toolResult: ({ name, result }) => {
+      toolResult: ({ id, name, result, round }) => {
         if (!mine()) return;
-        // Keep the result's line structure (redacted, bounded) so the block
-        // renderer can wrap it and collapse it to an expandable preview rather
-        // than flattening it to a single lossy line.
-        const body = redactSecrets(result.content ?? "").text.replace(/\s+$/, "");
-        const capped =
-          body.length > MAX_TOOL_TRANSCRIPT_CHARS
-            ? `${body.slice(0, MAX_TOOL_TRANSCRIPT_CHARS)}\n… [truncated]`
-            : body;
-        state.transcript.push({
-          kind: result.isError ? "error" : "tool",
-          text: `${name}: ${capped}`,
+        const tracked = runningTools.get(id);
+        runningTools.delete(id);
+        const durationMs = result.elapsedMs ?? (tracked ? Date.now() - tracked.start : undefined);
+        // Preserve an approval-blocked verdict set at the prompt so a denial is
+        // not relabeled as a generic failure (criterion 1).
+        const prior = tracked ? state.transcript[tracked.index]?.tool : undefined;
+        const finalState: ToolOpState =
+          prior?.state === "approval-blocked"
+            ? "approval-blocked"
+            : result.isError
+              ? "failed"
+              : "succeeded";
+        const op = makeToolOperation({
+          name,
+          state: finalState,
+          turnId: round,
+          input: prior?.input,
+          output: (result.content ?? "").replace(/\s+$/, ""),
+          durationMs,
         });
+        const entry: TranscriptEntry = { kind: finalState === "succeeded" ? "tool" : "error", text: "", tool: op };
+        if (tracked && state.transcript[tracked.index]?.tool) {
+          // Update the running row in place so the tool stays one durable summary.
+          state.transcript[tracked.index] = entry;
+        } else {
+          // No matching start (defensive): append the result as its own row.
+          state.transcript.push(entry);
+        }
         state.turn = advanceTurn(state.turn, { type: "tool-result" });
         scheduleRender();
       },
@@ -1184,6 +1399,34 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       requestApproval: async ({ name, args }) => {
         if (!mine()) return false;
         state.turn = advanceTurn(state.turn, { type: "approval-request", name });
+        // Capture the requested arguments as the operation's sanitized input so
+        // the durable summary can disclose what was asked (criterion 3). The
+        // running row for this tool is the most recent running operation with the
+        // same name; the agent is paused on this approval so the index stays valid.
+        let approvalIndex = -1;
+        for (let i = state.transcript.length - 1; i >= 0; i--) {
+          const t = state.transcript[i].tool;
+          if (t && t.state === "running" && t.name === name) {
+            approvalIndex = i;
+            break;
+          }
+        }
+        if (approvalIndex >= 0) {
+          let argsText: string;
+          try {
+            argsText = typeof args === "string" ? args : JSON.stringify(args);
+          } catch {
+            argsText = String(args);
+          }
+          const capped = argsText.length > 500 ? `${argsText.slice(0, 500)}…` : argsText;
+          const prior = state.transcript[approvalIndex];
+          if (prior.tool) {
+            state.transcript[approvalIndex] = {
+              ...prior,
+              tool: { ...prior.tool, input: sanitizeToolText(capped) },
+            };
+          }
+        }
         scheduleRender();
         // Hand the terminal back to line mode so the approval prompt's readline
         // receives a full line, then restore raw mode for the shell. The shell's
@@ -1212,6 +1455,15 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
           // Approved or denied, the call is no longer awaiting input; return to the
           // running-tool phase (a denial surfaces immediately as its result).
           state.turn = advanceTurn(state.turn, { type: "tool-start", name });
+          if (!approved && approvalIndex >= 0 && state.transcript[approvalIndex]?.tool) {
+            // Mark the operation approval-blocked so its durable summary
+            // distinguishes a denial from a runtime failure (criterion 1).
+            const prior = state.transcript[approvalIndex];
+            state.transcript[approvalIndex] = {
+              ...prior,
+              tool: { ...(prior.tool as ToolOperation), state: "approval-blocked" },
+            };
+          }
           scheduleRender();
         }
         return approved;
@@ -1323,6 +1575,15 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         // once the in-flight provider call returns (it cannot be aborted
         // directly), so the indicator first reads "interrupting" then "cancelled".
         runGeneration++; // stop the in-flight run from contributing further
+        // Mark any in-flight tool operations as cancelled so their durable
+        // summaries reflect the interruption instead of hanging as "running".
+        for (let i = 0; i < state.transcript.length; i++) {
+          const e = state.transcript[i];
+          if (e.tool && e.tool.state === "running") {
+            state.transcript[i] = { ...e, tool: { ...e.tool, state: "cancelled" } };
+          }
+        }
+        runningTools.clear();
         state.turn = advanceTurn(state.turn, { type: "interrupt" });
         state.composer.mode = "cancelled";
         scheduleRender();

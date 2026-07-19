@@ -29,6 +29,15 @@ import {
   submitAllowed,
   cancelDecision,
   footerHints,
+  toolOpGlyph,
+  toolOpLabel,
+  sanitizeToolText,
+  formatDuration,
+  boundToolOutput,
+  makeToolOperation,
+  toolSummaryLine,
+  toolDetailLines,
+  toolOpHasDetail,
   COMPOSER_MAX_ROWS,
   TRANSCRIPT_PREVIEW_LINES,
 } from "../../src/tui-shell.js";
@@ -37,6 +46,8 @@ import type {
   PromptHistory,
   ShellState,
   StatusInfo,
+  ToolOpState,
+  ToolOperation,
   TranscriptEntry,
   TranscriptKind,
   TurnPhase,
@@ -777,5 +788,156 @@ describe("tui-shell: composer grows within a bounded height and keeps the viewpo
     expect(short.composerRows).toBeLessThanOrEqual(COMPOSER_MAX_ROWS);
     expect(short.transcriptRows).toBeGreaterThanOrEqual(1);
     expect(wide.transcriptRows).toBeGreaterThan(short.transcriptRows);
+  });
+});
+
+describe("tui-shell: tool operations have stable lifecycle markers (criterion 1)", () => {
+  const states: ToolOpState[] = ["running", "succeeded", "failed", "cancelled", "approval-blocked"];
+
+  it("gives every state a distinct, non-color glyph and label", () => {
+    const glyphs = states.map(toolOpGlyph);
+    const labels = states.map(toolOpLabel);
+    expect(new Set(glyphs).size).toBe(5);
+    expect(new Set(labels).size).toBe(5);
+    expect(labels).toEqual(["running", "succeeded", "failed", "cancelled", "approval-blocked"]);
+    for (const g of glyphs) expect(g.length).toBeGreaterThan(0);
+  });
+
+  it("formats durations readably", () => {
+    expect(formatDuration(0)).toBe("0ms");
+    expect(formatDuration(42)).toBe("42ms");
+    expect(formatDuration(1200)).toBe("1.2s");
+  });
+});
+
+describe("tui-shell: tool summaries never expose secrets (criterion 2)", () => {
+  // A deliberately low-entropy decoy: still matched by the redactor's known-token
+  // rule (sk- + 16+ chars) so the test exercises real redaction, but with repeated
+  // characters and a non-secret variable name so the gitleaks generic-api-key rule
+  // (keyword + entropy gate) never flags this fixture as a leaked credential.
+  const DECOY = "sk-aaaaaaaaaaaaaaaaaaaa";
+
+  it("redacts tokens and flagged secrets from tool text", () => {
+    const clean = sanitizeToolText(`loaded ${DECOY} and API_KEY=hunter2`);
+    expect(clean).not.toContain(DECOY);
+    expect(clean).not.toContain("hunter2");
+    expect(clean).toContain("[REDACTED]");
+  });
+
+  it("keeps the collapsed row and expanded detail secret-free", () => {
+    const op = makeToolOperation({ name: "shell", state: "succeeded", turnId: 1, output: `token ${DECOY} here` });
+    const entries: TranscriptEntry[] = [{ kind: "tool", text: "", tool: op }];
+    const collapsed = flattenTranscript(entries, 120, { style: shellStyle(false) }).join("\n");
+    const expanded = flattenTranscript(entries, 120, { style: shellStyle(false), expanded: new Set([0]) }).join("\n");
+    expect(collapsed).not.toContain(DECOY);
+    expect(expanded).not.toContain(DECOY);
+  });
+});
+
+describe("tui-shell: progressive disclosure of tool detail (criterion 3)", () => {
+  const op = makeToolOperation({
+    name: "shell",
+    state: "failed",
+    turnId: 2,
+    input: "rm x",
+    output: "boom\nstack line",
+    durationMs: 5,
+  });
+
+  it("collapses to a summary row with an expand marker", () => {
+    const entries: TranscriptEntry[] = [{ kind: "error", text: "", tool: op }];
+    const collapsed = flattenTranscript(entries, 120, { style: shellStyle(false) }).join("\n");
+    expect(collapsed).toContain("shell");
+    expect(collapsed).toContain("failed");
+    expect(collapsed).toContain("expand for input/output");
+    expect(collapsed).not.toContain("input:"); // detail hidden until expanded
+  });
+
+  it("expands to sanitized input, output, duration, and receipt", () => {
+    const detail = toolDetailLines(op);
+    expect(detail.some((l) => l.startsWith("input:"))).toBe(true);
+    expect(detail.some((l) => l.startsWith("output:"))).toBe(true);
+    expect(detail).toContain("duration: 5ms");
+    expect(detail.join("\n")).toContain("rm x");
+    expect(detail.join("\n")).toContain("boom");
+
+    const expanded = flattenTranscript([{ kind: "error", text: "", tool: op }], 120, {
+      style: shellStyle(false),
+      expanded: new Set([0]),
+    }).join("\n");
+    expect(expanded).toContain("input:");
+    expect(expanded).toContain("output:");
+    expect(expanded).toContain("duration: 5ms");
+    expect(expanded).not.toContain("expand for input/output");
+  });
+
+  it("treats a running operation with no output as having nothing to expand", () => {
+    expect(toolOpHasDetail({ name: "x", state: "running", turnId: 0 })).toBe(false);
+    expect(toolOpHasDetail(makeToolOperation({ name: "x", state: "succeeded", turnId: 0, output: "y" }))).toBe(true);
+  });
+
+  it("shows the result hint on the summary without the full body", () => {
+    const line = toolSummaryLine(makeToolOperation({ name: "read_file", state: "succeeded", turnId: 1, output: "first line\nsecond", durationMs: 42 }));
+    expect(line).toContain(toolOpGlyph("succeeded"));
+    expect(line).toContain("read_file");
+    expect(line).toContain("42ms");
+    expect(line).toContain("first line");
+    expect(line).not.toContain("second");
+  });
+});
+
+describe("tui-shell: repeated and nested tool activity stays attributable (criterion 4)", () => {
+  it("preserves the owning round on each operation", () => {
+    const entries: TranscriptEntry[] = [
+      { kind: "tool", text: "", tool: makeToolOperation({ name: "read_file", state: "succeeded", turnId: 1, output: "r1" }) },
+      { kind: "tool", text: "", tool: makeToolOperation({ name: "shell", state: "succeeded", turnId: 1, output: "s1" }) },
+      { kind: "tool", text: "", tool: makeToolOperation({ name: "read_file", state: "succeeded", turnId: 2, output: "r2" }) },
+    ];
+    expect(entries[0].tool?.turnId).toBe(1);
+    expect(entries[1].tool?.turnId).toBe(1);
+    expect(entries[2].tool?.turnId).toBe(2);
+    const flat = flattenTranscript(entries, 120, { style: shellStyle(false) }).join("\n");
+    expect(flat).toContain("shell");
+    expect((flat.match(/read_file/g) ?? []).length).toBe(2); // both rounds' reads shown
+  });
+});
+
+describe("tui-shell: large tool output is bounded with a receipt (criterion 5)", () => {
+  it("leaves small output untouched and bounds large output with a receipt", () => {
+    expect(boundToolOutput("short")).toEqual({ output: "short" });
+    const big = boundToolOutput("x".repeat(50), 10);
+    expect(big.output).toContain("… [truncated 40 chars]");
+    expect(big.receipt).toContain("10 char cap");
+  });
+
+  it("carries the receipt into the expanded detail and never spills the full body", () => {
+    const op = makeToolOperation({ name: "shell", state: "succeeded", turnId: 1, output: "z".repeat(6000) });
+    expect(op.receipt).toBeDefined();
+    expect(op.output).toContain("… [truncated");
+    expect(op.output.length).toBeLessThan(6000);
+    const flat = flattenTranscript([{ kind: "tool", text: "", tool: op }], 120, {
+      style: shellStyle(false),
+      expanded: new Set([0]),
+    }).join("\n");
+    expect(flat).toContain("receipt:");
+    expect(flat.length).toBeLessThan(6000);
+  });
+});
+
+describe("tui-shell: multiple tool operations stay glanceable at 120x36 (criterion 7)", () => {
+  it("renders compact collapsed summaries that fit the viewport", () => {
+    const entries: TranscriptEntry[] = [];
+    for (let i = 0; i < 8; i++) {
+      entries.push({
+        kind: "tool",
+        text: "",
+        tool: makeToolOperation({ name: `tool_${i}`, state: "succeeded", turnId: 1, output: `result ${i}\nmore ${i}` }),
+      });
+    }
+    const screen = composeScreen(baseState({ viewport: { rows: 36, cols: 120 }, transcript: entries }));
+    for (const line of screen.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(120);
+    const joined = screen.lines.join("\n");
+    expect(joined).toContain("result 7"); // newest summary visible
+    expect(joined).not.toContain("more 0"); // collapsed detail does not flood the conversation
   });
 });
