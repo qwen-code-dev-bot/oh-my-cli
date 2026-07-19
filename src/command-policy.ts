@@ -43,7 +43,8 @@ export type PolicyRuleId =
   | "credential_access"
   | "path_escape"
   | "destructive_removal"
-  | "device_overwrite";
+  | "device_overwrite"
+  | "remote_code_execution";
 
 export interface PolicyViolation {
   rule: PolicyRuleId;
@@ -100,6 +101,16 @@ const NET_MULTI = [
   "pip install", "pip3 install",
 ];
 const URL_SCHEME_RE = /\b(?:https?|ftp):\/\//;
+
+// Interpreters that run their stdin (or an argument) as code. A network fetch
+// whose stdout is piped into one of these downloads arbitrary bytes and
+// immediately executes them — the download-and-execute / remote-code-execution
+// shape. Kept to a bounded set of shells and language runtimes to limit false
+// positives on legitimate pipelines (e.g. `curl url | jq`, `curl url | tar`).
+const INTERPRETERS = new Set([
+  "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish",
+  "python", "python2", "python3", "node", "nodejs", "ruby", "perl", "php", "lua",
+]);
 
 // Paths that commonly hold credentials. Matched against a path token, so the
 // surrounding directory is preserved for the (redacted) explanation. Suffix
@@ -201,6 +212,15 @@ export function evaluateCommandPolicy(
 
     const device = matchDeviceOverwrite(n, outTargets);
     if (device) addViolation("device_overwrite", device);
+  }
+
+  // Download-and-execute is a pipeline-level shape (a network fetch feeding an
+  // interpreter) that the per-segment loop above cannot see, so it is judged
+  // once over the whole command. Like the other denials it applies only to
+  // untrusted provenance; a builtin fetch|interpreter stays advisory.
+  if (provenance !== "builtin") {
+    const rce = matchDownloadAndExecute(command);
+    if (rce) addViolation("remote_code_execution", rce);
   }
 
   return {
@@ -506,6 +526,131 @@ function matchDeviceOverwrite(
     return "formats or partitions a disk";
   }
   return null;
+}
+
+// A network fetch whose stdout is piped into an interpreter (download-and-
+// execute / remote code execution). Returns a redacted explanation naming the
+// interpreter, or null.
+//
+// The shared tokenizer (splitSegments) flattens pipelines, so this re-splits
+// the command into pipelines — sequences of `|`-connected stages — and descends
+// into command substitutions and subshells so a fetch|interpreter hidden inside
+// `$(...)` or `(...)` is still judged. A match is any network-fetch stage whose
+// output reaches an interpreter stage later in the same pipeline. The two-step
+// form (`curl -o file && sh file`) writes a file rather than piping, so it lands
+// in a different pipeline and is intentionally not matched here.
+function matchDownloadAndExecute(command: string): string | null {
+  for (const stages of collectPipelines(command)) {
+    let sawFetch = false;
+    for (const stage of stages) {
+      if (stageIsFetch(stage)) {
+        sawFetch = true;
+        continue;
+      }
+      if (sawFetch) {
+        const interp = interpreterExe(stage);
+        if (interp) return `network fetch piped into ${interp} (download-and-execute)`;
+      }
+    }
+  }
+  return null;
+}
+
+// A stage that fetches content over the network: its program (after seeing
+// through wrappers) is a known network client such as curl or wget. Plain
+// network ops without a downstream interpreter never reach this rule's match.
+function stageIsFetch(stage: string): boolean {
+  return NET_TOKENS.includes(normalizeSegment(stage).exe);
+}
+
+// The interpreter a stage runs, if any (after seeing through wrappers).
+function interpreterExe(stage: string): string | null {
+  const exe = normalizeSegment(stage).exe;
+  return INTERPRETERS.has(exe) ? exe : null;
+}
+
+// Split a command into pipelines; each pipeline is its list of `|`-connected
+// stages. `;`, `&&`, `||`, `&`, and newlines end a pipeline; a single `|`
+// separates stages within one. Descends into backticks, `$(...)`, and `(...)`
+// so hidden shapes are yielded as their own pipelines too.
+function collectPipelines(input: string): string[][] {
+  const pipelines: string[][] = [];
+  let stages: string[] = [];
+  let cur = "";
+  let quote: "'" | '"' | null = null;
+  let i = 0;
+  const flushStage = () => {
+    const t = cur.trim();
+    if (t) stages.push(t);
+    cur = "";
+  };
+  const flushPipeline = () => {
+    flushStage();
+    if (stages.length) pipelines.push(stages);
+    stages = [];
+  };
+  while (i < input.length) {
+    const ch = input[i];
+    if (quote) {
+      cur += ch;
+      if (ch === quote) quote = null;
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      cur += ch;
+      i++;
+      continue;
+    }
+    if (ch === "`") {
+      const close = input.indexOf("`", i + 1);
+      const end = close === -1 ? input.length : close + 1;
+      const body = close === -1 ? input.slice(i + 1) : input.slice(i + 1, close);
+      cur += input.slice(i, end);
+      for (const p of collectPipelines(body)) pipelines.push(p);
+      i = end;
+      continue;
+    }
+    if (ch === "$" && input[i + 1] === "(") {
+      const { body, end } = extractParen(input, i + 1);
+      cur += input.slice(i, end + 1);
+      for (const p of collectPipelines(body)) pipelines.push(p);
+      i = end + 1;
+      continue;
+    }
+    if (ch === "(") {
+      const { body, end } = extractParen(input, i);
+      cur += input.slice(i, end + 1);
+      for (const p of collectPipelines(body)) pipelines.push(p);
+      i = end + 1;
+      continue;
+    }
+    if (ch === ";" || ch === "\n") {
+      flushPipeline();
+      i++;
+      continue;
+    }
+    if (ch === "&") {
+      flushPipeline();
+      i += input[i + 1] === "&" ? 2 : 1;
+      continue;
+    }
+    if (ch === "|") {
+      if (input[i + 1] === "|") {
+        flushPipeline();
+        i += 2;
+        continue;
+      }
+      flushStage();
+      i++;
+      continue;
+    }
+    cur += ch;
+    i++;
+  }
+  flushPipeline();
+  return pipelines;
 }
 
 // ── Path helpers ─────────────────────────────────────────────────────────────
