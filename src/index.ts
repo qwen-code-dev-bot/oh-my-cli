@@ -55,6 +55,7 @@ import {
   providerInvocationExitCode,
 } from "./provider-invocation.js";
 import { collectExtensionDiscovery, formatExtensionDiscovery } from "./extension-discovery.js";
+import { collectExtensionCompat, formatExtensionCompat } from "./extension-compat.js";
 import { collectTrustPosture, formatTrustPosture } from "./trust-posture.js";
 import {
   readRecoveryCheckpoint,
@@ -180,6 +181,7 @@ program
   .option("--invoke-tool", "Invoke the resolved-ready tool extension from settings once, gated by approval mode and command policy, confined and redacted, and exit")
   .option("--invoke-timeout <ms>", "Hard timeout in milliseconds for --invoke-tool / --invoke-mcp / --invoke-provider (default 30000, max 300000)")
   .option("--discover-extensions", "Discover the declared provider, MCP, and tool extension contracts and readiness from settings (read-only, redacted) and exit")
+  .option("--extension-compat", "Report the supported provider, tool, MCP, and workflow contract versions and a redacted settings-file compatibility verdict (read-only) and exit")
   .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract / --tool-contract / --discover-extensions / --trust-posture and report the declared state")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
@@ -783,6 +785,38 @@ program
           process.stdout.write(JSON.stringify(report) + "\n");
         } else {
           process.stdout.write(formatExtensionDiscovery(report) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Extension-compatibility mode: publish the supported contract-version
+      // matrix (provider, tool, MCP, workflow) and a proactive, redacted
+      // compatibility verdict for the user settings file — before an unattended
+      // run, instead of a fail-closed error mid-run. It reads only each section's
+      // declared contractVersion (never entry ids or secrets) and never executes
+      // or probes any extension. An unsupported version is a VERDICT (exit 0, an
+      // audit not a gate); only a malformed settings root (invalid JSON or a
+      // non-object) fails closed (exit 2), matching discovery's settings guarantee.
+      if (opts.extensionCompat) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let report;
+        try {
+          report = collectExtensionCompat({
+            settingsPath: resolveSettingsPath(opts.settings),
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatExtensionCompat(report) + "\n");
         }
         process.exit(0);
       }

@@ -179,6 +179,7 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--invoke-tool` | Invoke the resolved-`ready` tool extension from settings once, gated by approval mode and command policy, confined and redacted, and exit |
 | `--invoke-timeout <ms>` | Hard timeout in milliseconds for `--invoke-tool` / `--invoke-mcp` / `--invoke-provider` (default `30000`, max `300000`) |
 | `--discover-extensions` | Discover the declared provider, MCP, tool, and workflow extension contracts and readiness from settings (read-only, redacted) and exit |
+| `--extension-compat` | Report the supported provider, tool, MCP, and workflow contract versions and a redacted settings-file compatibility verdict (read-only) and exit |
 | `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` / `--tool-contract` / `--discover-extensions` / `--trust-posture` and report the declared state |
 | `--list-workflows` | List the reusable workflows declared in user settings (read-only, redacted) and exit |
 | `--run-workflow <name>` | Run a named workflow from user settings non-interactively (sequential headless steps; a failing step halts) and exit |
@@ -1457,6 +1458,67 @@ contract (`kind` `provider` / `mcp` / `tool` / `workflow`), each flagged
 selected by explicit name at run time) and reports the contract-level readiness
 `state` with no `probeMs`.
 
+### Extension compatibility
+
+Where `--discover-extensions` reports the version a present section *negotiated*,
+`--extension-compat` answers the proactive, pre-run question *"will this settings
+file's extension contracts work on this build?"* It publishes the supported
+contract-version matrix for all four surfaces (provider, tool, MCP, workflow) —
+schema id plus supported version range, sourced from the same
+`SUPPORTED_*_CONTRACT_VERSIONS` constants the parsers enforce (no new source of
+truth) — and reads the user-owned settings file to emit a per-surface verdict:
+**compatible** (declared version within the supported range), **incompatible**
+(declared version outside the range, or no valid integer version, naming the
+declared and supported versions), or **absent** (section not declared). It reads
+only each section's declared `contractVersion` — it never re-validates the full
+contract, re-probes readiness, or executes any extension — so a fleet or CI
+system can check up front instead of triggering a fail-closed error mid-run.
+
+```bash
+oh-my-cli --extension-compat
+oh-my-cli --extension-compat --output json
+# check a specific settings file before deploying it across mixed CLI versions
+oh-my-cli --extension-compat --settings path/to/settings.json --output json
+```
+
+An unsupported version is reported as a **verdict** (the command still exits `0`
+— an audit, not a gate); only a malformed settings root (invalid JSON or a
+non-object) fails closed and exits `2`, matching the settings-level guarantee of
+discovery. Because the surface reads only `contractVersion`, no entry id,
+argument, or secret value is ever printed; only the home path is collapsed to
+`~`.
+
+```text
+Extension Compatibility
+────────────────────────────────────────
+Settings:  ~/.oh-my-cli/settings.json
+Schema:    oh-my-cli.extension-compat v1
+
+Provider contract: compatible
+  Schema:    oh-my-cli.provider-contract
+  Supported: 1
+  Declared:  1
+  Reason:    declared version 1 is supported
+
+Tool contract: incompatible
+  Schema:    oh-my-cli.tool-contract
+  Supported: 1
+  Declared:  99
+  Reason:    declared version 99 is outside the supported range
+
+MCP contract: absent
+  Schema:    oh-my-cli.mcp-contract
+  Supported: 1
+  Declared:  (not declared)
+  Reason:    section not declared
+```
+
+Add `--output json` for a versioned record (`schema`
+`oh-my-cli.extension-compat`) whose `surfaces` array always carries one entry per
+contract (`kind` `provider` / `tool` / `mcp` / `workflow`), each with its
+`schema`, `supportedVersions`, `present` flag, `declaredVersion` (an integer or
+`null`), `verdict` (`compatible` / `incompatible` / `absent`), and a `reason`.
+
 ### Reusable workflows
 
 Encode a repeatable, non-interactive automation (for example a CI sequence) as a
@@ -1605,6 +1667,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/tool-contract.ts` — versioned, redacted tool extension contract: declare tools in settings, negotiate the contract version, select one, and resolve its readiness state (declared/ready/isolated) with safe failure defaults (`--tool-contract`)
 - `src/tool-invocation.ts` — governed, non-interactive invocation of one resolved-`ready` tool extension through its contract: gated by readiness, the command trust policy, and approval mode, confined to the workspace, bounded by a hard timeout and output cap, redacted in text and JSON, and fail-closed on every error (`--invoke-tool`)
 - `src/extension-discovery.ts` — read-only discovery view composing the provider, MCP, tool, and workflow contract resolvers into one redacted report of which extension surfaces are declared and ready, without core changes (`--discover-extensions`)
+- `src/extension-compat.ts` — read-only compatibility view publishing the supported provider, tool, MCP, and workflow contract-version matrix (from the `SUPPORTED_*_CONTRACT_VERSIONS` constants) and a proactive, redacted per-surface verdict (compatible/incompatible/absent) for the user settings file, without re-validating, probing, or executing any extension (`--extension-compat`)
 - `src/workflow-contract.ts` — versioned, redacted workflow contract: declare reusable named workflows (ordered steps) in user settings, negotiate the contract version, select one by name, and list them (`--list-workflows`)
 - `src/workflow-runner.ts` — run a named workflow non-interactively, each step a bounded prompt through the headless `-p` path in its own process; steps run in declared order, a failing step halts the run, and output is redacted in human and machine modes (`--run-workflow`)
 - `src/trust-posture.ts` — read-only posture view composing folder trust, sandbox isolation, approval mode, and extension readiness into one redacted audit of what a run will be allowed to do, without core changes (`--trust-posture`)
