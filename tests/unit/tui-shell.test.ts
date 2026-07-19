@@ -15,9 +15,18 @@ import {
   wrapText,
   clipLine,
   visibleWidth,
+  entryGlyph,
+  entryLabel,
   COMPOSER_MAX_ROWS,
+  TRANSCRIPT_PREVIEW_LINES,
 } from "../../src/tui-shell.js";
-import type { ComposerMode, ShellState, StatusInfo, TranscriptEntry } from "../../src/tui-shell.js";
+import type {
+  ComposerMode,
+  ShellState,
+  StatusInfo,
+  TranscriptEntry,
+  TranscriptKind,
+} from "../../src/tui-shell.js";
 
 const ANSI = /\x1b\[/;
 
@@ -149,6 +158,13 @@ describe("tui-shell: status line is readable and credential-free", () => {
     expect(line).toContain("tokens 42");
   });
 
+  it("surfaces the Tab expand affordance for collapsed transcript blocks", () => {
+    const info: StatusInfo = { model: "m", workspace: "~/w", approvalMode: "default" };
+    const layout = computeLayout({ rows: 24, cols: 80 });
+    const line = renderStatusLine(info, layout, shellStyle(false)).join("");
+    expect(line).toContain("Tab expand");
+  });
+
   it("never carries a credential because none is ever passed in", () => {
     const info: StatusInfo = { model: "m", workspace: "~/w", approvalMode: "default" };
     const layout = computeLayout({ rows: 24, cols: 80 });
@@ -169,16 +185,34 @@ describe("tui-shell: status line is readable and credential-free", () => {
   });
 });
 
-describe("tui-shell: transcript anchors newest content at the bottom", () => {
-  it("top-pads short transcripts so the composer stays put", () => {
+describe("tui-shell: transcript renders labeled, glanceable blocks", () => {
+  it("gives every transcript kind a distinct glyph and label", () => {
+    // streaming intentionally shares the assistant glyph/label (it is the live
+    // assistant turn), so it is excluded from the distinctness check.
+    const kinds: TranscriptKind[] = ["user", "assistant", "tool", "notice", "error"];
+    const glyphs = kinds.map(entryGlyph);
+    const labels = kinds.map(entryLabel);
+    expect(new Set(glyphs).size).toBe(kinds.length);
+    expect(new Set(labels).size).toBe(kinds.length);
+    for (const l of labels) expect(l.length).toBeGreaterThan(0);
+  });
+
+  it("renders each entry as a labeled block, newest anchored at the bottom", () => {
     const entries: TranscriptEntry[] = [
       { kind: "user", text: "hello" },
       { kind: "assistant", text: "world" },
     ];
-    const lines = renderTranscript(entries, { start: 0, end: 5 }, 80);
-    expect(lines.length).toBe(5);
+    const lines = renderTranscript(entries, { start: 0, end: 8 }, 80);
+    expect(lines.length).toBe(8);
+    const text = lines.join("\n");
+    // Each block carries a color-independent glyph + label.
+    expect(text).toContain("> You");
+    expect(text).toContain("◆ Assistant");
+    expect(text).toContain("hello");
+    expect(text).toContain("world");
+    // Newest content sits at the bottom; the region is top-padded so the
+    // composer above it stays put.
     expect(lines[lines.length - 1]).toContain("world");
-    expect(lines[lines.length - 2]).toContain("hello");
     expect(lines[0]).toBe("");
   });
 
@@ -196,6 +230,33 @@ describe("tui-shell: transcript anchors newest content at the bottom", () => {
   it("wraps long lines instead of overflowing horizontally", () => {
     const flat = flattenTranscript([{ kind: "assistant", text: "x".repeat(200) }], 40);
     for (const l of flat) expect(visibleWidth(l)).toBeLessThanOrEqual(40);
+  });
+
+  it("collapses long blocks to a preview with a disclosure marker", () => {
+    const long = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
+    const flat = flattenTranscript([{ kind: "assistant", text: long }], 80);
+    expect(flat[0]).toContain("Assistant");
+    const bodyLines = flat.filter((l) => l.startsWith("  line "));
+    expect(bodyLines.length).toBe(TRANSCRIPT_PREVIEW_LINES);
+    expect(flat[flat.length - 1]).toMatch(/\[\+\d+ lines\]/);
+  });
+
+  it("expands a collapsed block to full height when its index is expanded", () => {
+    const long = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
+    const collapsed = flattenTranscript([{ kind: "assistant", text: long }], 80);
+    const expandedView = flattenTranscript([{ kind: "assistant", text: long }], 80, {
+      expanded: new Set([0]),
+    });
+    expect(expandedView.length).toBeGreaterThan(collapsed.length);
+    expect(expandedView.join("\n")).toContain("line 19");
+    expect(expandedView.join("\n")).not.toMatch(/\[\+\d+ lines\]/);
+  });
+
+  it("never collapses the live streaming block even when long", () => {
+    const long = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
+    const flat = flattenTranscript([{ kind: "streaming", text: long }], 80);
+    expect(flat.join("\n")).toContain("line 19");
+    expect(flat.join("\n")).not.toMatch(/\[\+\d+ lines\]/);
   });
 });
 

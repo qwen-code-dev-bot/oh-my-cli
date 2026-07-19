@@ -38,6 +38,16 @@ export const STATUS_ROWS = 2;
 export const MIN_SHELL_COLS = 20;
 export const MIN_SHELL_ROWS = 4;
 
+// Long transcript blocks collapse to this many preview lines so a single tool
+// result or answer cannot push the rest of the conversation off-screen; the
+// remainder stays inspectable on demand (Tab to expand the latest long block).
+export const TRANSCRIPT_PREVIEW_LINES = 6;
+// Continuation indent for a block's body so wrapped lines read as one entry.
+const TRANSCRIPT_INDENT = "  ";
+// Tool results are stored in full (redacted) up to this bound so the disclosure
+// preview can be expanded without keeping unbounded output in memory.
+const MAX_TOOL_TRANSCRIPT_CHARS = 4000;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -96,6 +106,20 @@ export interface ShellState {
   composer: ComposerState;
   status: StatusInfo;
   color: boolean;
+  // Indices of transcript blocks the user has expanded to full height; long
+  // blocks otherwise collapse to a preview. Optional so pure render callers and
+  // tests can omit it (treated as empty).
+  expanded?: ReadonlySet<number>;
+}
+
+// Options controlling how transcript blocks are flattened/rendered.
+export interface TranscriptRenderOptions {
+  // Block indices shown in full instead of collapsed to a preview.
+  expanded?: ReadonlySet<number>;
+  // Preview height for collapsed long blocks.
+  previewLines?: number;
+  // Style used for the block header and disclosure marker (no-op when omitted).
+  style?: ShellStyle;
 }
 
 export interface Region {
@@ -333,7 +357,7 @@ export function renderStatusLine(info: StatusInfo, layout: ShellLayout, style: S
   const primary = [info.workspace, info.model, info.contextUsage].filter((p): p is string => Boolean(p));
   const first = `${style.success}→${style.reset} ${style.dim}${clipLine(primary.join("  ·  "), Math.max(0, cols - 2))}${style.reset}`;
   if (height === 1) return [first];
-  const second = `  ${style.dim}${clipLine(`approval ${info.approvalMode}  ·  ? shortcuts  ·  Ctrl+C exit`, Math.max(0, cols - 2))}${style.reset}`;
+  const second = `  ${style.dim}${clipLine(`approval ${info.approvalMode}  ·  Tab expand  ·  ? shortcuts  ·  Ctrl+C exit`, Math.max(0, cols - 2))}${style.reset}`;
   return [first, second];
 }
 
@@ -343,47 +367,113 @@ function renderEmptyTranscript(region: Region, _cols: number, _style: ShellStyle
   return Array.from({ length: height }, () => "");
 }
 
-function entryPrefix(kind: TranscriptKind): string {
+// Color-independent glyph for a transcript block. The glyph + label together
+// distinguish kinds without relying on color alone.
+export function entryGlyph(kind: TranscriptKind): string {
   switch (kind) {
     case "user":
-      return "> ";
+      return ">";
     case "assistant":
-      return "◆ ";
+      return "◆";
     case "streaming":
-      return "✦ ";
+      return "✦";
     case "tool":
-      return "● ";
+      return "●";
     case "notice":
-      return "• ";
+      return "•";
     case "error":
-      return "! ";
+      return "!";
     default:
-      return "  ";
+      return "•";
   }
 }
 
-// Flatten transcript entries into wrapped display lines, prefixing each entry so
-// blocks remain distinguishable and continuation lines stay indented.
-export function flattenTranscript(entries: TranscriptEntry[], cols: number): string[] {
-  const lines: string[] = [];
-  for (const e of entries) {
-    const prefix = entryPrefix(e.kind);
-    const bodyWidth = Math.max(1, cols - Array.from(prefix).length);
-    const wrapped = wrapText(e.text, bodyWidth);
-    for (let i = 0; i < wrapped.length; i++) {
-      const lead = i === 0 ? prefix : " ".repeat(Array.from(prefix).length);
-      lines.push(lead + wrapped[i]);
-    }
+// Short human label naming the speaker/source of a transcript block.
+export function entryLabel(kind: TranscriptKind): string {
+  switch (kind) {
+    case "user":
+      return "You";
+    case "assistant":
+      return "Assistant";
+    case "streaming":
+      return "Assistant";
+    case "tool":
+      return "Tool";
+    case "notice":
+      return "System";
+    case "error":
+      return "Error";
+    default:
+      return "Note";
   }
+}
+
+// Header tone per kind. Color is a bonus cue; the glyph + label carry the
+// distinction when color is disabled (every style field is then "").
+function entryTone(kind: TranscriptKind, style: ShellStyle): string {
+  switch (kind) {
+    case "user":
+      return style.accent;
+    case "assistant":
+    case "streaming":
+      return style.success;
+    case "error":
+      return style.bold;
+    case "tool":
+    case "notice":
+    default:
+      return style.dim;
+  }
+}
+
+// Flatten transcript entries into labeled, indented blocks separated by a blank
+// row so a mixed conversation reads at a glance. Long blocks collapse to a
+// preview with an explicit disclosure marker; the caller can expand a block by
+// index (Tab in the driver). Newest content stays anchored at the bottom via
+// renderTranscript's top-padding.
+export function flattenTranscript(
+  entries: TranscriptEntry[],
+  cols: number,
+  opts: TranscriptRenderOptions = {},
+): string[] {
+  const style = opts.style ?? shellStyle(false);
+  const previewLines = Math.max(1, opts.previewLines ?? TRANSCRIPT_PREVIEW_LINES);
+  const expanded = opts.expanded ?? new Set<number>();
+  const indentWidth = Array.from(TRANSCRIPT_INDENT).length;
+  const bodyWidth = Math.max(1, cols - indentWidth);
+  const lines: string[] = [];
+  entries.forEach((entry, index) => {
+    if (index > 0) lines.push(""); // rhythm between blocks
+    const tone = entryTone(entry.kind, style);
+    const header = clipLine(`${entryGlyph(entry.kind)} ${entryLabel(entry.kind)}`, cols);
+    lines.push(`${tone}${header}${style.reset}`);
+    const wrapped = wrapText(entry.text, bodyWidth);
+    // The live streaming turn is never collapsed so the active answer stays
+    // fully visible; committed blocks collapse to a preview when long.
+    const collapse =
+      entry.kind !== "streaming" && !expanded.has(index) && wrapped.length > previewLines;
+    const shown = collapse ? wrapped.slice(0, previewLines) : wrapped;
+    for (const w of shown) lines.push(TRANSCRIPT_INDENT + w);
+    if (collapse) {
+      const remaining = wrapped.length - shown.length;
+      const marker = clipLine(`… [+${remaining} line${remaining === 1 ? "" : "s"}]`, bodyWidth);
+      lines.push(`${style.dim}${TRANSCRIPT_INDENT}${marker}${style.reset}`);
+    }
+  });
   return lines;
 }
 
 // Render the transcript region: newest content anchored at the bottom, top-padded
 // with blank rows so the composer stays put regardless of how much has scrolled.
-export function renderTranscript(entries: TranscriptEntry[], region: Region, cols: number): string[] {
+export function renderTranscript(
+  entries: TranscriptEntry[],
+  region: Region,
+  cols: number,
+  opts: TranscriptRenderOptions = {},
+): string[] {
   const height = Math.max(0, region.end - region.start);
   if (height === 0) return [];
-  const flat = flattenTranscript(entries, cols);
+  const flat = flattenTranscript(entries, cols, opts);
   const visible = flat.slice(Math.max(0, flat.length - height));
   while (visible.length < height) visible.unshift("");
   return visible;
@@ -446,7 +536,10 @@ export function composeScreen(state: ShellState): ComposedScreen {
   const transcriptLines =
     state.transcript.length === 0
       ? renderEmptyTranscript(layout.transcript, layout.viewport.cols, style)
-      : renderTranscript(state.transcript, layout.transcript, layout.viewport.cols);
+      : renderTranscript(state.transcript, layout.transcript, layout.viewport.cols, {
+          expanded: state.expanded,
+          style,
+        });
   const composerLines = renderComposer(state.composer, layout, style);
   const statusLines = renderStatusLine(state.status, layout, style);
 
@@ -536,6 +629,11 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   const stdin = opts.stdin ?? process.stdin;
   const stdout = opts.stdout ?? process.stdout;
 
+  // Transcript blocks the user has expanded to full height (Tab toggles the
+  // latest long block). Held outside state so the driver can mutate it; state
+  // exposes it read-only to the pure renderer.
+  const expanded = new Set<number>();
+
   const state: ShellState = {
     viewport: { rows: stdout.rows ?? 24, cols: stdout.columns ?? 80 },
     version: VERSION,
@@ -548,6 +646,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       contextUsage: null,
     },
     color: opts.color,
+    expanded,
   };
 
   let running = true;
@@ -625,6 +724,23 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     scheduleRender();
   }
 
+  // Toggle full-height display of the most recent block whose body overflows the
+  // preview, so a long tool result or answer can be inspected on demand. A no-op
+  // when nothing is collapsible.
+  function toggleExpandLatest(): void {
+    const bodyWidth = Math.max(1, state.viewport.cols - Array.from(TRANSCRIPT_INDENT).length);
+    for (let i = state.transcript.length - 1; i >= 0; i--) {
+      const entry = state.transcript[i];
+      if (entry.kind === "streaming") continue; // live turn is never collapsed
+      if (wrapText(entry.text, bodyWidth).length > TRANSCRIPT_PREVIEW_LINES) {
+        if (expanded.has(i)) expanded.delete(i);
+        else expanded.add(i);
+        scheduleRender();
+        return;
+      }
+    }
+  }
+
   function createShellSink(generation: number): AgentSink {
     const mine = (): boolean => generation === runGeneration && running;
     let streamingText = "";
@@ -669,13 +785,17 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       },
       toolResult: ({ name, result }) => {
         if (!mine()) return;
-        const preview = clipLine(
-          redactSecrets(result.content ?? "").text.replace(/\s+/g, " ").trim(),
-          200,
-        );
+        // Keep the result's line structure (redacted, bounded) so the block
+        // renderer can wrap it and collapse it to an expandable preview rather
+        // than flattening it to a single lossy line.
+        const body = redactSecrets(result.content ?? "").text.replace(/\s+$/, "");
+        const capped =
+          body.length > MAX_TOOL_TRANSCRIPT_CHARS
+            ? `${body.slice(0, MAX_TOOL_TRANSCRIPT_CHARS)}\n… [truncated]`
+            : body;
         state.transcript.push({
           kind: result.isError ? "error" : "tool",
-          text: `${name}: ${preview}`,
+          text: `${name}: ${capped}`,
         });
         scheduleRender();
       },
@@ -815,6 +935,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     }
     if (cmd.name === "/clear") {
       state.transcript = [];
+      expanded.clear();
       scheduleRender();
       return;
     }
@@ -867,6 +988,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         paint();
         return;
       } // Ctrl+L redraw
+      if (b === 0x09) return toggleExpandLatest(); // Tab: expand/collapse latest long block
       if (b === 0x7f || b === 0x08) return backspace();
       if (b === 0x0d || b === 0x0a) {
         submit();
