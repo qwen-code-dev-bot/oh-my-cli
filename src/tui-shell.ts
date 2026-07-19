@@ -41,13 +41,26 @@ export const MIN_SHELL_ROWS = 4;
 
 // Long transcript blocks collapse to this many preview lines so a single tool
 // result or answer cannot push the rest of the conversation off-screen; the
-// remainder stays inspectable on demand (Tab to expand the latest long block).
+// remainder stays inspectable on demand (Tab expands the selected block in place,
+// PageUp/PageDown scroll the transcript).
 export const TRANSCRIPT_PREVIEW_LINES = 6;
 // Continuation indent for a block's body so wrapped lines read as one entry.
 const TRANSCRIPT_INDENT = "  ";
 // Tool results are stored in full (redacted) up to this bound so the disclosure
 // preview can be expanded without keeping unbounded output in memory.
 const MAX_TOOL_TRANSCRIPT_CHARS = 4000;
+// An expanded file diff is bounded to this many lines so a large change cannot
+// flood the transcript; the complete redacted change stays available via the
+// stored operation and the truncation marker names the bound (Issue #163,
+// criterion 5).
+const MAX_DIFF_LINES = 200;
+// Line-count guard for the O(n*m) line diff: beyond this the diff falls back to a
+// coarse all-removed/all-added view (still bounded) so a very large edit cannot
+// blow up time or memory.
+const MAX_DIFF_INPUT_LINES = 500;
+// A failure's concise cause is bounded to this many characters so the summary row
+// stays one line before the verbose diagnostics are expanded (Issue #163).
+const MAX_FAILURE_CAUSE_CHARS = 120;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -100,13 +113,45 @@ export type TranscriptKind = "user" | "assistant" | "tool" | "notice" | "error" 
 // identifiable without relying on color.
 export type ToolOpState = "running" | "succeeded" | "failed" | "cancelled" | "approval-blocked";
 
+// A single changed line in a file diff. The `kind` is conveyed by an ASCII prefix
+// (`+`/`-`/space) at render time so additions, deletions, and context are
+// distinguishable without relying on color (Issue #163, criterion 2).
+export type DiffLineKind = "add" | "del" | "context";
+
+export interface DiffLine {
+  kind: DiffLineKind;
+  text: string;
+}
+
+// A bounded, structured diff for one affected file. `added`/`removed` report the
+// change magnitude so the collapsed summary can name it before expansion
+// (criterion 1); `lines` is capped at MAX_DIFF_LINES with `truncated` set when the
+// full change is larger (criterion 5). Every line's text is already sanitized.
+export interface FileDiff {
+  file: string;
+  added: number;
+  removed: number;
+  lines: DiffLine[];
+  truncated: boolean;
+}
+
+// A concise, structured failure summary shown before the verbose diagnostics
+// (Issue #163, criterion 3): what went wrong (`cause`), which action it affected
+// (`action`), and a safe next step (`nextStep`). All fields are sanitized.
+export interface FailureDetail {
+  cause: string;
+  action: string;
+  nextStep: string;
+}
+
 // A single tool operation rendered as a compact durable summary with progressive
 // disclosure (Issue #162). Every text field is already sanitized (secrets
 // redacted) by makeToolOperation, so the renderer never sees raw tool output
 // (criterion 2). `turnId` attributes the operation to the agent round that owns
 // it so repeated or nested tool activity stays grouped (criterion 4); `receipt`
 // is an explicit pointer to the complete redacted result when `output` is bounded
-// (criterion 5).
+// (criterion 5). `diff` (Issue #163) carries a structured change for mutating
+// file tools; `failure` carries a structured cause/action/next-step for errors.
 export interface ToolOperation {
   name: string;
   state: ToolOpState;
@@ -115,6 +160,8 @@ export interface ToolOperation {
   output?: string;
   durationMs?: number;
   receipt?: string;
+  diff?: FileDiff;
+  failure?: FailureDetail;
 }
 
 export interface TranscriptEntry {
@@ -178,6 +225,11 @@ export interface ShellState {
   // blocks otherwise collapse to a preview. Optional so pure render callers and
   // tests can omit it (treated as empty).
   expanded?: ReadonlySet<number>;
+  // Lines the transcript is scrolled up from the bottom (0 = pinned to newest,
+  // the default). Lets the user inspect earlier content without losing the
+  // newest, and is preserved across expand/collapse (Issue #163, criterion 4).
+  // Optional so pure render callers and tests can omit it (treated as 0).
+  scroll?: number;
   // Whether the user has learned the basic composer flow (sent at least once,
   // or resumed with prior prompts) so the footer hints compress. Optional so
   // pure render callers and tests can omit it (treated as not-yet-learned).
@@ -192,6 +244,13 @@ export interface TranscriptRenderOptions {
   previewLines?: number;
   // Style used for the block header and disclosure marker (no-op when omitted).
   style?: ShellStyle;
+  // Lines to scroll up from the bottom when rendering the visible window
+  // (renderTranscript only; 0 = pinned to newest).
+  scroll?: number;
+  // When provided, flattenTranscript pushes each entry's starting line index (the
+  // offset of its summary/header within the flattened output) so callers can
+  // anchor scroll position to a specific event (Issue #163, criterion 4).
+  startLines?: number[];
 }
 
 export interface Region {
@@ -702,7 +761,9 @@ export function toolSummaryLine(op: ToolOperation): string {
 
 // Expanded detail lines for a tool operation (criterion 3): sanitized input,
 // output, duration, and the explicit receipt pointer. Lines are returned without
-// block indentation; the renderer indents and wraps them.
+// block indentation; the renderer indents and wraps them. When the operation
+// carries a structured diff the raw input (oldText/newText) is suppressed — the
+// diff body, rendered separately by the caller, replaces that dump (Issue #163).
 export function toolDetailLines(op: ToolOperation): string[] {
   const lines: string[] = [];
   const pushSection = (label: string, body: string): void => {
@@ -710,7 +771,7 @@ export function toolDetailLines(op: ToolOperation): string[] {
     lines.push(`${label}: ${rows[0]}`);
     for (let i = 1; i < rows.length; i++) lines.push(rows[i]);
   };
-  if (op.input && op.input.trim() !== "") pushSection("input", op.input);
+  if (!op.diff && op.input && op.input.trim() !== "") pushSection("input", op.input);
   if (op.output && op.output.trim() !== "") pushSection("output", op.output);
   if (typeof op.durationMs === "number") lines.push(`duration: ${formatDuration(op.durationMs)}`);
   if (op.receipt) lines.push(`receipt: ${op.receipt}`);
@@ -719,9 +780,242 @@ export function toolDetailLines(op: ToolOperation): string[] {
 
 // Whether a tool operation has hidden detail that progressive disclosure can
 // reveal (criterion 3). A running operation with no output yet has nothing to
-// expand.
+// expand; a diff is always expandable so the change can be inspected.
 export function toolOpHasDetail(op: ToolOperation): boolean {
-  return toolDetailLines(op).length > 0;
+  return toolDetailLines(op).length > 0 || op.diff !== undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Diff inspection (Issue #163, pure)
+// ---------------------------------------------------------------------------
+
+// Line-level diff between two texts via a longest-common-subsequence backtrack.
+// Context (unchanged) lines are interleaved with additions/deletions so the change
+// reads in place. Inputs are split on "\n"; an empty string yields no lines.
+// Callers bound the inputs (see buildFileDiff) before reaching here.
+export function diffLines(oldText: string, newText: string): DiffLine[] {
+  const a = oldText === "" ? [] : oldText.split("\n");
+  const b = newText === "" ? [] : newText.split("\n");
+  const n = a.length;
+  const m = b.length;
+  // dp[i][j] = LCS length of a[i:] and b[j:].
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out: DiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      out.push({ kind: "context", text: a[i] });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      out.push({ kind: "del", text: a[i] });
+      i++;
+    } else {
+      out.push({ kind: "add", text: b[j] });
+      j++;
+    }
+  }
+  while (i < n) {
+    out.push({ kind: "del", text: a[i] });
+    i++;
+  }
+  while (j < m) {
+    out.push({ kind: "add", text: b[j] });
+    j++;
+  }
+  return out;
+}
+
+// Coarse fallback diff when inputs exceed the LCS guard: every old line is a
+// deletion and every new line an addition. Honest about magnitude, bounded, and
+// deterministic so a very large edit cannot blow up the O(n*m) backtrack.
+function coarseDiff(oldText: string, newText: string): DiffLine[] {
+  const out: DiffLine[] = [];
+  if (oldText !== "") for (const l of oldText.split("\n")) out.push({ kind: "del", text: l });
+  if (newText !== "") for (const l of newText.split("\n")) out.push({ kind: "add", text: l });
+  return out;
+}
+
+// Build a bounded, sanitized FileDiff from before/after text. The added/removed
+// counts reflect the full change magnitude (criterion 1); the stored line list is
+// capped at MAX_DIFF_LINES with `truncated` marking a larger change (criterion 5).
+// Every line is secret-redacted so an expanded diff never exposes credentials.
+export function buildFileDiff(file: string, oldText: string, newText: string): FileDiff {
+  const oldLines = oldText === "" ? 0 : oldText.split("\n").length;
+  const newLines = newText === "" ? 0 : newText.split("\n").length;
+  const all =
+    oldLines <= MAX_DIFF_INPUT_LINES && newLines <= MAX_DIFF_INPUT_LINES
+      ? diffLines(oldText, newText)
+      : coarseDiff(oldText, newText);
+  const added = all.filter((l) => l.kind === "add").length;
+  const removed = all.filter((l) => l.kind === "del").length;
+  const truncated = all.length > MAX_DIFF_LINES;
+  const kept = truncated ? all.slice(0, MAX_DIFF_LINES) : all;
+  return {
+    file,
+    added,
+    removed,
+    lines: kept.map((l) => ({ kind: l.kind, text: sanitizeToolText(l.text) })),
+    truncated,
+  };
+}
+
+// Derive a structured FileDiff from a mutating file tool's arguments: `edit`
+// diffs oldText→newText for the touched file; `write` treats the written content
+// as additions (the prior content is unknown to the tool). Returns undefined for
+// non-file tools, missing paths, or no-op edits.
+export function deriveFileDiff(name: string, args: Record<string, unknown>): FileDiff | undefined {
+  const file = typeof args.path === "string" && args.path !== "" ? args.path : undefined;
+  if (!file) return undefined;
+  if (name === "edit") {
+    const oldText = typeof args.oldText === "string" ? args.oldText : "";
+    const newText = typeof args.newText === "string" ? args.newText : "";
+    if (oldText === newText) return undefined;
+    return buildFileDiff(file, oldText, newText);
+  }
+  if (name === "write") {
+    const content = typeof args.content === "string" ? args.content : "";
+    if (content === "") return undefined;
+    return buildFileDiff(file, "", content);
+  }
+  return undefined;
+}
+
+// Collapsed diff summary line naming the affected file and change magnitude so the
+// user can gauge the change before expanding (criterion 1).
+export function diffStatLine(diff: FileDiff): string {
+  return `${diff.file}  +${diff.added} -${diff.removed}`;
+}
+
+// ASCII prefix per diff-line kind: the color-independent cue that distinguishes
+// additions, deletions, and context (criterion 2).
+export function diffLinePrefix(kind: DiffLineKind): string {
+  if (kind === "add") return "+ ";
+  if (kind === "del") return "- ";
+  return "  ";
+}
+
+// Render a bounded diff body as plain prefixed lines (no color, no clipping) so the
+// renderer can clip and colorize them consistently. The truncation marker names the
+// bound and that the complete redacted change is retained (criterion 5).
+export function renderDiffBody(diff: FileDiff): string[] {
+  const out = diff.lines.map((l) => `${diffLinePrefix(l.kind)}${l.text}`);
+  if (diff.truncated) {
+    out.push(`… [diff truncated to ${MAX_DIFF_LINES} lines; full redacted change retained]`);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Failure inspection (Issue #163, pure)
+// ---------------------------------------------------------------------------
+
+// First non-empty, trimmed line of a block, bounded and sanitized — used as a
+// failure's concise cause (criterion 3).
+function firstMeaningfulLine(text: string, maxLen = MAX_FAILURE_CAUSE_CHARS): string {
+  const line = (text.split("\n").find((l) => l.trim() !== "") ?? "").trim();
+  const clean = sanitizeToolText(line);
+  return clean.length > maxLen ? `${clean.slice(0, maxLen)}…` : clean;
+}
+
+// The action a failing tool was performing, named concisely from its (sanitized)
+// arguments so the summary points at the offending target (criterion 3).
+export function failureAction(name: string, args: Record<string, unknown>): string {
+  const str = (key: string, max = 80): string | undefined => {
+    const v = args[key];
+    if (typeof v !== "string" || v.trim() === "") return undefined;
+    const t = sanitizeToolText(v.trim());
+    return t.length > max ? `${t.slice(0, max)}…` : t;
+  };
+  switch (name) {
+    case "edit":
+    case "write":
+    case "read":
+    case "list": {
+      const p = str("path");
+      return p ? `${name} ${p}` : name;
+    }
+    case "glob": {
+      const p = str("pattern");
+      return p ? `glob ${p}` : "glob";
+    }
+    case "grep": {
+      const p = str("pattern");
+      return p ? `grep ${p}` : "grep";
+    }
+    case "shell": {
+      const c = str("command");
+      return c ? `shell ${c}` : "shell";
+    }
+    default:
+      return name;
+  }
+}
+
+// A safe, deterministic next step inferred from the failure's cause and tool, so
+// the summary tells the user how to proceed before the raw diagnostics
+// (criterion 3).
+export function suggestNextStep(cause: string, name: string): string {
+  const c = cause.toLowerCase();
+  // Permission failures are checked before the (narrower) user-denial match so a
+  // message like "permission denied" is not misread as an approval rejection.
+  if (/permission denied|eacces|eperm/.test(c)) return "check permissions for this path";
+  if (/denied by user/.test(c)) return "approve the action or adjust the request";
+  if (/not unique|appears \d+ times|single occurrence|multiple times/.test(c))
+    return "narrow oldText to a unique, exact match";
+  if (/no such file|not found|enoent/.test(c)) {
+    if (name === "shell") return "verify the command exists and is on PATH";
+    return "check the path and retry";
+  }
+  if (/timed out|timeout/.test(c)) return "narrow the operation's scope or raise the timeout";
+  return "review the diagnostic and retry";
+}
+
+// Derive a structured failure summary from a tool error result. Returns undefined
+// for non-error results. Every field is sanitized and the cause is bounded to one
+// line (criterion 3).
+export function deriveFailure(
+  name: string,
+  args: Record<string, unknown>,
+  result: { content: string; isError?: boolean },
+): FailureDetail | undefined {
+  if (!result.isError) return undefined;
+  const cause = firstMeaningfulLine(result.content) || "tool reported an error";
+  return {
+    cause,
+    action: failureAction(name, args),
+    nextStep: suggestNextStep(cause, name),
+  };
+}
+
+// Collapsed failure summary lines: cause, affected action, and safe next step,
+// shown before the verbose diagnostics (criterion 3).
+export function renderFailureSummary(failure: FailureDetail): string[] {
+  return [`cause: ${failure.cause}`, `action: ${failure.action}`, `next: ${failure.nextStep}`];
+}
+
+// Expand-marker label for a tool operation, naming what disclosure reveals so the
+// collapsed row tells the user what they will get (Issue #163).
+export function toolExpandMarker(op: ToolOperation): string {
+  if (op.diff && op.failure) return "… [expand for diff and diagnostics]";
+  if (op.diff) return "… [expand for diff]";
+  if (op.failure) return "… [expand for diagnostics]";
+  return "… [expand for input/output]";
+}
+
+// Color tone for a rendered diff body line, chosen by its ASCII prefix. Color is a
+// bonus cue only; the prefix already carries the distinction (criterion 2), so a
+// no-color style returns "" for every line.
+function diffBodyTone(line: string, style: ShellStyle): string {
+  if (line.startsWith("+ ")) return style.success;
+  if (line.startsWith("- ")) return style.bold;
+  return style.dim;
 }
 
 // ---------------------------------------------------------------------------
@@ -887,20 +1181,47 @@ export function flattenTranscript(
   const lines: string[] = [];
   entries.forEach((entry, index) => {
     if (index > 0) lines.push(""); // rhythm between blocks
+    // Record where this entry's block begins (its summary/header line) so callers
+    // can anchor scroll position to a specific event (Issue #163, criterion 4).
+    opts.startLines?.push(lines.length);
     // Structured tool operation: a compact durable summary row with progressive
-    // disclosure (Issue #162). Collapsed shows the summary plus an expand marker
-    // when there is hidden detail; expanded reveals sanitized input/output/
-    // duration/receipt.
+    // disclosure (Issue #162). Collapsed shows the summary, a diff's file +
+    // magnitude (Issue #163, criterion 1), and a failure's cause/action/next-step
+    // (criterion 3) before an expand marker; expanded reveals the bounded
+    // input/output/duration/receipt plus the diff body with +/-/context markers
+    // (criteria 2, 3, 5).
     if (entry.tool) {
+      const op = entry.tool;
       const tone = entryTone(entry.kind, style);
-      lines.push(`${tone}${clipLine(toolSummaryLine(entry.tool), cols)}${style.reset}`);
-      if (toolOpHasDetail(entry.tool)) {
+      lines.push(`${tone}${clipLine(toolSummaryLine(op), cols)}${style.reset}`);
+      // Diff magnitude is shown collapsed so the change is gauged before expansion.
+      if (op.diff) {
+        const stat = clipLine(diffStatLine(op.diff), bodyWidth);
+        lines.push(`${style.dim}${TRANSCRIPT_INDENT}${stat}${style.reset}`);
+      }
+      // Failure summary is shown collapsed so cause/action/next-step precede the
+      // verbose diagnostics (criterion 3).
+      if (op.failure) {
+        for (const fl of renderFailureSummary(op.failure)) {
+          lines.push(`${style.dim}${TRANSCRIPT_INDENT}${clipLine(fl, bodyWidth)}${style.reset}`);
+        }
+      }
+      if (toolOpHasDetail(op)) {
         if (expanded.has(index)) {
-          for (const dl of toolDetailLines(entry.tool)) {
+          for (const dl of toolDetailLines(op)) {
             for (const w of wrapText(dl, bodyWidth)) lines.push(TRANSCRIPT_INDENT + w);
           }
+          // Diff body: clipped (code-like, not wrapped) and colorized by prefix;
+          // the +/-/space prefix carries the add/del/context distinction without
+          // relying on color (criterion 2).
+          if (op.diff) {
+            for (const bl of renderDiffBody(op.diff)) {
+              const dt = diffBodyTone(bl, style);
+              lines.push(`${dt}${TRANSCRIPT_INDENT}${clipLine(bl, bodyWidth)}${style.reset}`);
+            }
+          }
         } else {
-          const marker = clipLine("… [expand for input/output]", bodyWidth);
+          const marker = clipLine(toolExpandMarker(op), bodyWidth);
           lines.push(`${style.dim}${TRANSCRIPT_INDENT}${marker}${style.reset}`);
         }
       }
@@ -925,8 +1246,10 @@ export function flattenTranscript(
   return lines;
 }
 
-// Render the transcript region: newest content anchored at the bottom, top-padded
-// with blank rows so the composer stays put regardless of how much has scrolled.
+// Render the transcript region: newest content anchored at the bottom by default,
+// top-padded with blank rows so the composer stays put. `opts.scroll` lifts the
+// window up from the bottom (0 = pinned to newest) so earlier content is
+// inspectable; it is clamped so the window never runs past the top.
 export function renderTranscript(
   entries: TranscriptEntry[],
   region: Region,
@@ -936,9 +1259,48 @@ export function renderTranscript(
   const height = Math.max(0, region.end - region.start);
   if (height === 0) return [];
   const flat = flattenTranscript(entries, cols, opts);
-  const visible = flat.slice(Math.max(0, flat.length - height));
+  const maxScroll = Math.max(0, flat.length - height);
+  const scroll = clamp(Math.floor(opts.scroll ?? 0), 0, maxScroll);
+  const end = flat.length - scroll;
+  const start = Math.max(0, end - height);
+  const visible = flat.slice(start, end);
   while (visible.length < height) visible.unshift("");
   return visible;
+}
+
+// First flattened line index of each transcript entry (its summary/header line),
+// computed with the same options that affect layout (notably `expanded`). Used to
+// anchor scroll position to a specific event across expand/collapse (Issue #163).
+export function entryStartLines(
+  entries: TranscriptEntry[],
+  cols: number,
+  opts: TranscriptRenderOptions = {},
+): number[] {
+  const startLines: number[] = [];
+  flattenTranscript(entries, cols, { ...opts, startLines });
+  return startLines;
+}
+
+// Scroll offset (lines up from the bottom) that keeps a selected event's first
+// line at the same viewport row after the transcript changes — e.g. an
+// expand/collapse — so opening/closing details never displaces the content the
+// user was looking at (Issue #163, criterion 4). The result is clamped to the
+// scrollable range for the after-state.
+export function scrollToKeepAnchor(params: {
+  flatLenBefore: number;
+  flatLenAfter: number;
+  anchorBefore: number;
+  anchorAfter: number;
+  scrollBefore: number;
+  height: number;
+}): number {
+  const { flatLenBefore, flatLenAfter, anchorBefore, anchorAfter, scrollBefore, height } = params;
+  // The anchor's viewport row is anchorLine - topIndex, where the window's top
+  // index is flatLen - scroll - height. Holding that row constant across the
+  // change solves to: scrollAfter = scrollBefore + ΔflatLen - ΔanchorLine.
+  const raw = scrollBefore + (flatLenAfter - flatLenBefore) - (anchorAfter - anchorBefore);
+  const maxScroll = Math.max(0, flatLenAfter - height);
+  return clamp(Math.floor(raw), 0, maxScroll);
 }
 
 function renderRule(label: string, cols: number, style: ShellStyle): string {
@@ -1013,6 +1375,7 @@ export function composeScreen(state: ShellState): ComposedScreen {
       ? renderEmptyTranscript(layout.transcript, layout.viewport.cols, style)
       : renderTranscript(state.transcript, layout.transcript, layout.viewport.cols, {
           expanded: state.expanded,
+          scroll: state.scroll,
           style,
         });
   const composerLines = renderComposer(state.composer, layout, style, { turn: state.turn });
@@ -1112,8 +1475,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   // In-flight tool operations keyed by tool-call id, so each operation updates
   // its own durable summary row in place (start → result) even when tools repeat
   // or nest within a round (Issue #162, criterion 4). The start time backs the
-  // duration when the tool does not report elapsedMs itself.
-  const runningTools = new Map<string, { index: number; start: number }>();
+  // duration when the tool does not report elapsedMs itself; the parsed args back
+  // the structured diff/failure derived when the result arrives (Issue #163).
+  const runningTools = new Map<
+    string,
+    { index: number; start: number; args?: Record<string, unknown> }
+  >();
 
   // Resume from the persisted conversation: restore prior user/assistant/tool
   // messages as durable transcript blocks (redacted) so a reconnect shows the
@@ -1153,6 +1520,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     color: opts.color,
     turn: { phase: "idle" },
     expanded,
+    scroll: 0,
     hintsLearned: history.entries.length > 0,
   };
 
@@ -1265,26 +1633,74 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     scheduleRender();
   }
 
-  // Toggle full-height display of the most recent block whose body overflows the
-  // preview, so a long tool result or answer can be inspected on demand. A no-op
-  // when nothing is collapsible.
-  function toggleExpandLatest(): void {
+  // Height of the transcript region for the current viewport/composer, used to
+  // bound scrolling and to anchor the view across expand/collapse.
+  function transcriptHeight(): number {
+    const composerRows = composerTotalRows(state.composer.text);
+    return computeLayout(state.viewport, { composerRows }).transcriptRows;
+  }
+
+  function flattenedLen(): number {
+    return flattenTranscript(state.transcript, state.viewport.cols, { expanded }).length;
+  }
+
+  // The newest expandable transcript block currently within the window: the last
+  // entry whose block starts above the window's bottom edge. At the bottom
+  // (scroll 0) this is simply the latest expandable block, preserving the prior
+  // one-keystroke inspect behavior; scrolled up, it is the newest block on screen.
+  function selectedExpandableIndex(startLines: number[], windowBottom: number): number {
     const bodyWidth = Math.max(1, state.viewport.cols - Array.from(TRANSCRIPT_INDENT).length);
     for (let i = state.transcript.length - 1; i >= 0; i--) {
       const entry = state.transcript[i];
       if (entry.kind === "streaming") continue; // live turn is never collapsed
-      // A tool operation is expandable when it has hidden detail to disclose; a
-      // flat block is expandable when its body overflows the preview.
+      if ((startLines[i] ?? 0) >= windowBottom) continue; // starts below the window
       const expandable = entry.tool
         ? toolOpHasDetail(entry.tool)
         : wrapText(entry.text, bodyWidth).length > TRANSCRIPT_PREVIEW_LINES;
-      if (expandable) {
-        if (expanded.has(i)) expanded.delete(i);
-        else expanded.add(i);
-        scheduleRender();
-        return;
-      }
+      if (expandable) return i;
     }
+    return -1;
+  }
+
+  // Toggle full-height display of the selected expandable block (the newest one on
+  // screen) and recompute the scroll offset so that block's first line stays put —
+  // opening/closing details never displaces the content being inspected
+  // (Issue #163, criterion 4). A no-op when nothing is collapsible.
+  function toggleExpandSelected(): void {
+    const height = transcriptHeight();
+    if (height <= 0) return;
+    const cols = state.viewport.cols;
+    const flatLenBefore = flattenedLen();
+    const scrollBefore = clamp(state.scroll ?? 0, 0, Math.max(0, flatLenBefore - height));
+    const windowBottom = flatLenBefore - scrollBefore;
+    const beforeStarts = entryStartLines(state.transcript, cols, { expanded });
+    const sel = selectedExpandableIndex(beforeStarts, windowBottom);
+    if (sel < 0) return;
+    const anchorBefore = beforeStarts[sel] ?? 0;
+    if (expanded.has(sel)) expanded.delete(sel);
+    else expanded.add(sel);
+    const afterStarts = entryStartLines(state.transcript, cols, { expanded });
+    const flatLenAfter = flattenedLen();
+    const anchorAfter = afterStarts[sel] ?? 0;
+    state.scroll = scrollToKeepAnchor({
+      flatLenBefore,
+      flatLenAfter,
+      anchorBefore,
+      anchorAfter,
+      scrollBefore,
+      height,
+    });
+    scheduleRender();
+  }
+
+  // Scroll the transcript window up (delta > 0) or down (delta < 0) by lines,
+  // clamped to the scrollable range so the view never runs past either end.
+  function scrollBy(delta: number): void {
+    const height = transcriptHeight();
+    if (height <= 0) return;
+    const maxScroll = Math.max(0, flattenedLen() - height);
+    state.scroll = clamp((state.scroll ?? 0) + delta, 0, maxScroll);
+    scheduleRender();
   }
 
   function createShellSink(generation: number): AgentSink {
@@ -1325,14 +1741,16 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         commitStreaming(o.final, text);
         scheduleRender();
       },
-      toolStart: ({ id, name, round }) => {
+      toolStart: ({ id, name, round, args }) => {
         if (!mine()) return;
         // The running tool is shown in place via the turn indicator AND as a
         // compact durable summary row (Issue #162). The row starts "running" and
         // is updated in place on toolResult, so each tool is one row rather than a
-        // flood; attribution follows the agent round (criterion 4).
+        // flood; attribution follows the agent round (criterion 4). The parsed
+        // args are stashed so the result can derive a structured diff/failure
+        // (Issue #163).
         state.turn = advanceTurn(state.turn, { type: "tool-start", name });
-        runningTools.set(id, { index: state.transcript.length, start: Date.now() });
+        runningTools.set(id, { index: state.transcript.length, start: Date.now(), args });
         state.transcript.push({
           kind: "tool",
           text: "",
@@ -1362,6 +1780,18 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
           output: (result.content ?? "").replace(/\s+$/, ""),
           durationMs,
         });
+        // Derive structured inspection from the stashed args + result (Issue
+        // #163): a successful file mutation yields a diff; any error yields a
+        // cause/action/next-step summary. Both are bounded and sanitized.
+        const args = tracked?.args ?? {};
+        if (finalState === "succeeded") {
+          const diff = deriveFileDiff(name, args);
+          if (diff) op.diff = diff;
+        }
+        if (result.isError) {
+          const failure = deriveFailure(name, args, result);
+          if (failure) op.failure = failure;
+        }
         const entry: TranscriptEntry = { kind: finalState === "succeeded" ? "tool" : "error", text: "", tool: op };
         if (tracked && state.transcript[tracked.index]?.tool) {
           // Update the running row in place so the tool stays one durable summary.
@@ -1515,6 +1945,8 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     state.composer.mode = "submitting";
     state.turn = advanceTurn(state.turn, { type: "submit" });
     state.transcript.push({ kind: "user", text });
+    // A fresh prompt re-follows the conversation from the bottom.
+    state.scroll = 0;
     // Record the prompt for future recall and reset navigation to a fresh draft;
     // the user has now exercised the send flow, so compress the footer hints.
     history = pushPromptHistory(history, text);
@@ -1628,6 +2060,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       state.transcript = [];
       state.turn = { phase: "idle" };
       expanded.clear();
+      state.scroll = 0;
       scheduleRender();
       return;
     }
@@ -1680,7 +2113,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         paint();
         return;
       } // Ctrl+L redraw
-      if (b === 0x09) return toggleExpandLatest(); // Tab: expand/collapse latest long block
+      if (b === 0x09) return toggleExpandSelected(); // Tab: expand/collapse the selected block in place
       if (b === 0x7f || b === 0x08) return backspace();
       if (b === 0x0d || b === 0x0a) {
         submit();
@@ -1697,6 +2130,11 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // the caret at end-of-input, so recall never hijacks intra-text cursor movement.
     if (s === "\x1b[A" || s === "\x1bOA") return recallPrevious();
     if (s === "\x1b[B" || s === "\x1bOB") return recallNext();
+    // PageUp/PageDown scroll the transcript window without touching the composer,
+    // so earlier diffs/failures can be inspected in context (Issue #163). PageUp
+    // lifts the view up (toward older content); PageDown returns toward the newest.
+    if (s === "\x1b[5~") return scrollBy(transcriptHeight());
+    if (s === "\x1b[6~") return scrollBy(-transcriptHeight());
     // Left/Right and other cursor/edit sequences remain no-ops (caret stays at
     // end-of-input in this slice).
     if (

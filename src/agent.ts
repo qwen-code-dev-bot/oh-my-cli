@@ -82,7 +82,10 @@ export interface AgentCompaction {
 export interface AgentSink {
   assistantDelta(delta: string): void;
   assistantTurn(text: string, round: number, opts: { final: boolean }): void;
-  toolStart(info: { id: string; name: string; round: number }): void;
+  // `args` carries the tool's parsed arguments so a sink can render structured
+  // detail (e.g. a file diff) without re-parsing; optional so existing sinks are
+  // unaffected.
+  toolStart(info: { id: string; name: string; round: number; args?: Record<string, unknown> }): void;
   toolResult(info: { id: string; name: string; result: ToolResult; round: number }): void;
   providerError(message: string): void;
   // Cumulative token usage and cost estimate, reported once per round.
@@ -378,7 +381,16 @@ export async function runAgent(
 
     // Execute each tool call
     for (const tc of assistantToolCalls) {
-      sink.toolStart({ id: tc.id, name: tc.name, round });
+      // Parse the arguments once so the sink can render structured detail (e.g. a
+      // file diff); a malformed payload degrades to no args rather than throwing.
+      let parsedArgs: Record<string, unknown> = {};
+      try {
+        const p = JSON.parse(tc.arguments);
+        if (p && typeof p === "object") parsedArgs = p as Record<string, unknown>;
+      } catch {
+        /* leave parsedArgs empty */
+      }
+      sink.toolStart({ id: tc.id, name: tc.name, round, args: parsedArgs });
       const result = await executeToolCall(
         tc,
         toolMap,
