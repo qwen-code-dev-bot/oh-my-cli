@@ -2,12 +2,20 @@
 // for a workspace, composing the trust and extension primitives the secure-
 // extensibility roadmap (Issue #34) already delivered — folder trust and sandbox
 // isolation (folder-trust.ts), approval modes (approval.ts), the sandbox
-// diagnostic (sandbox-diag.ts), and extension discovery (extension-discovery.ts,
-// Issue #122). Before running unattended or delegating mutating work, an operator
+// diagnostic (sandbox-diag.ts), extension discovery (extension-discovery.ts,
+// Issue #122), and the extension-compatibility verdict (extension-compat.ts,
+// Issue #155). Before running unattended or delegating mutating work, an operator
 // (or a machine consumer) can ask a single question — "is this run confined the
 // way I expect, and what will it be allowed to do?" — instead of running
-// --trust-info, --sandbox-info, and --discover-extensions separately and stitching
-// the answers by hand.
+// --trust-info, --sandbox-info, --discover-extensions, and --extension-compat
+// separately and stitching the answers by hand.
+//
+// The extension section therefore reports BOTH readiness (is each surface
+// declared and ready?) and version compatibility (is each surface's declared
+// contract version supported by THIS build?) in one redacted view. The
+// compatibility verdict is additive and sourced from extension-compat.ts, so an
+// unsupported version is surfaced as a per-surface `incompatible` verdict up
+// front instead of a fail-closed error mid-run — without a second query.
 //
 // Trust boundary: this is a read-only composition. It never mutates the trust
 // store or settings, never changes confinement, and never widens the boundary —
@@ -24,6 +32,8 @@ import { collectSandboxDiagnostic } from "./sandbox-diag.js";
 import { needsApproval } from "./approval.js";
 import type { ApprovalMode, ToolCategory } from "./approval.js";
 import { collectExtensionDiscovery } from "./extension-discovery.js";
+import { collectExtensionCompat } from "./extension-compat.js";
+import type { CompatSurface } from "./extension-compat.js";
 import type { McpLifecycleState } from "./mcp-contract.js";
 import type { ToolReadinessState } from "./tool-contract.js";
 import type { WorkflowReadinessState } from "./workflow-contract.js";
@@ -87,6 +97,15 @@ export interface TrustPostureReport {
   extensions: {
     settingsFound: boolean;
     surfaces: PostureExtensionSurface[];
+    // Per-surface contract-version compatibility verdicts (compatible /
+    // incompatible / absent), composed from the extension-compatibility surface
+    // (extension-compat.ts, Issue #155) so the supported-version matrix has a
+    // single source of truth and cannot drift from #155 or the parsers. This is
+    // additive to the readiness `surfaces` above and keyed by the same `kind`:
+    // an unsupported version is reported here as an `incompatible` verdict even
+    // when readiness resolution fails closed. Empty only when the settings root
+    // is malformed (the captured `error` explains why).
+    compat: CompatSurface[];
     // Set when the settings file exists but an extension contract is invalid;
     // the audit surfaces the problem instead of failing (it is not a gate).
     error?: string;
@@ -138,12 +157,31 @@ export function collectTrustPosture(opts: CollectTrustPostureOptions): TrustPost
         selectedId: surface.selectedId ?? null,
         state: surface.state ?? null,
       })),
+      // Discovery succeeded ⇒ the settings root is a valid object, so the
+      // compatibility verdict (which reads only each section's contractVersion)
+      // cannot throw here. Compose it so the posture reports version
+      // compatibility alongside readiness, sourced from extension-compat.ts.
+      compat: collectExtensionCompat({ settingsPath: opts.settingsPath }).surfaces,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // Readiness resolution failed closed (an unsupported version, a raw
+    // credential field, or a malformed section). The version-compatibility
+    // verdict is independent of readiness: when the settings root is still
+    // readable, compose it so an unsupported version is reported as a
+    // per-surface `incompatible` verdict rather than only a readiness error. A
+    // malformed root makes the compat read fail too, so the verdict list stays
+    // empty and the captured error explains why.
+    let compat: CompatSurface[] = [];
+    try {
+      compat = collectExtensionCompat({ settingsPath: opts.settingsPath }).surfaces;
+    } catch {
+      // malformed settings root: the readiness error above already explains it
+    }
     extensions = {
       settingsFound: true,
       surfaces: [],
+      compat,
       error: redactSecrets(message).text,
     };
   }
@@ -235,7 +273,49 @@ export function formatTrustPosture(report: TrustPostureReport): string {
       }
     }
   }
+  // Version-compatibility verdicts (composed from extension-compat.ts): for each
+  // surface, the supported range, the declared version, and whether THIS build
+  // supports it. Additive to readiness, so an unsupported version is visible as
+  // an `incompatible` verdict even when readiness resolution failed closed above.
+  lines.push("");
+  lines.push("Extension compatibility");
+  if (report.extensions.compat.length === 0) {
+    lines.push("  (not available — settings root could not be read)");
+  } else {
+    const compatLabels: Record<CompatSurface["kind"], string> = {
+      provider: "Provider",
+      mcp: "MCP",
+      tool: "Tool",
+      workflow: "Workflow",
+    };
+    for (const surface of report.extensions.compat) {
+      const label = compatLabels[surface.kind];
+      if (surface.verdict === "absent") {
+        lines.push(`  ${label}:   absent`);
+      } else {
+        lines.push(
+          `  ${label}:   ${surface.verdict} (declared ${
+            surface.declaredVersion !== null ? surface.declaredVersion : "(invalid)"
+          }, supported ${formatCompatRange(surface.supportedVersions)})`,
+        );
+      }
+    }
+  }
   return lines.join("\n");
+}
+
+// Render a supported-version range compactly for the posture's compatibility
+// section: a single version as itself ("1"), a contiguous span as "min–max", a
+// non-contiguous set as a comma list. Display only — the range itself is sourced
+// from extension-compat.ts.
+function formatCompatRange(versions: readonly number[]): string {
+  if (versions.length === 0) return "(none)";
+  const sorted = [...versions].sort((a, b) => a - b);
+  const min = sorted[0];
+  const max = sorted[sorted.length - 1];
+  if (min === max) return `${min}`;
+  const contiguous = sorted.every((v, i) => i === 0 || v === sorted[i - 1] + 1);
+  return contiguous ? `${min}–${max}` : sorted.join(", ");
 }
 
 function mutationLine(folderTrust: TrustPostureReport["folderTrust"]): string {

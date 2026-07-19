@@ -8,6 +8,7 @@ import {
   collectTrustPosture,
   formatTrustPosture,
 } from "../../src/trust-posture.js";
+import { collectExtensionCompat } from "../../src/extension-compat.js";
 
 const tmpDirs: string[] = [];
 
@@ -278,6 +279,91 @@ describe("collectTrustPosture: extension readiness", () => {
   });
 });
 
+describe("collectTrustPosture: extension compatibility verdict", () => {
+  it("reports a compatible verdict for a supported contract version", () => {
+    const settings = writeSettings({ mcp: MCP_READY });
+    const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    const mcp = report.extensions.compat.find((s) => s.kind === "mcp")!;
+    expect(mcp.verdict).toBe("compatible");
+    expect(mcp.declaredVersion).toBe(1);
+    expect(mcp.supportedVersions).toEqual([1]);
+  });
+
+  it("reports a verdict for all four surfaces, in roadmap order", () => {
+    const settings = writeSettings({ mcp: MCP_READY });
+    const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    expect(report.extensions.compat.map((s) => s.kind)).toEqual([
+      "provider",
+      "tool",
+      "mcp",
+      "workflow",
+    ]);
+  });
+
+  it("reports an absent verdict (null declared version) for an undeclared surface", () => {
+    const settings = writeSettings({ providers: PROVIDER_SECTION });
+    const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    const mcp = report.extensions.compat.find((s) => s.kind === "mcp")!;
+    const provider = report.extensions.compat.find((s) => s.kind === "provider")!;
+    expect(mcp.verdict).toBe("absent");
+    expect(mcp.declaredVersion).toBeNull();
+    expect(provider.verdict).toBe("compatible");
+  });
+
+  it("reports an unsupported version as an incompatible verdict without throwing", () => {
+    const settings = writeSettings({
+      mcp: { contractVersion: 99, entries: [{ id: "a", command: "node" }] },
+    });
+    let report;
+    expect(() => {
+      report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    }).not.toThrow();
+    // The verdict names both the declared and the supported versions.
+    const mcp = report!.extensions.compat.find((s) => s.kind === "mcp")!;
+    expect(mcp.verdict).toBe("incompatible");
+    expect(mcp.declaredVersion).toBe(99);
+    expect(mcp.supportedVersions).toEqual([1]);
+    // Readiness still fails closed and is surfaced as the audit error.
+    expect(report!.extensions.error).toMatch(/not supported/);
+  });
+
+  it("sources the verdict from extension-compat (single source of truth)", () => {
+    const settings = writeSettings({ mcp: MCP_READY, providers: PROVIDER_SECTION });
+    const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    const standalone = collectExtensionCompat({ settingsPath: settings });
+    expect(report.extensions.compat).toEqual(standalone.surfaces);
+  });
+
+  it("reports every verdict absent (no error) when the settings file is missing", () => {
+    const report = collectTrustPosture({
+      workspacePath: workspace,
+      env: {},
+      settingsPath: missingSettings(),
+    });
+    expect(report.extensions.error).toBeUndefined();
+    expect(report.extensions.compat.every((s) => s.verdict === "absent")).toBe(true);
+  });
+
+  it("reports no verdicts and an error on a malformed settings root", () => {
+    const settings = writeRawSettings("{ not json");
+    const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    expect(report.extensions.error).toMatch(/invalid JSON/);
+    expect(report.extensions.compat).toEqual([]);
+  });
+
+  it("never leaks argument values through the compatibility verdict", () => {
+    const settings = writeSettings({
+      mcp: {
+        contractVersion: 99,
+        entries: [{ id: "fs", command: NODE_BIN, args: ["--token", "should-not-appear"] }],
+      },
+    });
+    const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    const json = JSON.stringify(report.extensions.compat);
+    expect(json).not.toContain("should-not-appear");
+  });
+});
+
 describe("collectTrustPosture: invalid contract surfaces as a warning, not a throw", () => {
   it("captures an invalid MCP contract as a redacted error and still reports", () => {
     const settings = writeSettings({
@@ -369,5 +455,49 @@ describe("formatTrustPosture", () => {
     const out = formatTrustPosture(report);
     expect(out).toContain("Workflow:   ready");
     expect(out).not.toContain("should-not-appear");
+  });
+
+  it("renders the extension compatibility section with a compatible verdict", () => {
+    const settings = writeSettings({ mcp: MCP_READY });
+    const report = collectTrustPosture({
+      workspacePath: workspace,
+      env: {},
+      settingsPath: settings,
+      trustThisRun: true,
+    });
+    const out = formatTrustPosture(report);
+    expect(out).toContain("Extension compatibility");
+    expect(out).toContain("MCP:   compatible (declared 1, supported 1)");
+    expect(out).not.toContain("should-not-appear");
+  });
+
+  it("renders an unsupported version as an incompatible verdict alongside the warning", () => {
+    const settings = writeSettings({
+      mcp: { contractVersion: 99, entries: [{ id: "a", command: "node" }] },
+    });
+    const out = formatTrustPosture(
+      collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings }),
+    );
+    // The readiness audit still surfaces the unsupported version as a warning...
+    expect(out).toContain("Invalid:");
+    // ...and the compatibility section reports it as a per-surface verdict.
+    expect(out).toContain("MCP:   incompatible (declared 99, supported 1)");
+  });
+
+  it("renders an absent verdict for an undeclared surface", () => {
+    const settings = writeSettings({ providers: PROVIDER_SECTION });
+    const out = formatTrustPosture(
+      collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings }),
+    );
+    expect(out).toContain("MCP:   absent");
+  });
+
+  it("renders the compatibility section as unavailable on a malformed root", () => {
+    const settings = writeRawSettings("{ not json");
+    const out = formatTrustPosture(
+      collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings }),
+    );
+    expect(out).toContain("Extension compatibility");
+    expect(out).toContain("not available");
   });
 });
