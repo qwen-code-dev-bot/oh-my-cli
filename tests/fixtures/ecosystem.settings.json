@@ -1,0 +1,44 @@
+{
+  "providers": {
+    "contractVersion": 1,
+    "entries": [
+      {
+        "id": "assistant",
+        "baseUrl": "http://127.0.0.1:8080/v1",
+        "model": "dogfood-model",
+        "apiKeyEnv": "OMC_DOGFOOD_KEY"
+      }
+    ]
+  },
+  "tools": {
+    "contractVersion": 1,
+    "entries": [
+      {
+        "id": "echo-tool",
+        "command": "node",
+        "args": ["-e", "process.stdout.write('tool composed ok')"]
+      }
+    ]
+  },
+  "mcp": {
+    "contractVersion": 1,
+    "entries": [
+      {
+        "id": "echo-server",
+        "command": "node",
+        "args": ["tests/fixtures/mcp-stdio-server.mjs", "--mode", "echo"]
+      }
+    ]
+  },
+  "workflows": {
+    "contractVersion": 1,
+    "definitions": {
+      "daily-standup": {
+        "description": "Compose provider, tool, and MCP evidence in one governed run",
+        "steps": [
+          { "prompt": "Summarize the workspace state for the daily standup" }
+        ]
+      }
+    }
+  }
+}
