@@ -235,6 +235,32 @@ export function selectWorkflowDefinition(
   return found;
 }
 
+// The readiness state of a declared workflow contract. A workflow has no external
+// entrypoint to probe — its steps are bounded prompts fed through the headless
+// `-p` path (workflow-runner.ts) — so a contract that negotiates and validates is
+// immediately resolvable by the runner. Discovery never executes a workflow, so
+// the only present readiness state is "ready"; a malformed contract fails closed
+// in parseWorkflowContract rather than resolving to a not-ready state.
+export type WorkflowReadinessState = "ready";
+
+export interface WorkflowReadiness {
+  state: WorkflowReadinessState;
+  reason: string;
+}
+
+// Resolve the readiness of the declared workflow contract. Unlike the tool and MCP
+// contracts (which probe a command), a workflow's readiness is fully decided by
+// successful contract negotiation: every definition has at least one step and no
+// external dependency to resolve. Never throws — the contract is already validated
+// by parseWorkflowContract before this is called.
+export function resolveWorkflowReadiness(contract: WorkflowContract): WorkflowReadiness {
+  const count = contract.definitions.length;
+  return {
+    state: "ready",
+    reason: `${count} workflow definition${count === 1 ? "" : "s"} resolvable`,
+  };
+}
+
 export interface ResolvedWorkflow {
   contractVersion: number;
   definition: WorkflowDefinition;

@@ -178,7 +178,7 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--tool <id>` | Tool id to select for `--tool-contract` / `--invoke-tool` (defaults to `settings.tools.default` or the sole entry) |
 | `--invoke-tool` | Invoke the resolved-`ready` tool extension from settings once, gated by approval mode and command policy, confined and redacted, and exit |
 | `--invoke-timeout <ms>` | Hard timeout in milliseconds for `--invoke-tool` / `--invoke-mcp` / `--invoke-provider` (default `30000`, max `300000`) |
-| `--discover-extensions` | Discover the declared provider, MCP, and tool extension contracts and readiness from settings (read-only, redacted) and exit |
+| `--discover-extensions` | Discover the declared provider, MCP, tool, and workflow extension contracts and readiness from settings (read-only, redacted) and exit |
 | `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` / `--tool-contract` / `--discover-extensions` / `--trust-posture` and report the declared state |
 | `--list-workflows` | List the reusable workflows declared in user settings (read-only, redacted) and exit |
 | `--run-workflow <name>` | Run a named workflow from user settings non-interactively (sequential headless steps; a failing step halts) and exit |
@@ -297,9 +297,9 @@ diagnostic (always exit `0`), not a gate.
 **Trust posture.** Before running unattended or delegating mutating work,
 `--trust-posture` composes the folder-trust decision, sandbox isolation, approval
 mode, and extension readiness (`--discover-extensions`, spanning the provider,
-MCP, and tool contracts) into one redacted, read-only view — answering "is this
-run confined the way I expect, and what will it be allowed to do?" without
-running each diagnostic separately.
+MCP, tool, and workflow contracts) into one redacted, read-only view — answering
+"is this run confined the way I expect, and what will it be allowed to do?"
+without running each diagnostic separately.
 
 ```bash
 oh-my-cli --trust-posture --workspace path/to/repo
@@ -1394,14 +1394,18 @@ tool-level error, or a spawn error) — the run never crashes.
 
 ### Extension discovery
 
-Once providers (`--provider-contract`), MCP servers (`--mcp-contract`), and tools
-(`--tool-contract`) are declared as versioned contracts, `--discover-extensions`
-composes all three resolvers into a single read-only, redacted view of which
-extension surfaces are declared and ready — without re-probing every integration
-(`--health`) and without changing core code. It reads the same unified settings
-file and reports, per surface, the negotiated contract version, declared entry
-count, default, and the entry a consumer would select (plus the MCP and tool
-selected entries' lifecycle/readiness state).
+Once providers (`--provider-contract`), MCP servers (`--mcp-contract`), tools
+(`--tool-contract`), and workflows (`--list-workflows`) are declared as versioned
+contracts, `--discover-extensions` composes all four resolvers into a single
+read-only, redacted view of which extension surfaces are declared and ready —
+without re-probing every integration (`--health`) and without changing core code.
+It reads the same unified settings file and reports, per surface, the negotiated
+contract version, declared entry count, default, and the entry a consumer would
+select (plus the MCP and tool selected entries' lifecycle/readiness state). A
+workflow has no default and no external entrypoint to probe — it is selected by
+explicit name at run time — so the workflow surface reports only the definition
+count and the contract-level readiness (`ready` whenever the contract negotiates
+and validates).
 
 ```bash
 oh-my-cli --discover-extensions
@@ -1439,13 +1443,19 @@ Tool contract: 1 entry (contract version 1)
   Default:  ripgrep
   Selected: ripgrep
   State:    ready [command resolved]
+
+Workflow contract: 1 definition (contract version 1)
+  State:    ready [1 workflow definition resolvable]
 ```
 
 Add `--output json` for a versioned record (`schema`
 `oh-my-cli.extension-discovery`) whose `surfaces` array carries one entry per
-contract (`kind` `provider` / `mcp` / `tool`), each flagged `present`, with its
-`contractVersion`, `entryCount`, `default`, `selectedId`, and — for MCP and tool —
-the resolved `state`, `stateReason`, and `probeMs`.
+contract (`kind` `provider` / `mcp` / `tool` / `workflow`), each flagged
+`present`, with its `contractVersion`, `entryCount`, `default`, `selectedId`, and
+— for MCP and tool — the resolved `state`, `stateReason`, and `probeMs`. The
+`workflow` surface carries `default` and `selectedId` as `null` (workflows are
+selected by explicit name at run time) and reports the contract-level readiness
+`state` with no `probeMs`.
 
 ### Reusable workflows
 
@@ -1594,7 +1604,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/mcp-invocation.ts` — governed, non-interactive connection to one resolved-`ready` MCP server over safe local stdio: initialize handshake, tool listing, and one tool call, gated by readiness, the command trust policy, and approval mode, confined to the workspace, bounded by a hard timeout and output cap, redacted in text and JSON, and fail-closed on every error (`--invoke-mcp`)
 - `src/tool-contract.ts` — versioned, redacted tool extension contract: declare tools in settings, negotiate the contract version, select one, and resolve its readiness state (declared/ready/isolated) with safe failure defaults (`--tool-contract`)
 - `src/tool-invocation.ts` — governed, non-interactive invocation of one resolved-`ready` tool extension through its contract: gated by readiness, the command trust policy, and approval mode, confined to the workspace, bounded by a hard timeout and output cap, redacted in text and JSON, and fail-closed on every error (`--invoke-tool`)
-- `src/extension-discovery.ts` — read-only discovery view composing the provider, MCP, and tool contract resolvers into one redacted report of which extension surfaces are declared and ready, without core changes (`--discover-extensions`)
+- `src/extension-discovery.ts` — read-only discovery view composing the provider, MCP, tool, and workflow contract resolvers into one redacted report of which extension surfaces are declared and ready, without core changes (`--discover-extensions`)
 - `src/workflow-contract.ts` — versioned, redacted workflow contract: declare reusable named workflows (ordered steps) in user settings, negotiate the contract version, select one by name, and list them (`--list-workflows`)
 - `src/workflow-runner.ts` — run a named workflow non-interactively, each step a bounded prompt through the headless `-p` path in its own process; steps run in declared order, a failing step halts the run, and output is redacted in human and machine modes (`--run-workflow`)
 - `src/trust-posture.ts` — read-only posture view composing folder trust, sandbox isolation, approval mode, and extension readiness into one redacted audit of what a run will be allowed to do, without core changes (`--trust-posture`)

@@ -24,6 +24,12 @@ import { MCP_CONTRACT_SCHEMA, parseMcpContract, resolveMcpLifecycle } from "./mc
 import type { McpContract, McpLifecycleState } from "./mcp-contract.js";
 import { TOOL_CONTRACT_SCHEMA, parseToolContract, resolveToolReadiness } from "./tool-contract.js";
 import type { ToolContract, ToolReadinessState } from "./tool-contract.js";
+import {
+  WORKFLOW_CONTRACT_SCHEMA,
+  parseWorkflowContract,
+  resolveWorkflowReadiness,
+} from "./workflow-contract.js";
+import type { WorkflowContract, WorkflowReadinessState } from "./workflow-contract.js";
 
 export const EXTENSION_DISCOVERY_SCHEMA = "oh-my-cli.extension-discovery";
 export const EXTENSION_DISCOVERY_VERSION = 1;
@@ -32,23 +38,26 @@ export const EXTENSION_DISCOVERY_VERSION = 1;
 // `present: false`. A present surface reports its negotiated contract version,
 // declared entry count, and default/selected entry id; the MCP and tool surfaces
 // also report the selected entry's lifecycle/readiness state (composed from
-// mcp-contract.ts and tool-contract.ts respectively).
+// mcp-contract.ts and tool-contract.ts respectively). The workflow surface reports
+// the contract-level readiness (workflow-contract.ts): a workflow has no external
+// entrypoint and no implicit selection, so it carries no default/selected id and
+// is "ready" whenever the contract negotiates and validates.
 export interface DiscoverySurface {
-  kind: "provider" | "mcp" | "tool";
+  kind: "provider" | "mcp" | "tool" | "workflow";
   present: boolean;
   schema?: string;
   contractVersion?: number;
   entryCount?: number;
   default?: string | null;
   selectedId?: string | null;
-  state?: McpLifecycleState | ToolReadinessState | null;
+  state?: McpLifecycleState | ToolReadinessState | WorkflowReadinessState | null;
   stateReason?: string | null;
   probeMs?: number | null;
 }
 
 // The redacted, serializable discovery report: the settings source plus the
-// provider and MCP surfaces (always both present in the array, each flagged
-// present/absent).
+// provider, MCP, tool, and workflow surfaces (always all present in the array,
+// each flagged present/absent).
 export interface ExtensionDiscoveryReport {
   schema: string;
   version: number;
@@ -160,12 +169,34 @@ function buildToolSurface(contract: ToolContract, probe: boolean): DiscoverySurf
   return surface;
 }
 
+// A workflow has no default and no external entrypoint to probe: it is selected by
+// explicit name at run time, and a contract that negotiates and validates is
+// immediately resolvable by the runner. The surface therefore reports the contract
+// version, definition count, and contract-level readiness ("ready") — no
+// default/selected id and no probe timing. `probe` is intentionally ignored.
+function buildWorkflowSurface(contract: WorkflowContract): DiscoverySurface {
+  const readiness = resolveWorkflowReadiness(contract);
+  return {
+    kind: "workflow",
+    present: true,
+    schema: WORKFLOW_CONTRACT_SCHEMA,
+    contractVersion: contract.contractVersion,
+    entryCount: contract.definitions.length,
+    default: null,
+    selectedId: null,
+    state: readiness.state,
+    stateReason: readiness.reason,
+    probeMs: null,
+  };
+}
+
 // Discover the declared extension surfaces from the user settings file. Composes
-// the provider (#118), MCP (#120), and tool (#135) contract parsers: a present
-// section is validated (fail closed on an invalid contract) and summarized; an
-// absent section is reported as absent. A missing settings file reports every
-// surface absent and is not an error. `probe: false` reports the MCP and tool
-// selected entries as `declared` without probing.
+// the provider (#118), MCP (#120), tool (#135), and workflow (#143) contract
+// parsers: a present section is validated (fail closed on an invalid contract)
+// and summarized; an absent section is reported as absent. A missing settings
+// file reports every surface absent and is not an error. `probe: false` reports
+// the MCP and tool selected entries as `declared` without probing (the workflow
+// surface is always resolved, since it has nothing to probe).
 export function collectExtensionDiscovery(
   opts: { settingsPath?: string; probe?: boolean } = {},
 ): ExtensionDiscoveryReport {
@@ -183,6 +214,7 @@ export function collectExtensionDiscovery(
         { kind: "provider", present: false },
         { kind: "mcp", present: false },
         { kind: "tool", present: false },
+        { kind: "workflow", present: false },
       ],
     };
   }
@@ -199,13 +231,17 @@ export function collectExtensionDiscovery(
     root.tools !== undefined
       ? buildToolSurface(parseToolContract(root.tools), probe)
       : { kind: "tool" as const, present: false };
+  const workflow =
+    root.workflows !== undefined
+      ? buildWorkflowSurface(parseWorkflowContract(root.workflows))
+      : { kind: "workflow" as const, present: false };
 
   return {
     schema: EXTENSION_DISCOVERY_SCHEMA,
     version: EXTENSION_DISCOVERY_VERSION,
     settings: redactHomePath(settingsPath),
     settingsFound: true,
-    surfaces: [provider, mcp, tool],
+    surfaces: [provider, mcp, tool, workflow],
   };
 }
 
@@ -213,6 +249,12 @@ export function collectExtensionDiscovery(
 // secret redaction defensively; no secret, argument value, or remote response
 // body is ever printed.
 export function formatExtensionDiscovery(report: ExtensionDiscoveryReport): string {
+  const labels: Record<DiscoverySurface["kind"], string> = {
+    provider: "Provider contract",
+    mcp: "MCP contract",
+    tool: "Tool contract",
+    workflow: "Workflow contract",
+  };
   const lines: string[] = [
     "Extension Discovery",
     "─".repeat(40),
@@ -221,27 +263,31 @@ export function formatExtensionDiscovery(report: ExtensionDiscoveryReport): stri
   ];
   for (const surface of report.surfaces) {
     lines.push("");
-    const label =
-      surface.kind === "provider"
-        ? "Provider contract"
-        : surface.kind === "mcp"
-          ? "MCP contract"
-          : "Tool contract";
+    const label = labels[surface.kind];
     if (!surface.present) {
       lines.push(`${label}: not declared`);
       continue;
     }
-    lines.push(
-      `${label}: ${surface.entryCount} entr${surface.entryCount === 1 ? "y" : "ies"} ` +
-        `(contract version ${surface.contractVersion})`,
-    );
-    lines.push(`  Default:  ${surface.default ? redactSecrets(surface.default).text : "(none)"}`);
-    lines.push(
-      `  Selected: ${
-        surface.selectedId ? redactSecrets(surface.selectedId).text : "(ambiguous — set a default)"
-      }`,
-    );
-    if ((surface.kind === "mcp" || surface.kind === "tool") && surface.state) {
+    const count = surface.entryCount ?? 0;
+    const entries =
+      surface.kind === "workflow"
+        ? `${count} definition${count === 1 ? "" : "s"}`
+        : `${count} entr${count === 1 ? "y" : "ies"}`;
+    lines.push(`${label}: ${entries} (contract version ${surface.contractVersion})`);
+    // Workflows are selected by explicit name at run time: they carry no default
+    // and no implicit selection, so only the provider/MCP/tool surfaces report one.
+    if (surface.kind !== "workflow") {
+      lines.push(`  Default:  ${surface.default ? redactSecrets(surface.default).text : "(none)"}`);
+      lines.push(
+        `  Selected: ${
+          surface.selectedId ? redactSecrets(surface.selectedId).text : "(ambiguous — set a default)"
+        }`,
+      );
+    }
+    if (
+      (surface.kind === "mcp" || surface.kind === "tool" || surface.kind === "workflow") &&
+      surface.state
+    ) {
       lines.push(`  State:    ${surface.state} [${redactSecrets(surface.stateReason ?? "").text}]`);
     }
   }

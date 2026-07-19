@@ -56,6 +56,13 @@ const TOOL_SECTION = {
   entries: [{ id: "rg", command: NODE_BIN, args: ["--version", "should-not-appear"] }],
 };
 
+const WORKFLOW_SECTION = {
+  contractVersion: 1,
+  definitions: {
+    "lint-fix": { description: "Lint then fix", steps: [{ prompt: "run the linter" }] },
+  },
+};
+
 let prevHome: string | undefined;
 let home: string;
 let workspace: string;
@@ -253,6 +260,22 @@ describe("collectTrustPosture: extension readiness", () => {
     const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
     expect(report.extensions.surfaces.find((s) => s.kind === "tool")!.state).toBe("isolated");
   });
+
+  it("reports a declared workflow contract resolved to ready, with no selection", () => {
+    const settings = writeSettings({ workflows: WORKFLOW_SECTION });
+    const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    const workflow = report.extensions.surfaces.find((s) => s.kind === "workflow")!;
+    expect(workflow.present).toBe(true);
+    // A workflow is selected by explicit name at run time: no implicit selection.
+    expect(workflow.selectedId).toBeNull();
+    expect(workflow.state).toBe("ready");
+  });
+
+  it("reports an absent workflow surface when only a provider is declared", () => {
+    const settings = writeSettings({ providers: PROVIDER_SECTION });
+    const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    expect(report.extensions.surfaces.find((s) => s.kind === "workflow")!.present).toBe(false);
+  });
 });
 
 describe("collectTrustPosture: invalid contract surfaces as a warning, not a throw", () => {
@@ -337,6 +360,14 @@ describe("formatTrustPosture", () => {
     const out = formatTrustPosture(report);
     expect(out).toContain("Tool:");
     expect(out).toContain("rg — ready");
+    expect(out).not.toContain("should-not-appear");
+  });
+
+  it("renders the workflow surface with its readiness and no selection", () => {
+    const settings = writeSettings({ workflows: WORKFLOW_SECTION });
+    const report = collectTrustPosture({ workspacePath: workspace, env: {}, settingsPath: settings });
+    const out = formatTrustPosture(report);
+    expect(out).toContain("Workflow:   ready");
     expect(out).not.toContain("should-not-appear");
   });
 });
