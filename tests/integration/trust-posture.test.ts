@@ -200,4 +200,57 @@ describe("Integration: trust posture", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("invalid approval mode");
   });
+
+  it("reports a compatible verdict per surface in JSON and exits 0", async () => {
+    const home = homeWith(MCP_READY);
+    const ws = workspaceDir();
+    const r = await runCli(["--trust-posture", "--workspace", ws, "--output", "json"], { HOME: home });
+    expect(r.code).toBe(0);
+    const mcp = JSON.parse(r.stdout).extensions.compat.find(
+      (s: { kind: string }) => s.kind === "mcp",
+    );
+    expect(mcp.verdict).toBe("compatible");
+    expect(mcp.declaredVersion).toBe(1);
+    expect(mcp.supportedVersions).toEqual([1]);
+    expect(r.stdout + r.stderr).not.toContain("should-not-appear");
+  });
+
+  it("reports an unsupported version as an incompatible verdict (exit 0, audit not gate)", async () => {
+    const home = homeWith({
+      mcp: {
+        contractVersion: 99,
+        entries: [{ id: "fs", command: NODE_BIN, args: ["--token", "should-not-appear"] }],
+      },
+    });
+    const ws = workspaceDir();
+    const r = await runCli(["--trust-posture", "--workspace", ws, "--output", "json"], { HOME: home });
+    expect(r.code).toBe(0);
+    const report = JSON.parse(r.stdout);
+    const mcp = report.extensions.compat.find((s: { kind: string }) => s.kind === "mcp");
+    expect(mcp.verdict).toBe("incompatible");
+    expect(mcp.declaredVersion).toBe(99);
+    // Readiness still fails closed and is surfaced as the audit error.
+    expect(report.extensions.error).toMatch(/not supported/);
+    expect(r.stdout + r.stderr).not.toContain("should-not-appear");
+  });
+
+  it("shows the compatibility verdict in the text report", async () => {
+    const home = homeWith(MCP_READY);
+    const ws = workspaceDir();
+    const r = await runCli(["--trust-posture", "--workspace", ws], { HOME: home });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("Extension compatibility");
+    expect(r.stdout).toContain("MCP:   compatible (declared 1, supported 1)");
+    expect(r.stdout).not.toContain("should-not-appear");
+  });
+
+  it("matches the standalone --extension-compat verdict for the same settings", async () => {
+    const home = homeWith(MCP_READY);
+    const ws = workspaceDir();
+    const posture = await runCli(["--trust-posture", "--workspace", ws, "--output", "json"], { HOME: home });
+    const compat = await runCli(["--extension-compat", "--output", "json"], { HOME: home });
+    expect(posture.code).toBe(0);
+    expect(compat.code).toBe(0);
+    expect(JSON.parse(posture.stdout).extensions.compat).toEqual(JSON.parse(compat.stdout).surfaces);
+  });
 });

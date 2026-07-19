@@ -1009,8 +1009,9 @@ program
       }
 
       // Trust-posture mode: compose the folder-trust decision, sandbox isolation,
-      // approval mode, and extension readiness into one redacted, read-only view
-      // (folder-trust.ts + sandbox-diag.ts + approval.ts + extension-discovery.ts).
+      // approval mode, extension readiness, and the extension contract-version
+      // compatibility verdict into one redacted, read-only view (folder-trust.ts +
+      // sandbox-diag.ts + approval.ts + extension-discovery.ts + extension-compat.ts).
       // It is an audit, not a gate: it never mutates the trust store or settings
       // and always exits 0 — even an invalid extension contract is surfaced as a
       // visible warning rather than thrown. Exit 2 only on a usage error.
