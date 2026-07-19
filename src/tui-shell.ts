@@ -13,6 +13,7 @@
 import type { Config } from "./config.js";
 import type { Workspace } from "./workspace.js";
 import type { ApprovalMode } from "./approval.js";
+import { promptApproval } from "./approval.js";
 import type { SessionMessage } from "./session.js";
 import type { AgentSink, AgentUsage, AgentRetry } from "./agent.js";
 import { runAgent } from "./agent.js";
@@ -99,6 +100,45 @@ export interface TranscriptEntry {
   text: string;
 }
 
+// Lifecycle phase of the active turn. The shell shows exactly one of these in
+// place (a single indicator line) so streaming, tool execution, waiting,
+// approval, interruption, failure, and completion are visible without appending
+// a fresh line per state change. `idle` means no turn is in flight (the composer
+// is the only live region); the terminal phases (`completed`/`failed`/
+// `cancelled`) report how the last turn ended until the user engages again.
+export type TurnPhase =
+  | "idle"
+  | "waiting"
+  | "streaming"
+  | "running-tool"
+  | "awaiting-approval"
+  | "interrupting"
+  | "cancelled"
+  | "failed"
+  | "completed";
+
+export interface TurnState {
+  phase: TurnPhase;
+  // Free-form context for the phase (e.g. the tool name while running or
+  // awaiting approval); never a credential or arbitrary tool output.
+  detail?: string;
+}
+
+// Events that drive the turn state machine. Kept explicit and pure so every
+// transition (including the interruption outcomes) is unit-testable without a
+// TTY or a live provider.
+export type TurnEvent =
+  | { type: "submit" }
+  | { type: "stream" }
+  | { type: "tool-start"; name: string }
+  | { type: "approval-request"; name: string }
+  | { type: "tool-result" }
+  | { type: "complete" }
+  | { type: "fail" }
+  | { type: "interrupt" }
+  | { type: "settle" }
+  | { type: "engage" };
+
 export interface ShellState {
   viewport: Viewport;
   version: string;
@@ -106,6 +146,8 @@ export interface ShellState {
   composer: ComposerState;
   status: StatusInfo;
   color: boolean;
+  // Active-turn lifecycle phase, rendered in place by the composer's state rule.
+  turn: TurnState;
   // Indices of transcript blocks the user has expanded to full height; long
   // blocks otherwise collapse to a preview. Optional so pure render callers and
   // tests can omit it (treated as empty).
@@ -294,6 +336,130 @@ export function composerMarker(mode: ComposerMode): ComposerMarker {
     default:
       return { glyph: ">", label: "idle" };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Turn lifecycle (pure)
+// ---------------------------------------------------------------------------
+
+export interface TurnIndicator {
+  glyph: string;
+  label: string;
+}
+
+// Color-independent glyph + label for each turn phase. Every phase has a
+// distinct glyph and a distinct ASCII label so the active state is identifiable
+// without relying on color alone. `idle` returns an empty indicator (nothing is
+// rendered in place when no turn is in flight).
+export function turnIndicator(phase: TurnPhase): TurnIndicator {
+  switch (phase) {
+    case "waiting":
+      return { glyph: "↻", label: "waiting" };
+    case "streaming":
+      return { glyph: "✦", label: "streaming" };
+    case "running-tool":
+      return { glyph: "●", label: "running tool" };
+    case "awaiting-approval":
+      return { glyph: "?", label: "awaiting approval" };
+    case "interrupting":
+      return { glyph: "…", label: "interrupting" };
+    case "cancelled":
+      return { glyph: "✕", label: "cancelled" };
+    case "failed":
+      return { glyph: "!", label: "failed" };
+    case "completed":
+      return { glyph: "✓", label: "completed" };
+    case "idle":
+    default:
+      return { glyph: "", label: "" };
+  }
+}
+
+// Phases in which a turn is genuinely in flight and can be interrupted.
+function isActiveTurn(phase: TurnPhase): boolean {
+  return (
+    phase === "waiting" ||
+    phase === "streaming" ||
+    phase === "running-tool" ||
+    phase === "awaiting-approval"
+  );
+}
+
+// Phases that report how the previous turn ended; they persist in the indicator
+// until the user engages again (types or submits).
+function isTerminalTurn(phase: TurnPhase): boolean {
+  return phase === "completed" || phase === "failed" || phase === "cancelled";
+}
+
+// Pure turn state machine. The driver feeds it lifecycle events and renders
+// whatever phase it returns in place; this is the single source of truth for the
+// indicator so streaming, waiting, tool execution, approval, interruption,
+// failure, and completion all update one line instead of flooding the transcript.
+//
+// Interruption outcomes (criterion 3):
+//   - interrupt while active      → "interrupting" (pending)
+//   - settle while interrupting   → "cancelled"   (cancellation completed)
+//   - interrupt when not active   → unchanged     (rejected: nothing to cancel)
+export function advanceTurn(state: TurnState, event: TurnEvent): TurnState {
+  switch (event.type) {
+    case "submit":
+      return { phase: "waiting" };
+    case "stream":
+      return { phase: "streaming" };
+    case "tool-start":
+      return { phase: "running-tool", detail: event.name };
+    case "approval-request":
+      return { phase: "awaiting-approval", detail: event.name };
+    case "tool-result":
+      // The round's tool finished; the next provider call is pending.
+      return { phase: "waiting" };
+    case "complete":
+      return { phase: "completed" };
+    case "fail":
+      return { phase: "failed" };
+    case "interrupt":
+      // Only an in-flight turn can be cancelled; otherwise the request is
+      // rejected (returned unchanged) so the caller can surface "nothing to
+      // interrupt" rather than silently swallowing it.
+      return isActiveTurn(state.phase) ? { phase: "interrupting" } : state;
+    case "settle":
+      // The interrupted run finished settling: the cancellation completed.
+      return state.phase === "interrupting" ? { phase: "cancelled" } : state;
+    case "engage":
+      // The user started typing again: clear a lingering terminal outcome so the
+      // composer reads as editable; active phases are left untouched.
+      return isTerminalTurn(state.phase) ? { phase: "idle" } : state;
+    default:
+      return state;
+  }
+}
+
+// Rebuild the durable transcript from a persisted conversation so a reconnect or
+// resume shows prior user prompts, assistant answers, and tool results — but no
+// transient turn indicators (the turn always starts `idle`). System prompts and
+// contentless assistant bookkeeping (tool-call stubs) are omitted. Tool/error
+// bodies are bounded so a large stored result cannot balloon memory; the block
+// renderer still collapses it to an expandable preview.
+export function seedTranscriptFromHistory(
+  messages: ReadonlyArray<{ role: string; content?: string | null }>,
+  maxToolChars: number = MAX_TOOL_TRANSCRIPT_CHARS,
+): TranscriptEntry[] {
+  const out: TranscriptEntry[] = [];
+  for (const m of messages) {
+    const content = typeof m.content === "string" ? m.content : "";
+    if (m.role === "user") {
+      if (content.trim() !== "") out.push({ kind: "user", text: content });
+    } else if (m.role === "assistant") {
+      if (content.trim() !== "") out.push({ kind: "assistant", text: content });
+    } else if (m.role === "tool") {
+      if (content.trim() === "") continue;
+      const capped =
+        content.length > maxToolChars ? `${content.slice(0, maxToolChars)}\n… [truncated]` : content;
+      out.push({ kind: "tool", text: capped });
+    }
+    // system messages are never shown in the transcript.
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -491,14 +657,27 @@ function renderBottomRule(cols: number, style: ShellStyle): string {
 }
 
 // Render the composer band. When there is room (>= 2 rows) the first row is a
-// state rule carrying the color-independent glyph + label; the remaining rows
-// show the bounded tail of the input so the active line stays visible.
-export function renderComposer(state: ComposerState, layout: ShellLayout, style: ShellStyle): string[] {
+// state rule. That rule shows the active-turn phase in place when a turn is in
+// flight (or reporting its outcome) so streaming/waiting/tool/approval/
+// interruption/failure/completion update one line; when no turn is live it falls
+// back to the composer's own mode so the input affordance stays clear. The
+// remaining rows show the bounded tail of the input so the active line stays
+// visible.
+export function renderComposer(
+  state: ComposerState,
+  layout: ShellLayout,
+  style: ShellStyle,
+  opts: { turn?: TurnState } = {},
+): string[] {
   const height = Math.max(0, layout.composer.end - layout.composer.start);
   if (height === 0) return [];
   const cols = layout.viewport.cols;
   const marker = composerMarker(state.mode);
-  const label = `${marker.glyph} ${marker.label}`;
+  const turn = opts.turn;
+  const indicator = turn && turn.phase !== "idle" ? turnIndicator(turn.phase) : null;
+  const label = indicator
+    ? `${indicator.glyph} ${indicator.label}${turn?.detail ? `: ${turn.detail}` : ""}`
+    : `${marker.glyph} ${marker.label}`;
   const useFrame = height >= 3;
   const useTopRule = height >= 2;
   const textHeight = height - (useTopRule ? 1 : 0) - (useFrame ? 1 : 0);
@@ -540,7 +719,7 @@ export function composeScreen(state: ShellState): ComposedScreen {
           expanded: state.expanded,
           style,
         });
-  const composerLines = renderComposer(state.composer, layout, style);
+  const composerLines = renderComposer(state.composer, layout, style, { turn: state.turn });
   const statusLines = renderStatusLine(state.status, layout, style);
 
   const lines: string[] = [];
@@ -634,10 +813,24 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   // exposes it read-only to the pure renderer.
   const expanded = new Set<number>();
 
+  // Resume from the persisted conversation: restore prior user/assistant/tool
+  // messages as durable transcript blocks (redacted) so a reconnect shows the
+  // conversation so far. The turn always starts idle so no stale transient
+  // indicator leaks from a previous session.
+  let seededTranscript: TranscriptEntry[] = [];
+  try {
+    seededTranscript = seedTranscriptFromHistory(opts.loadHistory()).map((e) => ({
+      ...e,
+      text: redactSecrets(e.text).text,
+    }));
+  } catch {
+    seededTranscript = [];
+  }
+
   const state: ShellState = {
     viewport: { rows: stdout.rows ?? 24, cols: stdout.columns ?? 80 },
     version: VERSION,
-    transcript: [],
+    transcript: seededTranscript,
     composer: { mode: "focused", text: "", placeholder: "Ask a question, or Ctrl+K for commands" },
     status: {
       model: opts.config.model,
@@ -646,6 +839,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       contextUsage: null,
     },
     color: opts.color,
+    turn: { phase: "idle" },
     expanded,
   };
 
@@ -705,6 +899,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
 
   function insert(text: string): void {
     if (!editable()) return;
+    // Typing again clears a lingering terminal outcome (completed/failed/cancelled)
+    // so the indicator yields back to the editable composer.
+    state.turn = advanceTurn(state.turn, { type: "engage" });
     state.composer.text += text;
     refreshMode();
     scheduleRender();
@@ -712,6 +909,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
 
   function insertNewline(): void {
     if (!editable()) return;
+    state.turn = advanceTurn(state.turn, { type: "engage" });
     state.composer.text += "\n";
     state.composer.mode = "multiline";
     scheduleRender();
@@ -770,6 +968,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         } else {
           state.transcript[streamingIndex] = { kind: "streaming", text: streamingText };
         }
+        state.turn = advanceTurn(state.turn, { type: "stream" });
         state.composer.mode = "streaming";
         scheduleRender();
       },
@@ -780,7 +979,10 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       },
       toolStart: ({ name }) => {
         if (!mine()) return;
-        state.transcript.push({ kind: "tool", text: `running ${name}` });
+        // The running tool is shown in place via the turn indicator rather than as
+        // a fresh transcript line; the durable result is appended on toolResult so
+        // tool execution does not flood the conversation.
+        state.turn = advanceTurn(state.turn, { type: "tool-start", name });
         scheduleRender();
       },
       toolResult: ({ name, result }) => {
@@ -797,11 +999,13 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
           kind: result.isError ? "error" : "tool",
           text: `${name}: ${capped}`,
         });
+        state.turn = advanceTurn(state.turn, { type: "tool-result" });
         scheduleRender();
       },
       providerError: (message) => {
         if (!mine()) return;
         state.transcript.push({ kind: "error", text: `provider error: ${redactSecrets(message).text}` });
+        state.turn = advanceTurn(state.turn, { type: "fail" });
         state.composer.mode = "error";
         scheduleRender();
       },
@@ -820,6 +1024,41 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
           text: `provider retry ${info.attempt}/${info.maxAttempts} (${info.reasonClass})`,
         });
         scheduleRender();
+      },
+      requestApproval: async ({ name, args }) => {
+        if (!mine()) return false;
+        state.turn = advanceTurn(state.turn, { type: "approval-request", name });
+        scheduleRender();
+        // Hand the terminal back to line mode so the approval prompt's readline
+        // receives a full line, then restore raw mode for the shell. The shell's
+        // own data listener is paused for the duration so it does not compete
+        // with readline for keystrokes.
+        stdin.removeListener("data", onData);
+        try {
+          stdin.setRawMode(false);
+        } catch {
+          /* not raw */
+        }
+        let approved = false;
+        try {
+          approved = await promptApproval(name, args);
+        } finally {
+          if (running) {
+            try {
+              stdin.setRawMode(true);
+            } catch {
+              /* not raw */
+            }
+            stdin.on("data", onData);
+          }
+        }
+        if (mine()) {
+          // Approved or denied, the call is no longer awaiting input; return to the
+          // running-tool phase (a denial surfaces immediately as its result).
+          state.turn = advanceTurn(state.turn, { type: "tool-start", name });
+          scheduleRender();
+        }
+        return approved;
       },
     };
   }
@@ -863,6 +1102,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     }
     state.composer.text = "";
     state.composer.mode = "submitting";
+    state.turn = advanceTurn(state.turn, { type: "submit" });
     state.transcript.push({ kind: "user", text });
     scheduleRender();
     const images = pendingImages.splice(0);
@@ -885,13 +1125,24 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         mutatingAllowed: opts.mutatingAllowed ?? true,
         images,
       });
-      if (generation !== runGeneration) return; // cancelled mid-run
+      if (generation !== runGeneration) {
+        // Interrupted mid-run: its remaining output is discarded. Settle the
+        // interruption in place (the indicator reads "cancelled") and restore the
+        // composer so the user can continue.
+        state.turn = advanceTurn(state.turn, { type: "settle" });
+        state.composer.mode = "focused";
+        state.transcript.push({ kind: "notice", text: "interrupted" });
+        scheduleRender();
+        return;
+      }
       state.composer.mode = result.ok ? "focused" : "error";
+      state.turn = advanceTurn(state.turn, { type: result.ok ? "complete" : "fail" });
       if (result.tokens) state.status.contextUsage = `tokens ${result.tokens.total}`;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (generation === runGeneration) {
         state.transcript.push({ kind: "error", text: redactSecrets(msg).text });
+        state.turn = advanceTurn(state.turn, { type: "fail" });
         state.composer.mode = "error";
       }
     }
@@ -899,16 +1150,27 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   }
 
   function onCtrlC(): void {
-    if (state.composer.mode === "streaming" || state.composer.mode === "submitting") {
+    if (isActiveTurn(state.turn.phase)) {
+      // A turn is in flight: request cancellation. It settles to "cancelled" once
+      // the in-flight provider call returns (it cannot be aborted directly), so the
+      // indicator first reads "interrupting" (pending) and then "cancelled".
       runGeneration++; // stop the in-flight run from contributing further
+      state.turn = advanceTurn(state.turn, { type: "interrupt" });
       state.composer.mode = "cancelled";
-      state.transcript.push({ kind: "notice", text: "cancelled" });
       scheduleRender();
       return;
     }
     if (state.composer.text.length > 0) {
       state.composer.text = "";
-      state.composer.mode = "cancelled";
+      refreshMode();
+      scheduleRender();
+      return;
+    }
+    if (isTerminalTurn(state.turn.phase)) {
+      // Nothing is running to cancel (a finished turn's outcome is still shown):
+      // acknowledge the rejected request and clear the indicator instead of exiting.
+      state.transcript.push({ kind: "notice", text: "nothing to interrupt" });
+      state.turn = { phase: "idle" };
       scheduleRender();
       return;
     }
@@ -935,6 +1197,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     }
     if (cmd.name === "/clear") {
       state.transcript = [];
+      state.turn = { phase: "idle" };
       expanded.clear();
       scheduleRender();
       return;

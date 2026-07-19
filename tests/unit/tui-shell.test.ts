@@ -17,6 +17,9 @@ import {
   visibleWidth,
   entryGlyph,
   entryLabel,
+  turnIndicator,
+  advanceTurn,
+  seedTranscriptFromHistory,
   COMPOSER_MAX_ROWS,
   TRANSCRIPT_PREVIEW_LINES,
 } from "../../src/tui-shell.js";
@@ -26,6 +29,8 @@ import type {
   StatusInfo,
   TranscriptEntry,
   TranscriptKind,
+  TurnPhase,
+  TurnState,
 } from "../../src/tui-shell.js";
 
 const ANSI = /\x1b\[/;
@@ -38,6 +43,7 @@ function baseState(over: Partial<ShellState> = {}): ShellState {
     composer: { mode: "focused", text: "", placeholder: "Ask a question" },
     status: { model: "fake-model", workspace: "~/proj", approvalMode: "default", contextUsage: null },
     color: true,
+    turn: { phase: "idle" },
     ...over,
   };
 }
@@ -257,6 +263,174 @@ describe("tui-shell: transcript renders labeled, glanceable blocks", () => {
     const flat = flattenTranscript([{ kind: "streaming", text: long }], 80);
     expect(flat.join("\n")).toContain("line 19");
     expect(flat.join("\n")).not.toMatch(/\[\+\d+ lines\]/);
+  });
+});
+
+describe("tui-shell: turn indicator is color-independent", () => {
+  const phases: TurnPhase[] = [
+    "waiting",
+    "streaming",
+    "running-tool",
+    "awaiting-approval",
+    "interrupting",
+    "cancelled",
+    "failed",
+    "completed",
+  ];
+
+  it("gives every active phase a distinct glyph and a distinct ASCII label", () => {
+    const glyphs = phases.map((p) => turnIndicator(p).glyph);
+    const labels = phases.map((p) => turnIndicator(p).label);
+    expect(new Set(glyphs).size).toBe(phases.length);
+    expect(new Set(labels).size).toBe(phases.length);
+    for (const l of labels) expect(l).toMatch(/^[a-z ]+$/);
+  });
+
+  it("renders nothing in place when idle", () => {
+    expect(turnIndicator("idle")).toEqual({ glyph: "", label: "" });
+  });
+});
+
+describe("tui-shell: advanceTurn drives the active-turn lifecycle", () => {
+  it("walks submit → waiting → streaming → tool → waiting → completed in place", () => {
+    let t: TurnState = { phase: "idle" };
+    t = advanceTurn(t, { type: "submit" });
+    expect(t.phase).toBe("waiting");
+    t = advanceTurn(t, { type: "stream" });
+    expect(t.phase).toBe("streaming");
+    t = advanceTurn(t, { type: "tool-start", name: "read_file" });
+    expect(t).toEqual({ phase: "running-tool", detail: "read_file" });
+    t = advanceTurn(t, { type: "tool-result" });
+    expect(t.phase).toBe("waiting");
+    t = advanceTurn(t, { type: "complete" });
+    expect(t.phase).toBe("completed");
+  });
+
+  it("shows an awaiting-approval phase carrying the tool name", () => {
+    const t = advanceTurn({ phase: "running-tool", detail: "bash" }, {
+      type: "approval-request",
+      name: "bash",
+    });
+    expect(t).toEqual({ phase: "awaiting-approval", detail: "bash" });
+  });
+
+  it("reports a failed turn", () => {
+    expect(advanceTurn({ phase: "streaming" }, { type: "fail" }).phase).toBe("failed");
+  });
+
+  it("clears a terminal outcome only when the user engages again", () => {
+    expect(advanceTurn({ phase: "completed" }, { type: "engage" }).phase).toBe("idle");
+    expect(advanceTurn({ phase: "failed" }, { type: "engage" }).phase).toBe("idle");
+    // Active and idle phases are left untouched by engage.
+    expect(advanceTurn({ phase: "streaming" }, { type: "engage" }).phase).toBe("streaming");
+    expect(advanceTurn({ phase: "idle" }, { type: "engage" }).phase).toBe("idle");
+  });
+});
+
+describe("tui-shell: interruption outcomes (pending / cancelled / rejected)", () => {
+  it("interrupt while active is pending, then settles to cancelled", () => {
+    const pending = advanceTurn({ phase: "streaming" }, { type: "interrupt" });
+    expect(pending.phase).toBe("interrupting");
+    const settled = advanceTurn(pending, { type: "settle" });
+    expect(settled.phase).toBe("cancelled");
+  });
+
+  it("rejects an interrupt when no turn is in flight (state unchanged)", () => {
+    expect(advanceTurn({ phase: "completed" }, { type: "interrupt" }).phase).toBe("completed");
+    expect(advanceTurn({ phase: "idle" }, { type: "interrupt" }).phase).toBe("idle");
+  });
+
+  it("ignores a settle that is not preceded by an interrupt", () => {
+    expect(advanceTurn({ phase: "streaming" }, { type: "settle" }).phase).toBe("streaming");
+  });
+});
+
+describe("tui-shell: the active turn renders in place in the composer", () => {
+  const layout = computeLayout({ rows: 24, cols: 80 }, { composerRows: 2 });
+
+  it("shows the turn phase on the composer state rule when a turn is live", () => {
+    const streaming = renderComposer(
+      { mode: "streaming", text: "", placeholder: "PH" },
+      layout,
+      shellStyle(false),
+      { turn: { phase: "streaming" } },
+    );
+    expect(streaming.join("\n")).toContain("✦ streaming");
+    expect(streaming.join("\n")).not.toMatch(ANSI);
+
+    const running = renderComposer(
+      { mode: "streaming", text: "", placeholder: "" },
+      layout,
+      shellStyle(false),
+      { turn: { phase: "running-tool", detail: "read_file" } },
+    );
+    expect(running.join("\n")).toContain("● running tool: read_file");
+
+    const approval = renderComposer(
+      { mode: "disabled", text: "", placeholder: "" },
+      layout,
+      shellStyle(false),
+      { turn: { phase: "awaiting-approval", detail: "bash" } },
+    );
+    expect(approval.join("\n")).toContain("? awaiting approval: bash");
+  });
+
+  it("falls back to the composer marker when idle or when no turn is supplied", () => {
+    const idle = renderComposer(
+      { mode: "focused", text: "hi", placeholder: "" },
+      layout,
+      shellStyle(false),
+      { turn: { phase: "idle" } },
+    );
+    expect(idle.join("\n")).toContain("❯ edit");
+    const none = renderComposer({ mode: "focused", text: "hi", placeholder: "" }, layout, shellStyle(false));
+    expect(none.join("\n")).toContain("❯ edit");
+  });
+
+  it("surfaces the live turn across the whole screen", () => {
+    const text = renderShell(
+      baseState({
+        turn: { phase: "awaiting-approval", detail: "bash" },
+        composer: { mode: "disabled", text: "", placeholder: "" },
+      }),
+    ).join("\n");
+    expect(text).toContain("? awaiting approval: bash");
+  });
+});
+
+describe("tui-shell: resume restores durable state without transient indicators", () => {
+  it("rebuilds durable transcript blocks and omits system + contentless stubs", () => {
+    const seeded = seedTranscriptFromHistory([
+      { role: "system", content: "you are helpful" },
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi there" },
+      { role: "assistant", content: null },
+      { role: "tool", content: "file contents" },
+    ]);
+    expect(seeded).toEqual([
+      { kind: "user", text: "hello" },
+      { kind: "assistant", text: "hi there" },
+      { kind: "tool", text: "file contents" },
+    ]);
+  });
+
+  it("bounds a large stored tool result so it cannot balloon memory", () => {
+    const long = "x".repeat(5000);
+    const seeded = seedTranscriptFromHistory([{ role: "tool", content: long }]);
+    expect(seeded[0].text.length).toBeLessThan(long.length);
+    expect(seeded[0].text).toContain("[truncated]");
+  });
+
+  it("shows the prior conversation with the turn idle (no stale streaming/approval indicator)", () => {
+    const state = baseState({
+      transcript: seedTranscriptFromHistory([{ role: "user", content: "prior question" }]),
+      turn: { phase: "idle" },
+    });
+    const text = renderShell(state).join("\n");
+    expect(text).toContain("prior question");
+    expect(text).toContain("❯ edit");
+    expect(text).not.toContain("✦ streaming");
+    expect(text).not.toContain("awaiting approval");
   });
 });
 

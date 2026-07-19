@@ -91,6 +91,11 @@ export interface AgentSink {
   retry(info: AgentRetry): void;
   // The in-memory transcript was compacted to relieve context pressure.
   compaction?(info: AgentCompaction): void;
+  // A tool requires approval before executing. Optional: when present the sink
+  // owns the prompt (e.g. the full-screen shell coordinates it within its own
+  // raw-mode input model); when absent the agent falls back to the terminal
+  // prompt. Returning false denies the tool exactly like a "no" at the prompt.
+  requestApproval?(info: { name: string; args: Record<string, unknown> }): Promise<boolean>;
 }
 
 export function createConsoleSink(): AgentSink {
@@ -164,6 +169,13 @@ export async function runAgent(
   opts: AgentOptions,
 ): Promise<AgentResult> {
   const sink = opts.sink ?? createConsoleSink();
+  // Approval is owned by the sink when it offers a handler (the full-screen shell
+  // coordinates the prompt within its raw-mode input model); otherwise the agent
+  // falls back to the terminal prompt so non-interactive callers are unchanged.
+  const requestApproval = sink.requestApproval
+    ? (name: string, args: Record<string, unknown>): Promise<boolean> =>
+        sink.requestApproval!({ name, args })
+    : promptApproval;
   const tools = createTools();
   const toolMap = new Map(tools.map((t) => [t.name, t]));
   const schemas = toolSchemasForOpenAI(tools);
@@ -373,6 +385,7 @@ export async function runAgent(
         opts.approvalMode,
         opts.workspace,
         opts.mutatingAllowed ?? true,
+        requestApproval,
       );
       sink.toolResult({ id: tc.id, name: tc.name, result, round });
       bump(toolCalls, tc.name);
@@ -410,6 +423,7 @@ async function executeToolCall(
   approvalMode: ApprovalMode,
   workspace: Workspace,
   mutatingAllowed: boolean,
+  requestApproval: (name: string, args: Record<string, unknown>) => Promise<boolean>,
 ): Promise<ToolResult> {
   const tool = toolMap.get(tc.name);
   if (!tool) {
@@ -446,7 +460,7 @@ async function executeToolCall(
     try {
       parsed = JSON.parse(tc.arguments);
     } catch { /* ignore */ }
-    const approved = await promptApproval(tc.name, parsed);
+    const approved = await requestApproval(tc.name, parsed);
     if (!approved) {
       return { content: "Tool execution denied by user", isError: true };
     }
