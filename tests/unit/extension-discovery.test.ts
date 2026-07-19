@@ -71,7 +71,17 @@ const TOOL_SECTION = {
   ],
 };
 
-function surface(report: ExtensionDiscoveryReport, kind: "provider" | "mcp" | "tool") {
+const WORKFLOW_SECTION = {
+  contractVersion: 1,
+  definitions: {
+    "lint-fix": {
+      description: "Lint then apply fixes",
+      steps: [{ prompt: "run the linter" }, { prompt: "apply the suggested fixes" }],
+    },
+  },
+};
+
+function surface(report: ExtensionDiscoveryReport, kind: "provider" | "mcp" | "tool" | "workflow") {
   const found = report.surfaces.find((s) => s.kind === kind);
   if (!found) throw new Error(`missing surface ${kind}`);
   return found;
@@ -98,6 +108,7 @@ describe("collectExtensionDiscovery: settings source", () => {
     expect(surface(report, "provider").present).toBe(false);
     expect(surface(report, "mcp").present).toBe(false);
     expect(surface(report, "tool").present).toBe(false);
+    expect(surface(report, "workflow").present).toBe(false);
   });
 
   it("reports every surface absent when no contract is declared", () => {
@@ -107,12 +118,13 @@ describe("collectExtensionDiscovery: settings source", () => {
     expect(surface(report, "provider").present).toBe(false);
     expect(surface(report, "mcp").present).toBe(false);
     expect(surface(report, "tool").present).toBe(false);
+    expect(surface(report, "workflow").present).toBe(false);
   });
 
-  it("always reports all three surfaces, provider then mcp then tool", () => {
+  it("always reports all four surfaces, provider then mcp then tool then workflow", () => {
     const settings = writeSettings({ model: { name: "m", apiKeyEnv: "K" } });
     const report = collectExtensionDiscovery({ settingsPath: settings });
-    expect(report.surfaces.map((s) => s.kind)).toEqual(["provider", "mcp", "tool"]);
+    expect(report.surfaces.map((s) => s.kind)).toEqual(["provider", "mcp", "tool", "workflow"]);
   });
 });
 
@@ -275,12 +287,56 @@ describe("collectExtensionDiscovery: tool surface", () => {
   });
 });
 
+describe("collectExtensionDiscovery: workflow surface", () => {
+  it("summarizes a declared workflow contract as ready, with no selection", () => {
+    const settings = writeSettings({ workflows: WORKFLOW_SECTION });
+    const workflow = surface(collectExtensionDiscovery({ settingsPath: settings }), "workflow");
+    expect(workflow.present).toBe(true);
+    expect(workflow.schema).toBe("oh-my-cli.workflow-contract");
+    expect(workflow.contractVersion).toBe(1);
+    expect(workflow.entryCount).toBe(1);
+    // A workflow has no default and no implicit selection.
+    expect(workflow.default).toBeNull();
+    expect(workflow.selectedId).toBeNull();
+    expect(workflow.state).toBe("ready");
+    expect(workflow.stateReason).toContain("resolvable");
+    // A workflow has nothing to probe.
+    expect(workflow.probeMs).toBeNull();
+  });
+
+  it("resolves the workflow surface even without probing (nothing to probe)", () => {
+    const settings = writeSettings({ workflows: WORKFLOW_SECTION });
+    const workflow = surface(
+      collectExtensionDiscovery({ settingsPath: settings, probe: false }),
+      "workflow",
+    );
+    expect(workflow.state).toBe("ready");
+    expect(workflow.probeMs).toBeNull();
+  });
+
+  it("counts multiple workflow definitions", () => {
+    const settings = writeSettings({
+      workflows: {
+        contractVersion: 1,
+        definitions: {
+          a: { steps: [{ prompt: "do a" }] },
+          b: { steps: [{ prompt: "do b" }] },
+        },
+      },
+    });
+    const workflow = surface(collectExtensionDiscovery({ settingsPath: settings }), "workflow");
+    expect(workflow.entryCount).toBe(2);
+    expect(workflow.state).toBe("ready");
+  });
+});
+
 describe("collectExtensionDiscovery: all surfaces declared", () => {
-  it("summarizes the provider, MCP, and tool contracts in one report", () => {
+  it("summarizes the provider, MCP, tool, and workflow contracts in one report", () => {
     const settings = writeSettings({
       providers: PROVIDER_SECTION,
       mcp: MCP_SECTION,
       tools: TOOL_SECTION,
+      workflows: WORKFLOW_SECTION,
     });
     const report = collectExtensionDiscovery({ settingsPath: settings });
     expect(surface(report, "provider").present).toBe(true);
@@ -288,6 +344,8 @@ describe("collectExtensionDiscovery: all surfaces declared", () => {
     expect(surface(report, "mcp").state).toBe("ready");
     expect(surface(report, "tool").present).toBe(true);
     expect(surface(report, "tool").state).toBe("ready");
+    expect(surface(report, "workflow").present).toBe(true);
+    expect(surface(report, "workflow").state).toBe("ready");
   });
 });
 
@@ -324,6 +382,25 @@ describe("collectExtensionDiscovery: fail closed on an invalid contract", () => 
     );
   });
 
+  it("throws on an unsupported workflow contract version", () => {
+    const settings = writeSettings({
+      workflows: { contractVersion: 99, definitions: { a: { steps: [{ prompt: "x" }] } } },
+    });
+    expect(() => collectExtensionDiscovery({ settingsPath: settings })).toThrow(/not supported/);
+  });
+
+  it("throws on a raw credential field in a workflow step", () => {
+    const settings = writeSettings({
+      workflows: {
+        contractVersion: 1,
+        definitions: { a: { steps: [{ prompt: "x", token: "sk-leaked" }] } },
+      },
+    });
+    expect(() => collectExtensionDiscovery({ settingsPath: settings })).toThrow(
+      /raw credential field/,
+    );
+  });
+
   it("throws on invalid JSON", () => {
     const settings = writeRawSettings("{ not valid json");
     expect(() => collectExtensionDiscovery({ settingsPath: settings })).toThrow(/invalid JSON/);
@@ -344,12 +421,14 @@ describe("collectExtensionDiscovery: backward compatibility and redaction", () =
       providers: PROVIDER_SECTION,
       mcp: MCP_SECTION,
       tools: TOOL_SECTION,
+      workflows: WORKFLOW_SECTION,
       mcpServers: { legacy: { command: "node" } },
     });
     const report = collectExtensionDiscovery({ settingsPath: settings });
     expect(surface(report, "provider").selectedId).toBe("primary");
     expect(surface(report, "mcp").selectedId).toBe("fs");
     expect(surface(report, "tool").selectedId).toBe("rg");
+    expect(surface(report, "workflow").state).toBe("ready");
   });
 
   it("collapses the home path and never leaks argument values", () => {
@@ -380,6 +459,7 @@ describe("formatExtensionDiscovery", () => {
     expect(out).toContain("Provider contract: not declared");
     expect(out).toContain("MCP contract:");
     expect(out).toContain("Tool contract:");
+    expect(out).toContain("Workflow contract: not declared");
     expect(out).toContain("ready");
     expect(out).not.toContain("should-not-appear");
   });
@@ -390,6 +470,16 @@ describe("formatExtensionDiscovery", () => {
     expect(out).toContain("Tool contract: 1 entry (contract version 1)");
     expect(out).toContain("State:    ready");
     expect(out).not.toContain("should-not-appear");
+  });
+
+  it("renders the workflow surface with readiness and no default or selection", () => {
+    const settings = writeSettings({ workflows: WORKFLOW_SECTION });
+    const out = formatExtensionDiscovery(collectExtensionDiscovery({ settingsPath: settings }));
+    expect(out).toContain("Workflow contract: 1 definition (contract version 1)");
+    expect(out).toContain("State:    ready");
+    // A workflow is selected by explicit name at run time: no default/selection line.
+    expect(out).not.toContain("Default:");
+    expect(out).not.toContain("Selected:");
   });
 
   it("flags an ambiguous selection in the human-readable report", () => {

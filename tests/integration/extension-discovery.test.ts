@@ -61,6 +61,16 @@ const TOOL_SECTION = {
   ],
 };
 
+const WORKFLOW_SECTION = {
+  contractVersion: 1,
+  definitions: {
+    "lint-fix": {
+      description: "Lint then apply fixes",
+      steps: [{ prompt: "run the linter" }, { prompt: "apply the suggested fixes" }],
+    },
+  },
+};
+
 function surface(report: { surfaces: Array<Record<string, unknown>> }, kind: string) {
   return report.surfaces.find((s) => s.kind === kind) as Record<string, unknown>;
 }
@@ -83,8 +93,13 @@ describe("Integration: extension discovery", () => {
     return home;
   }
 
-  it("discovers all three declared contracts as redacted JSON and exits 0", async () => {
-    const home = homeWith({ providers: PROVIDER_SECTION, mcp: MCP_SECTION, tools: TOOL_SECTION });
+  it("discovers all four declared contracts as redacted JSON and exits 0", async () => {
+    const home = homeWith({
+      providers: PROVIDER_SECTION,
+      mcp: MCP_SECTION,
+      tools: TOOL_SECTION,
+      workflows: WORKFLOW_SECTION,
+    });
     const r = await runCli(["--discover-extensions", "--output", "json"], { HOME: home });
     expect(r.code).toBe(0);
     const report = JSON.parse(r.stdout);
@@ -92,6 +107,7 @@ describe("Integration: extension discovery", () => {
     const provider = surface(report, "provider");
     const mcp = surface(report, "mcp");
     const tool = surface(report, "tool");
+    const workflow = surface(report, "workflow");
     expect(provider.present).toBe(true);
     expect(provider.selectedId).toBe("primary");
     expect(mcp.present).toBe(true);
@@ -100,6 +116,9 @@ describe("Integration: extension discovery", () => {
     expect(tool.present).toBe(true);
     expect(tool.selectedId).toBe("rg");
     expect(tool.state).toBe("ready");
+    expect(workflow.present).toBe(true);
+    expect(workflow.selectedId).toBeNull();
+    expect(workflow.state).toBe("ready");
     // Redaction: argument values never appear in output.
     expect(r.stdout + r.stderr).not.toContain("should-not-appear");
   });
@@ -113,6 +132,7 @@ describe("Integration: extension discovery", () => {
     expect(surface(report, "provider").present).toBe(false);
     expect(surface(report, "mcp").present).toBe(false);
     expect(surface(report, "tool").present).toBe(false);
+    expect(surface(report, "workflow").present).toBe(false);
   });
 
   it("reports every surface absent (exit 0) when the settings file is missing", async () => {
@@ -124,6 +144,7 @@ describe("Integration: extension discovery", () => {
     expect(surface(report, "provider").present).toBe(false);
     expect(surface(report, "mcp").present).toBe(false);
     expect(surface(report, "tool").present).toBe(false);
+    expect(surface(report, "workflow").present).toBe(false);
   });
 
   it("reports the MCP surface as declared without probing via --no-probe", async () => {
@@ -166,12 +187,33 @@ describe("Integration: extension discovery", () => {
     expect(tool.stateReason).toBe("disabled");
   });
 
+  it("reports the workflow surface as ready, with no selection (and via --no-probe)", async () => {
+    const home = homeWith({ workflows: WORKFLOW_SECTION });
+    const probed = await runCli(["--discover-extensions", "--output", "json"], { HOME: home });
+    expect(probed.code).toBe(0);
+    const workflow = surface(JSON.parse(probed.stdout), "workflow");
+    expect(workflow.present).toBe(true);
+    expect(workflow.entryCount).toBe(1);
+    expect(workflow.default).toBeNull();
+    expect(workflow.selectedId).toBeNull();
+    expect(workflow.state).toBe("ready");
+    expect(workflow.probeMs).toBeNull();
+
+    // A workflow has nothing to probe: --no-probe reports the same ready state.
+    const noProbe = await runCli(["--discover-extensions", "--no-probe", "--output", "json"], {
+      HOME: home,
+    });
+    expect(noProbe.code).toBe(0);
+    expect(surface(JSON.parse(noProbe.stdout), "workflow").state).toBe("ready");
+  });
+
   it("emits a human-readable text report by default", async () => {
-    const home = homeWith({ mcp: MCP_SECTION });
+    const home = homeWith({ mcp: MCP_SECTION, workflows: WORKFLOW_SECTION });
     const r = await runCli(["--discover-extensions"], { HOME: home });
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("Extension Discovery");
     expect(r.stdout).toContain("Provider contract: not declared");
+    expect(r.stdout).toContain("Workflow contract: 1 definition (contract version 1)");
     expect(r.stdout).toContain("ready");
     expect(r.stdout).not.toContain("should-not-appear");
   });
@@ -218,6 +260,28 @@ describe("Integration: extension discovery", () => {
   it("exits 2 (fail closed) on a raw credential field in a tool entry", async () => {
     const home = homeWith({
       tools: { contractVersion: 1, entries: [{ id: "rg", command: "node", token: "sk-leaked" }] },
+    });
+    const r = await runCli(["--discover-extensions"], { HOME: home });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("raw credential field");
+    expect(r.stdout + r.stderr).not.toContain("sk-leaked");
+  });
+
+  it("exits 2 (fail closed) on an unsupported workflow contract version", async () => {
+    const home = homeWith({
+      workflows: { contractVersion: 99, definitions: { a: { steps: [{ prompt: "x" }] } } },
+    });
+    const r = await runCli(["--discover-extensions"], { HOME: home });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("not supported");
+  });
+
+  it("exits 2 (fail closed) on a raw credential field in a workflow step", async () => {
+    const home = homeWith({
+      workflows: {
+        contractVersion: 1,
+        definitions: { a: { steps: [{ prompt: "x", token: "sk-leaked" }] } },
+      },
     });
     const r = await runCli(["--discover-extensions"], { HOME: home });
     expect(r.code).toBe(2);

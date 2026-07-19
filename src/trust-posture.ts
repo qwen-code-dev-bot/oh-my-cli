@@ -26,6 +26,7 @@ import type { ApprovalMode, ToolCategory } from "./approval.js";
 import { collectExtensionDiscovery } from "./extension-discovery.js";
 import type { McpLifecycleState } from "./mcp-contract.js";
 import type { ToolReadinessState } from "./tool-contract.js";
+import type { WorkflowReadinessState } from "./workflow-contract.js";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
 
 export const TRUST_POSTURE_SCHEMA = "oh-my-cli.trust-posture";
@@ -54,12 +55,15 @@ export interface ApprovalPosture {
 }
 
 // A compact per-surface extension readiness summary: declared or not, which entry
-// a consumer would select, and (for MCP and tool) the lifecycle/readiness state.
+// a consumer would select, and (for MCP, tool, and workflow) the
+// lifecycle/readiness state. A workflow carries no selectedId (it is chosen by
+// explicit name at run time), so its selection is always null and only its
+// contract-level readiness state is reported.
 export interface PostureExtensionSurface {
-  kind: "provider" | "mcp" | "tool";
+  kind: "provider" | "mcp" | "tool" | "workflow";
   present: boolean;
   selectedId: string | null;
-  state: McpLifecycleState | ToolReadinessState | null;
+  state: McpLifecycleState | ToolReadinessState | WorkflowReadinessState | null;
 }
 
 export interface TrustPostureReport {
@@ -126,8 +130,8 @@ export function collectTrustPosture(opts: CollectTrustPostureOptions): TrustPost
     extensions = {
       settingsFound: discovery.settingsFound,
       // The posture view composes every extension surface discovery reports —
-      // provider, MCP, and tool (#139) — so the audit reflects the full set of
-      // declared contracts an unattended run could select.
+      // provider, MCP, tool (#139), and workflow (#153) — so the audit reflects
+      // the full set of declared contracts an unattended run could select.
       surfaces: discovery.surfaces.map((surface) => ({
         kind: surface.kind,
         present: surface.present,
@@ -210,13 +214,22 @@ export function formatTrustPosture(report: TrustPostureReport): string {
     if (!report.extensions.settingsFound) {
       lines.push("  Settings:  (not found)");
     }
+    const labels: Record<PostureExtensionSurface["kind"], string> = {
+      provider: "Provider",
+      mcp: "MCP",
+      tool: "Tool",
+      workflow: "Workflow",
+    };
     for (const surface of report.extensions.surfaces) {
-      const label =
-        surface.kind === "provider" ? "Provider" : surface.kind === "mcp" ? "MCP" : "Tool";
+      const label = labels[surface.kind];
       if (!surface.present) {
         lines.push(`  ${label}:   not declared`);
       } else if (surface.kind === "mcp" || surface.kind === "tool") {
         lines.push(`  ${label}:   ${surface.selectedId ?? "(ambiguous)"} — ${surface.state}`);
+      } else if (surface.kind === "workflow") {
+        // A workflow has no default and no implicit selection; report only its
+        // contract-level readiness (it is chosen by explicit name at run time).
+        lines.push(`  ${label}:   ${surface.state}`);
       } else {
         lines.push(`  ${label}:   ${surface.selectedId ?? "(ambiguous)"}`);
       }

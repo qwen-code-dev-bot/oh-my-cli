@@ -45,6 +45,15 @@ const TOOL_READY = {
   },
 };
 
+const WORKFLOW_READY = {
+  workflows: {
+    contractVersion: 1,
+    definitions: {
+      "lint-fix": { description: "Lint then fix", steps: [{ prompt: "run the linter" }] },
+    },
+  },
+};
+
 describe("Integration: trust posture", () => {
   let tmpRoot: string;
 
@@ -138,6 +147,20 @@ describe("Integration: trust posture", () => {
     expect(noProbe.code).toBe(0);
     const toolNoProbe = JSON.parse(noProbe.stdout).extensions.surfaces.find((s: { kind: string }) => s.kind === "tool");
     expect(toolNoProbe.state).toBe("declared");
+  });
+
+  it("reports the workflow surface as ready with no selection", async () => {
+    const home = homeWith(WORKFLOW_READY);
+    const ws = workspaceDir();
+    const r = await runCli(["--trust-posture", "--workspace", ws, "--output", "json"], { HOME: home });
+    expect(r.code).toBe(0);
+    const workflow = JSON.parse(r.stdout).extensions.surfaces.find(
+      (s: { kind: string }) => s.kind === "workflow",
+    );
+    expect(workflow.present).toBe(true);
+    expect(workflow.selectedId).toBeNull();
+    expect(workflow.state).toBe("ready");
+    expect(r.stdout + r.stderr).not.toContain("should-not-appear");
   });
 
   it("still exits 0 and surfaces an invalid contract as a warning (audit, not a gate)", async () => {
