@@ -38,6 +38,19 @@ import {
   toolSummaryLine,
   toolDetailLines,
   toolOpHasDetail,
+  toolExpandMarker,
+  diffLines,
+  buildFileDiff,
+  deriveFileDiff,
+  diffStatLine,
+  diffLinePrefix,
+  renderDiffBody,
+  deriveFailure,
+  failureAction,
+  suggestNextStep,
+  renderFailureSummary,
+  entryStartLines,
+  scrollToKeepAnchor,
   COMPOSER_MAX_ROWS,
   TRANSCRIPT_PREVIEW_LINES,
 } from "../../src/tui-shell.js";
@@ -939,5 +952,277 @@ describe("tui-shell: multiple tool operations stay glanceable at 120x36 (criteri
     const joined = screen.lines.join("\n");
     expect(joined).toContain("result 7"); // newest summary visible
     expect(joined).not.toContain("more 0"); // collapsed detail does not flood the conversation
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #163: inspect diffs and failures without losing conversation context
+// ---------------------------------------------------------------------------
+
+describe("tui-shell: diff summaries name files and magnitude before expansion (criterion 1)", () => {
+  it("derives a structured edit diff with correct file and change counts", () => {
+    const diff = deriveFileDiff("edit", { path: "src/a.ts", oldText: "a\nb\nc", newText: "a\nB\nc" });
+    expect(diff).toBeDefined();
+    expect(diff?.file).toBe("src/a.ts");
+    expect(diff?.added).toBe(1);
+    expect(diff?.removed).toBe(1);
+  });
+
+  it("renders a one-line stat naming the file and magnitude", () => {
+    const diff = deriveFileDiff("edit", { path: "src/a.ts", oldText: "a\nb\nc", newText: "a\nB\nc" })!;
+    expect(diffStatLine(diff)).toBe("src/a.ts  +1 -1");
+  });
+
+  it("shows the diff stat collapsed, before any expansion", () => {
+    const op = makeToolOperation({ name: "edit", state: "succeeded", turnId: 1, output: "Edited src/a.ts" });
+    op.diff = deriveFileDiff("edit", { path: "src/a.ts", oldText: "a\nb", newText: "a\nB" });
+    const collapsed = flattenTranscript([{ kind: "tool", text: "", tool: op }], 120, {
+      style: shellStyle(false),
+    }).join("\n");
+    expect(collapsed).toContain("src/a.ts  +1 -1"); // magnitude visible without expanding
+    expect(collapsed).not.toContain("- b"); // the diff body stays hidden until expanded
+    expect(collapsed).toContain("expand for diff");
+  });
+
+  it("treats a write as additions and ignores non-file or no-op calls", () => {
+    expect(deriveFileDiff("write", { path: "x.ts", content: "a\nb" })?.added).toBe(2);
+    expect(deriveFileDiff("write", { path: "x.ts", content: "a\nb" })?.removed).toBe(0);
+    expect(deriveFileDiff("shell", { command: "ls" })).toBeUndefined();
+    expect(deriveFileDiff("edit", { oldText: "a", newText: "b" })).toBeUndefined(); // no path
+    expect(deriveFileDiff("edit", { path: "x", oldText: "a", newText: "a" })).toBeUndefined(); // no-op
+    expect(deriveFileDiff("write", { path: "x", content: "" })).toBeUndefined(); // empty
+  });
+});
+
+describe("tui-shell: expanded diffs distinguish +/-/context without color (criterion 2)", () => {
+  it("computes an interleaved line diff", () => {
+    const lines = diffLines("a\nb\nc", "a\nB\nc");
+    expect(lines).toEqual([
+      { kind: "context", text: "a" },
+      { kind: "del", text: "b" },
+      { kind: "add", text: "B" },
+      { kind: "context", text: "c" },
+    ]);
+  });
+
+  it("uses distinct ASCII prefixes per kind", () => {
+    expect(diffLinePrefix("add")).toBe("+ ");
+    expect(diffLinePrefix("del")).toBe("- ");
+    expect(diffLinePrefix("context")).toBe("  ");
+    const body = renderDiffBody({ file: "x", added: 1, removed: 1, truncated: false, lines: diffLines("a\nb", "a\nB") });
+    expect(body).toEqual(["  a", "- b", "+ B"]);
+  });
+
+  it("keeps the +/- distinction with color on AND off (not color-alone)", () => {
+    const op = makeToolOperation({ name: "edit", state: "succeeded", turnId: 1, output: "Edited" });
+    op.diff = deriveFileDiff("edit", { path: "a.ts", oldText: "1\n2\n3", newText: "1\nx\n3" });
+    const entries: TranscriptEntry[] = [{ kind: "tool", text: "", tool: op }];
+    for (const color of [false, true]) {
+      const joined = flattenTranscript(entries, 120, { style: shellStyle(color), expanded: new Set([0]) }).join("\n");
+      expect(joined).toContain("+ x"); // addition prefix present regardless of color
+      expect(joined).toContain("- 2"); // deletion prefix present regardless of color
+    }
+    // With color disabled there is no ANSI at all, yet the prefixes still differ.
+    const plain = flattenTranscript(entries, 120, { style: shellStyle(false), expanded: new Set([0]) }).join("\n");
+    expect(ANSI.test(plain)).toBe(false);
+  });
+});
+
+describe("tui-shell: failures show cause, action, and next step before diagnostics (criterion 3)", () => {
+  it("derives a structured failure summary", () => {
+    const f = deriveFailure("edit", { path: "src/a.ts" }, { content: "Error: oldText not found in src/a.ts", isError: true });
+    expect(f?.cause).toBe("Error: oldText not found in src/a.ts");
+    expect(f?.action).toBe("edit src/a.ts");
+    expect(f?.nextStep).toBe("check the path and retry");
+  });
+
+  it("returns undefined for non-error results", () => {
+    expect(deriveFailure("edit", { path: "x" }, { content: "ok" })).toBeUndefined();
+  });
+
+  it("names the affected action per tool", () => {
+    expect(failureAction("read", { path: "p" })).toBe("read p");
+    expect(failureAction("glob", { pattern: "**/*.ts" })).toBe("glob **/*.ts");
+    expect(failureAction("grep", { pattern: "foo" })).toBe("grep foo");
+    expect(failureAction("shell", { command: "npm test" })).toBe("shell npm test");
+    expect(failureAction("shell", {})).toBe("shell"); // missing arg falls back to the name
+    expect(failureAction("mystery", {})).toBe("mystery");
+  });
+
+  it("suggests a safe, deterministic next step from the cause", () => {
+    expect(suggestNextStep("Tool execution denied by user", "edit")).toBe("approve the action or adjust the request");
+    expect(suggestNextStep("oldText appears 3 times", "edit")).toBe("narrow oldText to a unique, exact match");
+    expect(suggestNextStep("command not found: tsc", "shell")).toBe("verify the command exists and is on PATH");
+    expect(suggestNextStep("ENOENT: no such file", "read")).toBe("check the path and retry");
+    expect(suggestNextStep("EACCES: permission denied", "write")).toBe("check permissions for this path");
+    expect(suggestNextStep("operation timed out", "shell")).toBe("narrow the operation's scope or raise the timeout");
+    expect(suggestNextStep("something weird", "edit")).toBe("review the diagnostic and retry");
+  });
+
+  it("shows the summary collapsed and the verbose diagnostics only when expanded", () => {
+    const op = makeToolOperation({ name: "shell", state: "failed", turnId: 1, output: "boom\nlong stack trace line" });
+    op.failure = deriveFailure("shell", { command: "build" }, { content: "boom\nlong stack trace line", isError: true });
+    const entries: TranscriptEntry[] = [{ kind: "error", text: "", tool: op }];
+    const collapsed = flattenTranscript(entries, 120, { style: shellStyle(false) }).join("\n");
+    expect(collapsed).toContain("cause: boom");
+    expect(collapsed).toContain("action: shell build");
+    expect(collapsed).toContain("next: review the diagnostic and retry");
+    expect(collapsed).not.toContain("long stack trace line"); // diagnostics hidden until expanded
+    expect(collapsed).toContain("expand for diagnostics");
+
+    const expanded = flattenTranscript(entries, 120, { style: shellStyle(false), expanded: new Set([0]) }).join("\n");
+    expect(expanded).toContain("long stack trace line"); // verbose diagnostics now shown
+    expect(expanded).toContain("cause: boom"); // summary still precedes them
+  });
+
+  it("labels the expand marker by what disclosure reveals", () => {
+    const diffOp = makeToolOperation({ name: "edit", state: "succeeded", turnId: 1, output: "x" });
+    diffOp.diff = deriveFileDiff("edit", { path: "a", oldText: "1", newText: "2" });
+    expect(toolExpandMarker(diffOp)).toBe("… [expand for diff]");
+    const failOp = makeToolOperation({ name: "shell", state: "failed", turnId: 1, output: "e" });
+    failOp.failure = { cause: "e", action: "shell x", nextStep: "retry" };
+    expect(toolExpandMarker(failOp)).toBe("… [expand for diagnostics]");
+    const both = makeToolOperation({ name: "edit", state: "failed", turnId: 1, output: "e" });
+    both.diff = deriveFileDiff("edit", { path: "a", oldText: "1", newText: "2" });
+    both.failure = { cause: "e", action: "edit a", nextStep: "retry" };
+    expect(toolExpandMarker(both)).toBe("… [expand for diff and diagnostics]");
+    expect(toolExpandMarker(makeToolOperation({ name: "read", state: "succeeded", turnId: 1, output: "x" }))).toBe(
+      "… [expand for input/output]",
+    );
+  });
+});
+
+describe("tui-shell: expand/collapse preserves the selected event and scroll (criterion 4)", () => {
+  const cols = 80;
+  const height = 6;
+  const opA = makeToolOperation({ name: "edit", state: "succeeded", turnId: 1, output: "Edited a" });
+  opA.diff = deriveFileDiff("edit", { path: "a.ts", oldText: "1\n2\n3", newText: "1\nx\n3" });
+  const opB = makeToolOperation({ name: "edit", state: "succeeded", turnId: 1, output: "Edited b" });
+  opB.diff = deriveFileDiff("edit", { path: "b.ts", oldText: "p\nq", newText: "p\nr\ns\nq" });
+  const filler: TranscriptEntry = {
+    kind: "assistant",
+    text: Array.from({ length: 12 }, (_, i) => `f${i}`).join("\n"),
+  };
+  const entries: TranscriptEntry[] = [
+    { kind: "tool", text: "", tool: opA },
+    filler,
+    { kind: "tool", text: "", tool: opB },
+  ];
+  const sel = 2; // the newest expandable block (opB)
+
+  function anchorRow(expandedSet: Set<number>, scroll: number): number {
+    const starts = entryStartLines(entries, cols, { expanded: expandedSet });
+    const flatLen = flattenTranscript(entries, cols, { expanded: expandedSet }).length;
+    const sc = Math.max(0, Math.min(scroll, Math.max(0, flatLen - height)));
+    return starts[sel] - (flatLen - sc - height);
+  }
+
+  it("records strictly increasing per-entry start lines", () => {
+    const starts = entryStartLines(entries, cols, { expanded: new Set() });
+    expect(starts.length).toBe(entries.length);
+    expect(starts[0]).toBe(0);
+    for (let i = 1; i < starts.length; i++) expect(starts[i]).toBeGreaterThan(starts[i - 1]);
+  });
+
+  it("keeps the toggled block at the same viewport row across expand", () => {
+    const before = new Set<number>();
+    const after = new Set<number>([sel]);
+    const startsBefore = entryStartLines(entries, cols, { expanded: before });
+    const startsAfter = entryStartLines(entries, cols, { expanded: after });
+    const scrollBefore = 0;
+    const scrollAfter = scrollToKeepAnchor({
+      flatLenBefore: flattenTranscript(entries, cols, { expanded: before }).length,
+      flatLenAfter: flattenTranscript(entries, cols, { expanded: after }).length,
+      anchorBefore: startsBefore[sel],
+      anchorAfter: startsAfter[sel],
+      scrollBefore,
+      height,
+    });
+    expect(scrollAfter).toBeGreaterThan(0); // it scrolled up to hold the block in place
+    expect(anchorRow(before, scrollBefore)).toBe(anchorRow(after, scrollAfter));
+  });
+
+  it("clamps the preserved scroll to the scrollable range", () => {
+    expect(scrollToKeepAnchor({ flatLenBefore: 10, flatLenAfter: 20, anchorBefore: 4, anchorAfter: 4, scrollBefore: 0, height: 8 })).toBe(10);
+    expect(scrollToKeepAnchor({ flatLenBefore: 10, flatLenAfter: 12, anchorBefore: 2, anchorAfter: 9, scrollBefore: 0, height: 8 })).toBe(0);
+    expect(scrollToKeepAnchor({ flatLenBefore: 5, flatLenAfter: 6, anchorBefore: 0, anchorAfter: 0, scrollBefore: 0, height: 50 })).toBe(0);
+  });
+
+  it("scrolls the transcript window without pinning to the newest", () => {
+    const tall: TranscriptEntry[] = [{ kind: "assistant", text: Array.from({ length: 20 }, (_, i) => `L${i}`).join("\n") }];
+    const region = { start: 0, end: 5 };
+    const atBottom = renderTranscript(tall, region, cols, { expanded: new Set([0]), scroll: 0 }).join("\n");
+    expect(atBottom).toContain("L19");
+    expect(atBottom).not.toContain("L0");
+    const scrolled = renderTranscript(tall, region, cols, { expanded: new Set([0]), scroll: 15 }).join("\n");
+    expect(scrolled).toContain("L0");
+    expect(scrolled).not.toContain("L19");
+  });
+});
+
+describe("tui-shell: long diffs and stack traces stay bounded with a receipt (criterion 5)", () => {
+  // Reuse the low-entropy decoy from the #162 suite: caught by the redactor's
+  // known-token rule but never flagged by gitleaks' generic-api-key entropy gate.
+  const DECOY = "sk-aaaaaaaaaaaaaaaaaaaa";
+
+  it("bounds a large diff while reporting full magnitude", () => {
+    const big = buildFileDiff("huge.ts", "", Array.from({ length: 250 }, (_, i) => `l${i}`).join("\n"));
+    expect(big.added).toBe(250); // magnitude reflects the whole change
+    expect(big.removed).toBe(0);
+    expect(big.truncated).toBe(true);
+    expect(big.lines.length).toBe(200); // body bounded to MAX_DIFF_LINES
+    const body = renderDiffBody(big);
+    expect(body[body.length - 1]).toContain("diff truncated to 200 lines");
+    expect(body[body.length - 1]).toContain("full redacted change retained");
+  });
+
+  it("falls back to a coarse diff for very large inputs", () => {
+    const oldText = Array.from({ length: 501 }, (_, i) => `line ${i}`).join("\n");
+    const newText = [...Array.from({ length: 500 }, (_, i) => `line ${i}`), "changed"].join("\n");
+    const diff = buildFileDiff("big.ts", oldText, newText);
+    // A 501-line side exceeds the LCS guard, so the coarse path reports every old
+    // line removed and every new line added (an LCS diff would report far fewer).
+    expect(diff.added).toBe(501);
+    expect(diff.removed).toBe(501);
+    expect(diff.truncated).toBe(true);
+  });
+
+  it("redacts secrets in diff content so an expanded diff never leaks them", () => {
+    const op = makeToolOperation({ name: "write", state: "succeeded", turnId: 1, output: "Wrote .env" });
+    op.diff = deriveFileDiff("write", { path: ".env", content: `TOKEN=${DECOY}` });
+    const expanded = flattenTranscript([{ kind: "tool", text: "", tool: op }], 120, {
+      style: shellStyle(false),
+      expanded: new Set([0]),
+    }).join("\n");
+    expect(expanded).not.toContain(DECOY);
+    expect(expanded).toContain("[REDACTED]");
+  });
+
+  it("bounds a failure's cause to a single line", () => {
+    const long = "x".repeat(300);
+    const f = deriveFailure("shell", { command: "c" }, { content: long, isError: true });
+    expect(f!.cause.length).toBeLessThanOrEqual(121); // 120 chars + ellipsis
+  });
+});
+
+describe("tui-shell: a diff and a recoverable failure render in context at 120x36 (criterion 7)", () => {
+  it("shows both summaries within the viewport, color and reduced-color", () => {
+    const editOp = makeToolOperation({ name: "edit", state: "succeeded", turnId: 1, output: "Edited src/a.ts (single occurrence replaced).", durationMs: 12 });
+    editOp.diff = deriveFileDiff("edit", { path: "src/a.ts", oldText: "const a = 1;", newText: "const a = 2;" });
+    const failOp = makeToolOperation({ name: "shell", state: "failed", turnId: 1, output: "npm error command not found: tscx" });
+    failOp.failure = deriveFailure("shell", { command: "tscx" }, { content: "npm error command not found: tscx", isError: true });
+    const entries: TranscriptEntry[] = [
+      { kind: "tool", text: "", tool: editOp },
+      { kind: "error", text: "", tool: failOp },
+    ];
+    for (const color of [true, false]) {
+      const screen = composeScreen(baseState({ viewport: { rows: 36, cols: 120 }, color, transcript: entries }));
+      for (const line of screen.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(120);
+      const joined = screen.lines.join("\n");
+      expect(joined).toContain("src/a.ts  +1 -1"); // diff magnitude in context
+      expect(joined).toContain("cause: npm error command not found: tscx"); // failure cause
+      expect(joined).toContain("action: shell tscx"); // affected action
+      expect(joined).toContain("next: verify the command exists and is on PATH"); // safe next step
+    }
   });
 });
