@@ -5,8 +5,8 @@
 // color capability. The banner is printed once at startup and never redrawn, so
 // it yields space naturally as the conversation scrolls — no redraw corruption.
 // Display metadata is redacted (workspace collapsed to ~, no credentials) so it
-// never leaks a full path or a secret. The block art uses only full blocks and
-// spaces: no bidirectional, zero-width, or look-alike characters.
+// never leaks a full path or a secret. The art uses ordinary box-drawing glyphs
+// and spaces: no bidirectional, zero-width, or look-alike characters.
 
 import { redactHomePath } from "./permission-impact.js";
 
@@ -25,17 +25,17 @@ export interface BannerModel {
 
 // Minimum terminal widths for each art variant. Below MEDIUM_MIN we fall back to
 // the pure-ASCII plain variant so nothing clips or wraps. The wide wordmark is
-// 37 columns and the medium mark is 13, so each threshold leaves a margin.
+// 41 columns and the medium mark is 13, so each threshold leaves a margin.
 const WIDE_MIN = 44;
 const MEDIUM_MIN = 20;
 
-// Original 5-row block wordmark "OH MY CLI" (37 columns).
+// Original 5-row outlined wordmark "OH MY CLI" (41 columns).
 export const WIDE_WORDMARK: readonly string[] = [
-  "████ █  █  █   █ █   █  ████ █    ███",
-  "█  █ █  █  ██ ██  █ █   █    █     █ ",
-  "█  █ ████  █ █ █   █    █    █     █ ",
-  "█  █ █  █  █   █   █    █    █     █ ",
-  "████ █  █  █   █   █    ████ ████ ███",
+  "╭───╮ ╷   ╷ ╷   ╷ ╷   ╷ ╭───╮ ╷     ╭───╮",
+  "│   │ │   │ │╲ ╱│ ╰╮ ╭╯ │     │       │  ",
+  "│   │ ├───┤ │ ╳ │  ╰─╯  │     │       │  ",
+  "│   │ │   │ │   │   │   │     │       │  ",
+  "╰───╯ ╵   ╵ ╵   ╵   ╵   ╰───╯ ╰───╯ ╰───╯",
 ];
 
 // Compact 3-row "OMC" mark (13 columns) for medium widths.

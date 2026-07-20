@@ -484,7 +484,7 @@ describe("tui-shell: resume restores durable state without transient indicators"
 describe("tui-shell: whole-screen composition", () => {
   it("uses a Qwen-style product header and quiet first-run canvas", () => {
     const text = renderShell(baseState()).join("\n");
-    expect(text).toContain("████ █  █");
+    expect(text).toContain("╭───╮");
     expect(text).toContain(">_ OH MY CLI");
     expect(text).toContain("(/model to change)");
     expect(text).toContain("Tips: /attach an image");
@@ -495,7 +495,7 @@ describe("tui-shell: whole-screen composition", () => {
     const text = renderShell(baseState({ viewport: { rows: 12, cols: 40 } })).join("\n");
     expect(text).toContain("███ █   █ ███");
     expect(text).toContain("❯ edit");
-    expect(text).not.toContain("████ █  █");
+    expect(text).not.toContain("╭───╮");
   });
 
   it("renders exactly viewport.rows rows with the composer above the status footer", () => {
