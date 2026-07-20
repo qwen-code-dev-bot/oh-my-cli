@@ -6,7 +6,11 @@ import {
   deriveFailure,
   visibleWidth,
 } from "../../src/tui-shell.js";
-import type { ShellState, TranscriptEntry } from "../../src/tui-shell.js";
+import type {
+  ShellState,
+  TranscriptEntry,
+  ReferencePreviewState,
+} from "../../src/tui-shell.js";
 
 // Renders the full-screen shell at the three target terminal dimensions and a
 // reduced-color (basic 16-color) mode plus NO_COLOR, asserting each capture is
@@ -146,5 +150,134 @@ describe("smoke: keyboard-shortcut help panel renders coherently (Issue #169)", 
     expect(screen.lines.join("")).not.toMatch(/\x1b\[/);
     expect(screen.lines.join("\n")).toContain("Keyboard shortcuts");
     publish(`help ${rows}x${cols} (NO_COLOR)`, screen.lines);
+  });
+});
+
+// The composer `@` reference picker (Issue #196, criterion 6): the E2E harness
+// captures these renders inside a real tmux pane, so they publish the readable
+// terminal evidence for keyboard selection, insertion hints, cancellation/
+// refusal states, and a narrow layout — all from composeScreen, the exact pure
+// path the live driver paints.
+describe("smoke: workspace reference picker renders coherently (Issue #196)", () => {
+  function referencePreview(
+    overrides: Partial<ReferencePreviewState> = {},
+  ): ReferencePreviewState {
+    return {
+      candidates: [
+        { path: "src/tui-shell.ts", type: "file", sizeBytes: 98_304, score: 12 },
+        { path: "src/workspace-reference.ts", type: "file", sizeBytes: 18_432, score: 9 },
+        { path: "src/workspace.ts", type: "file", sizeBytes: 6_144, score: 7 },
+        { path: "src", type: "directory", sizeBytes: 0, score: 5 },
+        { path: "tests/unit/workspace-reference.test.ts", type: "file", sizeBytes: 12_288, score: 4 },
+        { path: "docs/architecture.md", type: "file", sizeBytes: 3_072, score: 3 },
+      ],
+      selected: 0,
+      query: "src",
+      total: 6,
+      truncated: false,
+      state: "ok",
+      excluded: { binary: 2, secret: 1, ignored: 4 },
+      ...overrides,
+    };
+  }
+
+  function referenceState(
+    rows: number,
+    cols: number,
+    preview: ReferencePreviewState,
+    opts: { color: boolean; colorDepth?: "none" | "basic" | "256" } = {
+      color: true,
+      colorDepth: "256",
+    },
+  ): ShellState {
+    return {
+      ...stateFor(rows, cols, opts),
+      composer: { mode: "focused", text: "look at @src", placeholder: "" },
+      referencePreview: preview,
+    };
+  }
+
+  function assertPickerCoherent(
+    screen: { lines: string[] },
+    rows: number,
+    cols: number,
+  ): void {
+    expect(screen.lines).toHaveLength(rows);
+    for (const line of screen.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(cols);
+  }
+
+  // Drop SGR color codes so cross-boundary content (a color reset can sit
+  // between a path and its meta label) can be asserted as plain text.
+  const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+  it("renders the candidate list with a highlighted selection and insertion hints", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const screen = composeScreen(referenceState(rows, cols, referencePreview()));
+    assertPickerCoherent(screen, rows, cols);
+    const joined = screen.lines.join("\n");
+    expect(joined).toContain("FILES 1/6"); // position + total
+    expect(joined).toContain("Tab insert"); // insertion hint
+    expect(joined).toContain("src/tui-shell.ts"); // highlighted candidate
+    expect(joined).toContain("◆"); // selection marker
+    expect(joined).toContain("file 96 KB"); // file type + size
+    // The directory row carries a single "dir" label, never a redundant size.
+    expect(stripAnsi(joined)).toContain("src  dir");
+    expect(joined).not.toContain("dir dir");
+    // The bounded window shows at most REFERENCE_PREVIEW_MAX_ITEMS rows, so the
+    // sixth candidate is scrolled out of view at the top selection.
+    expect(joined).not.toContain("docs/architecture.md");
+    publish(`reference picker ${rows}x${cols}`, screen.lines);
+  });
+
+  it("renders the picker within a narrow 24x80 terminal", () => {
+    const { rows, cols } = { rows: 24, cols: 80 };
+    const screen = composeScreen(referenceState(rows, cols, referencePreview({ selected: 2 })));
+    assertPickerCoherent(screen, rows, cols);
+    const joined = screen.lines.join("\n");
+    expect(joined).toContain("FILES 3/6"); // selection moved down
+    expect(joined).toContain("src/workspace.ts"); // highlighted candidate
+    publish(`reference picker ${rows}x${cols} (narrow)`, screen.lines);
+  });
+
+  it("renders an explicit untrusted refusal without candidates", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const screen = composeScreen(
+      referenceState(
+        rows,
+        cols,
+        referencePreview({ candidates: [], state: "untrusted", total: 0, query: "" }),
+      ),
+    );
+    assertPickerCoherent(screen, rows, cols);
+    const joined = screen.lines.join("\n");
+    expect(joined).toContain("Workspace not trusted");
+    expect(joined).not.toContain("src/tui-shell.ts");
+    publish(`reference picker untrusted ${rows}x${cols}`, screen.lines);
+  });
+
+  it("renders an explicit no-match state", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const screen = composeScreen(
+      referenceState(
+        rows,
+        cols,
+        referencePreview({ candidates: [], state: "no-match", total: 0, query: "zzz-nope" }),
+      ),
+    );
+    assertPickerCoherent(screen, rows, cols);
+    expect(screen.lines.join("\n")).toContain("No files match");
+    publish(`reference picker no-match ${rows}x${cols}`, screen.lines);
+  });
+
+  it("renders the picker with no color (text + structure only)", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const screen = composeScreen(
+      referenceState(rows, cols, referencePreview(), { color: false, colorDepth: "none" }),
+    );
+    assertPickerCoherent(screen, rows, cols);
+    const flat = screen.lines.join("");
+    expect(flat).not.toMatch(/\x1b\[/);
+    expect(screen.lines.join("\n")).toContain("src/tui-shell.ts");
+    publish(`reference picker ${rows}x${cols} (NO_COLOR)`, screen.lines);
   });
 });
