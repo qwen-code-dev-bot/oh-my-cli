@@ -486,7 +486,7 @@ describe("tui-shell: whole-screen composition", () => {
     const text = renderShell(baseState()).join("\n");
     expect(text).toContain("╭───╮");
     expect(text).toContain(">_ OH MY CLI");
-    expect(text).toContain("(/model to change)");
+    expect(text).toContain("(/model for details)");
     expect(text).toContain("Tips: /attach an image");
     expect(text).toContain("Ctrl+K");
   });
