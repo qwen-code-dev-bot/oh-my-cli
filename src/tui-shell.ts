@@ -19,13 +19,12 @@ import type { AgentSink, AgentUsage, AgentRetry } from "./agent.js";
 import { runAgent } from "./agent.js";
 import { loadImageAttachments } from "./image-input.js";
 import type { LoadedImage } from "./image-input.js";
-import { runPalette } from "./palette.js";
+import { filterCommands, runPalette, slashPreviewQuery } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
 import { VERSION, WIDE_WORDMARK, colorizeBannerRow } from "./product-banner.js";
 import type { ColorDepth } from "./product-banner.js";
 import {
-  INTERACTIVE_SLASH_COMMANDS,
   formatRuntimeSlashCommand,
   resolveSlashCommand,
 } from "./slash-command.js";
@@ -37,6 +36,7 @@ import {
 // Total composer band height (a state rule line plus bounded input rows).
 export const COMPOSER_MAX_ROWS = 8;
 export const COMPOSER_MIN_ROWS = 1;
+export const SLASH_PREVIEW_MAX_ITEMS = 4;
 export const IDENTITY_MAX_ROWS = 7;
 export const STATUS_ROWS = 2;
 
@@ -67,6 +67,23 @@ const MAX_DIFF_INPUT_LINES = 500;
 // A failure's concise cause is bounded to this many characters so the summary row
 // stays one line before the verbose diagnostics are expanded (Issue #163).
 const MAX_FAILURE_CAUSE_CHARS = 120;
+const TERMINAL_ESCAPE_KEYS = [
+  "\x1b\r",
+  "\x1b\n",
+  "\x1b[A",
+  "\x1b[B",
+  "\x1b[C",
+  "\x1b[D",
+  "\x1bOA",
+  "\x1bOB",
+  "\x1bOC",
+  "\x1bOD",
+  "\x1b[3~",
+  "\x1b[5~",
+  "\x1b[6~",
+  "\x1bOH",
+  "\x1bOF",
+] as const;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -108,8 +125,36 @@ export interface ShellStyle {
   dim: string;
   accent: string;
   accentSoft: string;
+  accentWarm: string;
   success: string;
   reset: string;
+}
+
+export interface SlashPreviewState {
+  items: readonly PaletteCommand[];
+  selected: number;
+}
+
+export type EscapeInputResult =
+  | { kind: "key"; key: string; rest: string }
+  | { kind: "wait"; pending: string }
+  | { kind: "escape"; rest: string };
+
+export function decodeTerminalEscape(
+  pending: string,
+  incoming: string,
+): EscapeInputResult {
+  const candidate = pending + incoming;
+  const key = TERMINAL_ESCAPE_KEYS.find((value) =>
+    candidate.startsWith(value),
+  );
+  if (key) {
+    return { kind: "key", key, rest: candidate.slice(key.length) };
+  }
+  if (TERMINAL_ESCAPE_KEYS.some((value) => value.startsWith(candidate))) {
+    return { kind: "wait", pending: candidate };
+  }
+  return { kind: "escape", rest: candidate.slice(1) };
 }
 
 export type TranscriptKind = "user" | "assistant" | "tool" | "notice" | "error" | "streaming";
@@ -251,6 +296,7 @@ export interface ShellState {
   // dismissed by `?`/Esc/Ctrl+C). Optional so pure render callers and tests can
   // omit it (treated as closed).
   helpOpen?: boolean;
+  slashPreview?: SlashPreviewState;
 }
 
 // Options controlling how transcript blocks are flattened/rendered.
@@ -308,7 +354,15 @@ export interface ComposedScreen {
 export function shellStyle(color: boolean | ColorDepth): ShellStyle {
   const depth: ColorDepth = typeof color === "boolean" ? (color ? "256" : "none") : color;
   if (depth === "none") {
-    return { bold: "", dim: "", accent: "", accentSoft: "", success: "", reset: "" };
+    return {
+      bold: "",
+      dim: "",
+      accent: "",
+      accentSoft: "",
+      accentWarm: "",
+      success: "",
+      reset: "",
+    };
   }
   if (depth === "basic") {
     return {
@@ -316,6 +370,7 @@ export function shellStyle(color: boolean | ColorDepth): ShellStyle {
       dim: "\x1b[2m",
       accent: "\x1b[34m", // blue
       accentSoft: "\x1b[36m", // cyan
+      accentWarm: "\x1b[35m", // magenta
       success: "\x1b[32m", // green
       reset: "\x1b[0m",
     };
@@ -325,6 +380,7 @@ export function shellStyle(color: boolean | ColorDepth): ShellStyle {
     dim: "\x1b[2m",
     accent: "\x1b[38;5;27m",
     accentSoft: "\x1b[38;5;45m",
+    accentWarm: "\x1b[38;5;176m",
     success: "\x1b[38;5;114m",
     reset: "\x1b[0m",
   };
@@ -458,9 +514,18 @@ export function computeLayout(viewport: Viewport, opts: { composerRows?: number 
 }
 
 // Desired total composer band height (state rule + bounded input rows).
-export function composerTotalRows(text: string): number {
+export function composerTotalRows(
+  text: string,
+  preview?: SlashPreviewState,
+): number {
   const textLines = text === "" ? 1 : text.split("\n").length;
-  return clamp(textLines + 2, 3, COMPOSER_MAX_ROWS);
+  const previewRows = preview
+    ? 1 + Math.min(
+        Math.max(1, preview.items.length),
+        SLASH_PREVIEW_MAX_ITEMS,
+      )
+    : 0;
+  return clamp(textLines + 2 + previewRows, 3, COMPOSER_MAX_ROWS);
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,7 +1170,7 @@ export function renderIdentity(
     const rows = WIDE_WORDMARK.map((line) => colorizeBannerRow(line, depth));
     return [
       ...rows,
-      `${style.dim}Tips: /attach an image for vision, or Ctrl+K to browse commands.${style.reset}`,
+      `${style.dim}Tips: Type / to browse commands; /attach adds images.${style.reset}`,
     ];
   }
   if (height >= 2 && cols >= 20) {
@@ -1198,7 +1263,15 @@ export function questionMarkOpensHelp(composerText: string): boolean {
 // a secret or a host path.
 export function renderShortcutHelp(width: number, style?: ShellStyle): string[] {
   const w = Math.max(0, Math.floor(width));
-  const s = style ?? { bold: "", dim: "", accent: "", accentSoft: "", success: "", reset: "" };
+  const s = style ?? {
+    bold: "",
+    dim: "",
+    accent: "",
+    accentSoft: "",
+    accentWarm: "",
+    success: "",
+    reset: "",
+  };
   const keyCol = SHORTCUT_HELP.reduce((m, e) => Math.max(m, visibleWidth(e.keys)), 0);
   const out: string[] = [];
   out.push(clipVisible(`${s.bold}${s.accent}? ${SHORTCUT_HELP_TITLE}${s.reset}`, w));
@@ -1493,7 +1566,7 @@ export function renderComposer(
   state: ComposerState,
   layout: ShellLayout,
   style: ShellStyle,
-  opts: { turn?: TurnState } = {},
+  opts: { turn?: TurnState; slashPreview?: SlashPreviewState } = {},
 ): string[] {
   const height = Math.max(0, layout.composer.end - layout.composer.start);
   if (height === 0) return [];
@@ -1506,7 +1579,20 @@ export function renderComposer(
     : `${marker.glyph} ${marker.label}`;
   const useFrame = height >= 3;
   const useTopRule = height >= 2;
-  const textHeight = height - (useTopRule ? 1 : 0) - (useFrame ? 1 : 0);
+  const preview = opts.slashPreview;
+  const previewRows = preview
+    ? 1 + Math.min(
+        Math.max(1, preview.items.length),
+        SLASH_PREVIEW_MAX_ITEMS,
+      )
+    : 0;
+  const textHeight = Math.max(
+    1,
+    height -
+      (useTopRule ? 1 : 0) -
+      (useFrame ? 1 : 0) -
+      previewRows,
+  );
 
   const lines: string[] = [];
   if (useTopRule) lines.push(renderRule(label, cols, style));
@@ -1524,6 +1610,39 @@ export function renderComposer(
     const shown = wrapped.slice(Math.max(0, wrapped.length - textHeight));
     for (const w of shown) lines.push(`${style.accent}${lead}${style.reset}${w}`);
   }
+  if (preview) {
+    const total = preview.items.length;
+    const selected = clamp(preview.selected, 0, Math.max(0, total - 1));
+    const position = total === 0 ? "0/0" : `${selected + 1}/${total}`;
+    const hints = `COMMANDS ${position}  ↑↓ select · Tab complete · Esc close`;
+    lines.push(clipVisible(`${style.dim}${hints}${style.reset}`, cols));
+
+    if (total === 0) {
+      lines.push(
+        clipVisible(
+          `${style.accentWarm}◇${style.reset} ${style.dim}No matching commands${style.reset}`,
+          cols,
+        ),
+      );
+    } else {
+      const visible = Math.min(total, SLASH_PREVIEW_MAX_ITEMS);
+      const start = clamp(selected - visible + 1, 0, Math.max(0, total - visible));
+      for (let index = start; index < start + visible; index++) {
+        const command = preview.items[index];
+        const active = index === selected;
+        const marker = active
+          ? `${style.accentSoft}◆${style.reset}`
+          : `${style.dim}·${style.reset}`;
+        const name = active
+          ? `${style.bold}${style.accent}${command.name}${style.reset}`
+          : command.name;
+        const description = active
+          ? `${style.accentWarm}${command.description}${style.reset}`
+          : `${style.dim}${command.description}${style.reset}`;
+        lines.push(clipVisible(`${marker} ${name}  ${description}`, cols));
+      }
+    }
+  }
   if (useFrame) lines.push(renderBottomRule(cols, style));
   return lines.slice(0, height);
 }
@@ -1535,10 +1654,16 @@ export function renderComposer(
 export function composeScreen(state: ShellState): ComposedScreen {
   const depth: ColorDepth = state.colorDepth ?? (state.color ? "256" : "none");
   const style = shellStyle(depth);
-  const composerRows = composerTotalRows(state.composer.text);
+  const composerRows = composerTotalRows(
+    state.composer.text,
+    state.slashPreview,
+  );
   const layout = computeLayout(state.viewport, { composerRows });
 
-  const composerLines = renderComposer(state.composer, layout, style, { turn: state.turn });
+  const composerLines = renderComposer(state.composer, layout, style, {
+    turn: state.turn,
+    slashPreview: state.slashPreview,
+  });
   const statusLines = renderStatusLine(state.status, layout, style, {
     learned: state.hintsLearned ?? false,
     scroll: state.scroll,
@@ -1697,7 +1822,11 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     viewport: { rows: stdout.rows ?? 24, cols: stdout.columns ?? 80 },
     version: VERSION,
     transcript: seededTranscript,
-    composer: { mode: "focused", text: "", placeholder: "Ask a question, or Ctrl+K for commands" },
+    composer: {
+      mode: "focused",
+      text: "",
+      placeholder: "Ask a question, or type / for commands",
+    },
     status: {
       model: opts.config.model,
       workspace: redactHomePath(opts.workspace.root),
@@ -1720,6 +1849,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   // Generation guard: a cancelled run stops contributing to the UI even though
   // the underlying provider call cannot be aborted (no new provider capability).
   let runGeneration = 0;
+  let slashPreviewDismissedFor: string | null = null;
+  let escapeBuffer = "";
+  let escapeTimer: NodeJS.Timeout | null = null;
 
   const write = (s: string): void => {
     stdout.write(s);
@@ -1728,6 +1860,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   function cleanup(): void {
     if (cleaned) return;
     cleaned = true;
+    if (escapeTimer) clearTimeout(escapeTimer);
     try {
       stdin.setRawMode(false);
     } catch {
@@ -1767,16 +1900,63 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     state.composer.mode = state.composer.text.includes("\n") ? "multiline" : "focused";
   }
 
+  function refreshSlashPreview(resetSelection = false): void {
+    const query = slashPreviewQuery(state.composer.text);
+    if (
+      query === null ||
+      slashPreviewDismissedFor === state.composer.text
+    ) {
+      state.slashPreview = undefined;
+      return;
+    }
+    const items = filterCommands(opts.paletteCommands, query);
+    const previous = resetSelection ? 0 : (state.slashPreview?.selected ?? 0);
+    state.slashPreview = {
+      items,
+      selected: clamp(previous, 0, Math.max(0, items.length - 1)),
+    };
+  }
+
+  function moveSlashSelection(delta: number): void {
+    const preview = state.slashPreview;
+    if (!preview || preview.items.length === 0) return;
+    const count = preview.items.length;
+    preview.selected = (preview.selected + delta + count) % count;
+    scheduleRender();
+  }
+
+  function completeSlashSelection(run: boolean): void {
+    const preview = state.slashPreview;
+    const command = preview?.items[preview.selected];
+    if (!command) return;
+    state.composer.text = command.name;
+    history = commitDraft(history, state.composer.text);
+    slashPreviewDismissedFor = run ? state.composer.text : null;
+    refreshMode();
+    refreshSlashPreview();
+    if (run) submit();
+    else scheduleRender();
+  }
+
+  function dismissSlashPreview(): void {
+    if (!state.slashPreview) return;
+    slashPreviewDismissedFor = state.composer.text;
+    state.slashPreview = undefined;
+    scheduleRender();
+  }
+
   function insert(text: string): void {
     if (!editable()) return;
     // Typing again clears a lingering terminal outcome (completed/failed/cancelled)
     // so the indicator yields back to the editable composer.
     state.turn = advanceTurn(state.turn, { type: "engage" });
     state.composer.text += text;
+    slashPreviewDismissedFor = null;
     // Editing commits the visible text as the draft and leaves history navigation
     // so a recalled prompt the user modifies is not lost on the next recall.
     history = commitDraft(history, state.composer.text);
     refreshMode();
+    refreshSlashPreview(true);
     scheduleRender();
   }
 
@@ -1784,7 +1964,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     if (!editable()) return;
     state.turn = advanceTurn(state.turn, { type: "engage" });
     state.composer.text += "\n";
+    slashPreviewDismissedFor = null;
     state.composer.mode = "multiline";
+    refreshSlashPreview(true);
     history = commitDraft(history, state.composer.text);
     scheduleRender();
   }
@@ -1792,8 +1974,10 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   function backspace(): void {
     if (!editable() || state.composer.text.length === 0) return;
     state.composer.text = state.composer.text.slice(0, -1);
+    slashPreviewDismissedFor = null;
     history = commitDraft(history, state.composer.text);
     refreshMode();
+    refreshSlashPreview(true);
     scheduleRender();
   }
 
@@ -1828,7 +2012,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     const r = recallOlder(history, state.composer.text);
     history = r.history;
     state.composer.text = r.text;
+    slashPreviewDismissedFor = null;
     refreshMode();
+    refreshSlashPreview(true);
     scheduleRender();
   }
 
@@ -1838,14 +2024,19 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     const r = recallNewer(history, state.composer.text);
     history = r.history;
     state.composer.text = r.text;
+    slashPreviewDismissedFor = null;
     refreshMode();
+    refreshSlashPreview(true);
     scheduleRender();
   }
 
   // Height of the transcript region for the current viewport/composer, used to
   // bound scrolling and to anchor the view across expand/collapse.
   function transcriptHeight(): number {
-    const composerRows = composerTotalRows(state.composer.text);
+    const composerRows = composerTotalRows(
+      state.composer.text,
+      state.slashPreview,
+    );
     return computeLayout(state.viewport, { composerRows }).transcriptRows;
   }
 
@@ -2127,9 +2318,14 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     const text = state.composer.text.trim();
     const slash = text.startsWith("/attach")
       ? { kind: "prompt" as const }
-      : resolveSlashCommand(text, INTERACTIVE_SLASH_COMMANDS);
+      : resolveSlashCommand(
+          text,
+          opts.paletteCommands.map((command) => command.name),
+        );
     if (slash.kind === "unknown") {
       state.composer.text = "";
+      state.slashPreview = undefined;
+      slashPreviewDismissedFor = null;
       history = commitDraft(history, "");
       refreshMode();
       state.transcript.push({ kind: "notice", text: slash.message });
@@ -2138,6 +2334,8 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     }
     if (slash.kind === "command") {
       state.composer.text = "";
+      state.slashPreview = undefined;
+      slashPreviewDismissedFor = null;
       history = commitDraft(history, "");
       refreshMode();
       const command = opts.paletteCommands.find(
@@ -2155,6 +2353,8 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     }
     if (text.startsWith("/attach")) {
       state.composer.text = "";
+      state.slashPreview = undefined;
+      slashPreviewDismissedFor = null;
       const paths = text.slice("/attach".length).split(/\s+/).filter(Boolean);
       if (paths.length === 0) {
         state.transcript.push({ kind: "notice", text: "usage: /attach <image-path> [more-paths...]" });
@@ -2175,6 +2375,8 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       return;
     }
     state.composer.text = "";
+    state.slashPreview = undefined;
+    slashPreviewDismissedFor = null;
     state.composer.mode = "submitting";
     state.turn = advanceTurn(state.turn, { type: "submit" });
     state.transcript.push({ kind: "user", text });
@@ -2255,6 +2457,8 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         return;
       case "clear-draft":
         state.composer.text = "";
+        state.slashPreview = undefined;
+        slashPreviewDismissedFor = null;
         history = commitDraft(history, "");
         refreshMode();
         scheduleRender();
@@ -2350,6 +2554,37 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
 
   function onData(buf: Buffer): void {
     if (paletteOpen) return;
+    const incoming = buf.toString("utf-8");
+    if (escapeBuffer || incoming.startsWith("\x1b")) {
+      if (escapeTimer) clearTimeout(escapeTimer);
+      escapeTimer = null;
+      const decoded = decodeTerminalEscape(escapeBuffer, incoming);
+      if (decoded.kind === "key") {
+        escapeBuffer = "";
+        handleData(Buffer.from(decoded.key));
+        if (decoded.rest) onData(Buffer.from(decoded.rest));
+        return;
+      }
+      if (decoded.kind === "wait") {
+        escapeBuffer = decoded.pending;
+        escapeTimer = setTimeout(() => {
+          const pending = escapeBuffer;
+          escapeBuffer = "";
+          escapeTimer = null;
+          if (pending) handleData(Buffer.from(pending));
+        }, 25);
+        return;
+      }
+      escapeBuffer = "";
+      handleData(Buffer.from("\x1b"));
+      if (decoded.rest) handleData(Buffer.from(decoded.rest));
+      return;
+    }
+    handleData(buf);
+  }
+
+  function handleData(buf: Buffer): void {
+    if (paletteOpen) return;
     const s = buf.toString("utf-8");
 
     // While the help panel is open it is modal: only the dismiss gestures act
@@ -2367,6 +2602,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       const b = buf[0];
       if (b === 0x03) return onCtrlC(); // Ctrl+C
       if (b === 0x04) return shutdown(0); // Ctrl+D
+      if (b === 0x1b && state.slashPreview) return dismissSlashPreview();
       if (b === 0x0b) {
         void openPalette();
         return;
@@ -2375,9 +2611,16 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         paint();
         return;
       } // Ctrl+L redraw
-      if (b === 0x09) return toggleExpandSelected(); // Tab: expand/collapse the selected block in place
+      if (b === 0x09) {
+        if (state.slashPreview) return completeSlashSelection(false);
+        return toggleExpandSelected();
+      } // Tab: complete a slash command, otherwise expand/collapse transcript
       if (b === 0x7f || b === 0x08) return backspace();
       if (b === 0x0d || b === 0x0a) {
+        if (state.slashPreview?.items.length) {
+          completeSlashSelection(true);
+          return;
+        }
         submit();
         return;
       }
@@ -2393,8 +2636,14 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // Prompt-history recall (criterion 2): Up/Down recall previous prompts in both
     // normal (\x1b[A/B) and application (\x1bOA/OB) cursor modes. This slice keeps
     // the caret at end-of-input, so recall never hijacks intra-text cursor movement.
-    if (s === "\x1b[A" || s === "\x1bOA") return recallPrevious();
-    if (s === "\x1b[B" || s === "\x1bOB") return recallNext();
+    if (s === "\x1b[A" || s === "\x1bOA") {
+      if (state.slashPreview) return moveSlashSelection(-1);
+      return recallPrevious();
+    }
+    if (s === "\x1b[B" || s === "\x1bOB") {
+      if (state.slashPreview) return moveSlashSelection(1);
+      return recallNext();
+    }
     // PageUp/PageDown scroll the transcript window without touching the composer,
     // so earlier diffs/failures can be inspected in context (Issue #163). PageUp
     // lifts the view up (toward older content); PageDown returns toward the newest.

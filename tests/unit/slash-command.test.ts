@@ -34,7 +34,7 @@ describe("resolveSlashCommand", () => {
     expect(resolveSlashCommand("/wat", commands)).toEqual({
       kind: "unknown",
       input: "/wat",
-      message: "Unknown command /wat. Use /help or Ctrl+K to browse commands.",
+      message: "Unknown command /wat. Type / to browse commands.",
     });
   });
 

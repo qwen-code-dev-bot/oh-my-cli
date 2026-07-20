@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { filterCommands, defaultCommands, renderPaletteLines, paletteStyle } from "../../src/palette.js";
+import {
+  filterCommands,
+  defaultCommands,
+  renderPaletteLines,
+  paletteStyle,
+  slashPreviewQuery,
+} from "../../src/palette.js";
 import type { PaletteCommand } from "../../src/palette.js";
 
 describe("Palette: filterCommands", () => {
@@ -50,6 +56,17 @@ describe("Palette: filterCommands", () => {
   it("matches across name and description", () => {
     const result = filterCommands(commands, "session");
     expect(result.length).toBeGreaterThanOrEqual(2); // new, resume, exit all mention "session"
+  });
+});
+
+describe("Palette: inline slash preview activation", () => {
+  it("opens only for one leading slash token", () => {
+    expect(slashPreviewQuery("/")).toBe("");
+    expect(slashPreviewQuery("/go")).toBe("go");
+    expect(slashPreviewQuery("explain /goal")).toBeNull();
+    expect(slashPreviewQuery("/goal build this")).toBeNull();
+    expect(slashPreviewQuery("/goal\nnext")).toBeNull();
+    expect(slashPreviewQuery("//nested")).toBeNull();
   });
 });
 

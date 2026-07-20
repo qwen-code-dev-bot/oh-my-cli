@@ -58,6 +58,8 @@ import {
   scrollToKeepAnchor,
   resizeScrollOffset,
   COMPOSER_MAX_ROWS,
+  SLASH_PREVIEW_MAX_ITEMS,
+  decodeTerminalEscape,
   TRANSCRIPT_PREVIEW_LINES,
 } from "../../src/tui-shell.js";
 import type {
@@ -143,6 +145,84 @@ describe("tui-shell: bounded multiline growth", () => {
     expect(layout.composerRows).toBeLessThanOrEqual(COMPOSER_MAX_ROWS);
     // The newest input line is shown.
     expect(screen.lines.join("\n")).toContain("line29");
+  });
+});
+
+describe("tui-shell: inline slash command preview", () => {
+  const commands = [
+    { name: "/goal", description: "Set a session goal", action: () => {} },
+    { name: "/help", description: "Show keyboard help", action: () => {} },
+    { name: "/status", description: "Show session status", action: () => {} },
+    { name: "/tools", description: "List tools", action: () => {} },
+    { name: "/exit", description: "Exit", action: () => {} },
+  ];
+
+  it("renders a bounded selected list inside the composer", () => {
+    const preview = { items: commands, selected: 4 };
+    const layout = computeLayout(
+      { rows: 24, cols: 100 },
+      { composerRows: composerTotalRows("/", preview) },
+    );
+    const lines = renderComposer(
+      { mode: "focused", text: "/", placeholder: "" },
+      layout,
+      shellStyle(false),
+      { slashPreview: preview },
+    );
+    const text = lines.join("\n");
+    expect(lines).toHaveLength(COMPOSER_MAX_ROWS);
+    expect(text).toContain("COMMANDS 5/5");
+    expect(text).toContain("◆ /exit");
+    expect(text).toContain("Tab complete");
+    expect(text).not.toContain("/goal");
+  });
+
+  it("renders an actionable empty state without relying on color", () => {
+    const preview = { items: [], selected: 0 };
+    const layout = computeLayout(
+      { rows: 20, cols: 60 },
+      { composerRows: composerTotalRows("/wat", preview) },
+    );
+    const lines = renderComposer(
+      { mode: "focused", text: "/wat", placeholder: "" },
+      layout,
+      shellStyle(false),
+      { slashPreview: preview },
+    );
+    expect(lines.join("\n")).toContain("◇ No matching commands");
+    expect(lines.join("\n")).not.toMatch(ANSI);
+  });
+
+  it("keeps the preview within the maximum composer height", () => {
+    const preview = { items: commands, selected: 0 };
+    expect(composerTotalRows("/", preview)).toBe(COMPOSER_MAX_ROWS);
+    expect(SLASH_PREVIEW_MAX_ITEMS).toBe(4);
+  });
+});
+
+describe("tui-shell: split terminal escape decoding", () => {
+  it("waits for and joins a direction key split across PTY chunks", () => {
+    expect(decodeTerminalEscape("", "\x1b")).toEqual({
+      kind: "wait",
+      pending: "\x1b",
+    });
+    expect(decodeTerminalEscape("\x1b", "[B")).toEqual({
+      kind: "key",
+      key: "\x1b[B",
+      rest: "",
+    });
+  });
+
+  it("preserves bytes following a complete key and separates standalone Esc", () => {
+    expect(decodeTerminalEscape("", "\x1b[A/")).toEqual({
+      kind: "key",
+      key: "\x1b[A",
+      rest: "/",
+    });
+    expect(decodeTerminalEscape("\x1b", "x")).toEqual({
+      kind: "escape",
+      rest: "x",
+    });
   });
 });
 
@@ -485,9 +565,9 @@ describe("tui-shell: whole-screen composition", () => {
   it("uses a Qwen-style product header and quiet first-run canvas", () => {
     const text = renderShell(baseState({ viewport: { rows: 24, cols: 120 } })).join("\n");
     expect(text).toContain("██╔═══██╗");
-    expect(text).toContain("Tips: /attach an image for vision, or Ctrl+K to browse commands.");
+    expect(text).toContain("Tips: Type / to browse commands; /attach adds images.");
     expect(text).not.toContain("/model switch");
-    expect(text).toContain("Ctrl+K");
+    expect(text).toContain("Type / to browse commands");
     expect(text).not.toContain("┌");
     expect(text).toContain("\x1b[1;38;5;75m");
     expect(text).toContain("\x1b[1;38;5;99m");

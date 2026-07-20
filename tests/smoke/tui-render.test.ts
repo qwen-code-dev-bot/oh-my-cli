@@ -55,7 +55,11 @@ function stateFor(
     viewport: { rows, cols },
     version: "0.1.0",
     transcript: richTranscript(),
-    composer: { mode: "focused", text: "", placeholder: "Ask a question, or Ctrl+K for commands" },
+    composer: {
+      mode: "focused",
+      text: "",
+      placeholder: "Ask a question, or type / for commands",
+    },
     status: { model: "fake-model", workspace: "~/proj", approvalMode: "default", contextUsage: "tokens 4096" },
     color: opts.color,
     colorDepth: opts.colorDepth,
