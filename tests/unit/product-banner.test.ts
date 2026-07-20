@@ -27,11 +27,13 @@ const sample: BannerModel = {
 };
 
 describe("block art geometry", () => {
-  it("wide wordmark is a rectangular 5x37 grid", () => {
+  it("wide wordmark is a rectangular 5x41 outlined grid", () => {
     expect(WIDE_WORDMARK).toHaveLength(5);
     for (const row of WIDE_WORDMARK) {
-      expect([...row].length).toBe(37);
+      expect([...row].length).toBe(41);
     }
+    expect(WIDE_WORDMARK.join("\n")).toContain("╭───╮");
+    expect(WIDE_WORDMARK.join("\n")).toContain("├───┤");
   });
 
   it("medium mark is a rectangular 3x13 grid", () => {
@@ -41,11 +43,10 @@ describe("block art geometry", () => {
     }
   });
 
-  it("art uses only full blocks and spaces (no fragile Unicode)", () => {
+  it("art contains no controls, bidirectional marks, or zero-width glyphs", () => {
     for (const row of [...WIDE_WORDMARK, ...MEDIUM_MARK]) {
-      for (const ch of row) {
-        expect(ch === "█" || ch === " ").toBe(true);
-      }
+      expect(row).not.toMatch(/[\u0000-\u001f\u007f]/);
+      expect(row).not.toMatch(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/);
     }
   });
 });
@@ -139,11 +140,11 @@ describe("renderProductBanner", () => {
     expect(out).toContain("approval default");
   });
 
-  it("wide truecolor emits 24-bit color and block glyphs", () => {
+  it("wide truecolor emits 24-bit color and outlined glyphs", () => {
     const out = renderProductBanner(sample, { variant: "wide", depth: "truecolor", width: 100 });
     expect(out).toContain("\x1b[38;2;");
     expect(out).toContain("\x1b[0m");
-    expect(out).toContain("█");
+    expect(out).toContain("╭───╮");
   });
 
   it("256 depth emits indexed color", () => {
@@ -186,7 +187,7 @@ describe("formatProductBanner", () => {
       env: { COLORTERM: "truecolor" },
       isTTY: true,
     });
-    expect(out).toContain("█");
+    expect(out).toContain("╭───╮");
     expect(out).toContain("\x1b[38;2;");
   });
 
