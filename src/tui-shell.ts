@@ -15,7 +15,7 @@ import type { Workspace } from "./workspace.js";
 import type { ApprovalMode } from "./approval.js";
 import { promptApproval } from "./approval.js";
 import type { SessionGoalCheckpoint, SessionMessage } from "./session.js";
-import type { AgentSink, AgentUsage, AgentRetry } from "./agent.js";
+import type { AgentSink, AgentUsage, AgentRetry, AgentResult } from "./agent.js";
 import { runAgent } from "./agent.js";
 import { loadImageAttachments } from "./image-input.js";
 import type { LoadedImage } from "./image-input.js";
@@ -33,6 +33,8 @@ import {
   formatSideContextSummary,
   runSideQuestion,
 } from "./side-question.js";
+import { buildSessionStats, formatSessionStats } from "./session-stats.js";
+import type { SessionStats, SessionStatsRuntime } from "./session-stats.js";
 import {
   collectWorkspaceReferences,
   filterReferences,
@@ -366,6 +368,12 @@ export interface ShellState {
   // as a distinct overlay over the main area; the composer and status stay
   // anchored. Optional so pure render callers and tests can omit it.
   sideQuestion?: SideQuestionState;
+  // A read-only session-stats view (Issue #201). When present it renders as a
+  // distinct overlay over the main area; the composer and status stay anchored.
+  // A snapshot computed on open from the canonical log plus this session's live
+  // runtime, so it never mutates the session it inspects. Optional so pure
+  // render callers and tests can omit it.
+  stats?: SessionStats;
   now?: number;
   reducedMotion?: boolean;
 }
@@ -1525,6 +1533,47 @@ export function renderSideQuestionPanel(
   return clipped;
 }
 
+// Render the session-stats overlay (Issue #201) into the main area above the
+// composer, mirroring the help/side-question fill pattern. It is a read-only,
+// deterministic view of the session's activity, context, model requests, tool
+// outcomes, and timing; every value states its provenance (measured / estimate
+// / n/a) so nothing is fabricated. The title and dismiss hint stay visible when
+// the region is short; the stats body fills the space between and is clipped to
+// the column budget so it reads on narrow terminals and without color.
+export function renderStatsPanel(
+  height: number,
+  cols: number,
+  style: ShellStyle,
+  stats: SessionStats,
+): string[] {
+  const h = Math.max(0, Math.floor(height));
+  if (h === 0) return [];
+  const w = Math.max(0, Math.floor(cols));
+
+  const head: string[] = [
+    clipVisible(
+      `${style.bold}${style.accent}▤ Session stats${style.reset}  ${style.dim}(read-only · derived from the session record)${style.reset}`,
+      w,
+    ),
+    renderRule("activity · context · model · tools · timing", w, style),
+  ];
+
+  const body = formatSessionStats(stats, { style }).map((line) => clipVisible(line, w));
+
+  const foot: string[] = ["", clipVisible(`${style.dim}Esc close${style.reset}`, w)];
+
+  const out: string[] = [];
+  const bodyBudget = h - head.length - foot.length;
+  if (bodyBudget <= 0) {
+    out.push(...head.slice(0, h));
+  } else {
+    out.push(...head, ...body.slice(0, bodyBudget), ...foot);
+  }
+  const clipped = out.slice(0, h);
+  while (clipped.length < h) clipped.push("");
+  return clipped;
+}
+
 function renderEmptyTranscript(region: Region, _cols: number, _style: ShellStyle): string[] {
   const height = Math.max(0, region.end - region.start);
   if (height === 0) return [];
@@ -2023,6 +2072,14 @@ export function composeScreen(state: ShellState): ComposedScreen {
     lines.push(
       ...renderSideQuestionPanel(layout.composer.start, layout.viewport.cols, style, state.sideQuestion),
     );
+  } else if (state.stats) {
+    // The stats overlay (Issue #201) takes over the main area above the composer
+    // the same way; it is a read-only snapshot, so the transcript underneath is
+    // untouched and closing it returns to the same conversation. An active side
+    // question (above) wins so a streaming answer is never hidden behind stats.
+    lines.push(
+      ...renderStatsPanel(layout.composer.start, layout.viewport.cols, style, state.stats),
+    );
   } else if (state.helpOpen) {
     // The help panel takes over the main area above the composer (identity +
     // transcript) so the full shortcut list is visible in place; the composer
@@ -2213,6 +2270,19 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   // question or a dismiss supersedes the prior one so a stale stream cannot
   // resurface a dismissed pane.
   let sideAbort: AbortController | null = null;
+  // Live, per-session runtime telemetry for the stats view (Issue #201). Each
+  // completed turn contributes exactly once (from its AgentResult), so retries
+  // and restored events are never double-counted; it is per current session and
+  // starts empty on resume rather than replaying prior turns' provider calls.
+  const sessionRuntime: SessionStatsRuntime = {
+    rounds: 0,
+    retries: 0,
+    elapsedMs: 0,
+    tokens: null,
+    estimatedCostUsd: null,
+    costKnown: true,
+    toolFailures: {},
+  };
   let slashPreviewDismissedFor: string | null = null;
   // The `@` reference picker (Issue #196): the text for which an open picker was
   // dismissed (so it does not immediately reopen), and the cached candidate
@@ -2570,6 +2640,42 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     if (b === 0x1b || b === 0x03 || b === 0x64) return dismissSideQuestion(); // Esc, Ctrl+C, d
     if (b === 0x0d || b === 0x0a || b === 0x70) return promoteSideToComposer(); // Enter, p
     if (b === 0x63 || b === 0x79) return copySideAnswer(); // c, y
+  }
+
+  // Session stats (Issue #201): open a read-only overlay computed from the
+  // canonical message log plus this session's live runtime. Isolation is
+  // structural — it reads the conversation snapshot and the in-memory runtime
+  // only, never appending to the transcript, goal, or workflow.
+  function openStats(): void {
+    let messages: SessionMessage[] = [];
+    try {
+      messages = opts.loadHistory();
+    } catch {
+      messages = [];
+    }
+    state.stats = buildSessionStats({
+      sessionId: opts.sessionId,
+      messages,
+      model: opts.config.model,
+      workspace: redactHomePath(opts.workspace.root),
+      runtime: sessionRuntime,
+    });
+    scheduleRender();
+  }
+
+  function closeStats(): void {
+    if (!state.stats) return;
+    state.stats = undefined;
+    scheduleRender();
+  }
+
+  // Route a key while the stats overlay is open. The overlay is modal (like the
+  // help panel): only the dismiss gestures act, and nothing is typed behind it.
+  function handleStatsKey(buf: Buffer): void {
+    if (buf.length !== 1) return;
+    const b = buf[0];
+    // Esc, Ctrl+C, q, ?, d
+    if (b === 0x1b || b === 0x03 || b === 0x71 || b === 0x3f || b === 0x64) closeStats();
   }
 
   // Prompt-history recall (criterion 2). This slice keeps the caret at
@@ -2990,8 +3096,38 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     submitChain = submitChain.then(() => runOne(text, images));
   }
 
+  // Fold one completed turn's canonical result into the live runtime tally for
+  // the stats view (Issue #201). Called exactly once per settled turn (after the
+  // generation check), so retries and restored events are never double-counted.
+  function accumulateRuntime(result: AgentResult, elapsedMs: number): void {
+    sessionRuntime.rounds = (sessionRuntime.rounds ?? 0) + Math.max(0, result.rounds);
+    sessionRuntime.retries = (sessionRuntime.retries ?? 0) + Math.max(0, result.retries);
+    sessionRuntime.elapsedMs = (sessionRuntime.elapsedMs ?? 0) + Math.max(0, elapsedMs);
+    if (result.tokens) {
+      const t = sessionRuntime.tokens ?? { prompt: 0, completion: 0, total: 0 };
+      sessionRuntime.tokens = {
+        prompt: t.prompt + result.tokens.prompt,
+        completion: t.completion + result.tokens.completion,
+        total: t.total + result.tokens.total,
+      };
+    }
+    if (result.estimatedCostUsd != null) {
+      sessionRuntime.estimatedCostUsd =
+        (sessionRuntime.estimatedCostUsd ?? 0) + result.estimatedCostUsd;
+      // Once any turn falls back to the conservative price, the aggregate cost
+      // is no longer wholly from known prices.
+      sessionRuntime.costKnown = (sessionRuntime.costKnown ?? true) && result.costKnown;
+    }
+    const failures = sessionRuntime.toolFailures ?? {};
+    for (const [name, n] of Object.entries(result.stats.toolFailures)) {
+      failures[name] = (failures[name] ?? 0) + n;
+    }
+    sessionRuntime.toolFailures = failures;
+  }
+
   async function runOne(text: string, images: LoadedImage[] = []): Promise<void> {
     const generation = ++runGeneration;
+    const turnStart = Date.now();
     try {
       const history = opts.loadHistory();
       const result = await runAgent(text, history.slice(0, -1), {
@@ -3016,6 +3152,8 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         scheduleRender();
         return;
       }
+      // A settled turn contributes its canonical telemetry exactly once.
+      accumulateRuntime(result, Date.now() - turnStart);
       state.composer.mode = result.ok ? "focused" : "error";
       state.turn = advanceTurn(state.turn, { type: result.ok ? "complete" : "fail" });
       if (result.tokens) state.status.contextUsage = `tokens ${result.tokens.total}`;
@@ -3108,6 +3246,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       openHelp();
       return;
     }
+    if (cmd.name === "/stats") {
+      // Open the in-place read-only stats overlay (Issue #201) instead of the
+      // plain-REPL fallback action.
+      openStats();
+      return;
+    }
     const runtimeOutput = formatRuntimeSlashCommand(cmd.name, {
       model: opts.config.model,
       workspace: opts.workspace.root,
@@ -3195,6 +3339,13 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // route to cancel/promote/copy/dismiss and nothing is typed behind it.
     if (state.sideQuestion) {
       handleSideQuestionKey(buf);
+      return;
+    }
+
+    // While the stats overlay is open it is modal (Issue #201): only the dismiss
+    // gestures act, and nothing is typed behind it.
+    if (state.stats) {
+      handleStatsKey(buf);
       return;
     }
 

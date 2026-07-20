@@ -12,6 +12,9 @@ import type {
   ReferencePreviewState,
   SideQuestionState,
 } from "../../src/tui-shell.js";
+import { buildSessionStats } from "../../src/session-stats.js";
+import type { SessionStats } from "../../src/session-stats.js";
+import type { SessionMessage } from "../../src/session.js";
 
 // Renders the full-screen shell at the three target terminal dimensions and a
 // reduced-color (basic 16-color) mode plus NO_COLOR, asserting each capture is
@@ -383,5 +386,159 @@ describe("smoke: side-question overlay renders coherently (Issue #200)", () => {
     assertSideCoherent(screen, rows, cols);
     expect(screen.lines.join("")).not.toMatch(/\x1b\[/);
     publish(`side question ${rows}x${cols} (NO_COLOR)`, screen.lines);
+  });
+});
+
+// The session-stats overlay (Issue #201, criterion 6): the E2E harness captures
+// these renders inside a real tmux pane, publishing readable terminal evidence
+// for navigation, populated and unavailable fields, a narrow layout, and parity
+// with the machine-readable form — all from composeScreen, the exact pure path
+// the live driver paints, fed by the same buildSessionStats engine that backs
+// the headless `--session-stats` output.
+describe("smoke: session stats overlay renders coherently (Issue #201)", () => {
+  function statsTranscript(): SessionMessage[] {
+    return [
+      { role: "user", content: "investigate the failing build" },
+      {
+        role: "assistant",
+        content: "looking into it",
+        tool_calls: [
+          { id: "a", type: "function", function: { name: "read_file", arguments: "{}" } },
+          { id: "b", type: "function", function: { name: "read_file", arguments: "{}" } },
+          { id: "c", type: "function", function: { name: "grep", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", content: "file contents", tool_call_id: "a" },
+      { role: "tool", content: "matches", tool_call_id: "c" },
+      { role: "assistant", content: "the build is fine now" },
+    ];
+  }
+
+  // A populated live runtime: every model field is measured, and there is one
+  // tool failure to summarize.
+  function populatedStats(): SessionStats {
+    return buildSessionStats({
+      sessionId: "abc-123",
+      messages: statsTranscript(),
+      model: "fake-model",
+      workspace: "~/proj",
+      runtime: {
+        rounds: 3,
+        retries: 1,
+        elapsedMs: 8400,
+        tokens: { prompt: 500, completion: 80, total: 580 },
+        estimatedCostUsd: 0.0015,
+        costKnown: true,
+        toolFailures: { shell: 1 },
+      },
+    });
+  }
+
+  // No live runtime (a headless read or a freshly resumed session): model
+  // activity, failures, and timing must read n/a, never a fabricated zero.
+  function headlessStats(): SessionStats {
+    return buildSessionStats({
+      sessionId: "abc-123",
+      messages: statsTranscript(),
+      model: "fake-model",
+      workspace: "~/proj",
+    });
+  }
+
+  function statsState(
+    rows: number,
+    cols: number,
+    stats: SessionStats,
+    opts: { color: boolean; colorDepth?: "none" | "basic" | "256" } = {
+      color: true,
+      colorDepth: "256",
+    },
+  ): ShellState {
+    return { ...stateFor(rows, cols, opts), stats };
+  }
+
+  function assertStatsCoherent(
+    screen: { lines: string[] },
+    rows: number,
+    cols: number,
+  ): void {
+    expect(screen.lines).toHaveLength(rows);
+    for (const line of screen.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(cols);
+    const joined = screen.lines.join("\n");
+    expect(joined).toContain("Session stats");
+    expect(joined).toContain("read-only");
+    expect(joined).toContain("Session activity");
+    expect(joined).toContain("Model activity (this session)");
+    expect(joined).toContain("Tool outcomes");
+    // The status footer stays anchored below the overlay.
+    expect(joined).toContain("approval default");
+    // The main transcript is not rendered while the overlay is open.
+    expect(joined).not.toContain("src/layout.ts");
+  }
+
+  for (const { rows, cols } of SIZES) {
+    it(`renders the stats overlay unclipped at ${rows}x${cols}`, () => {
+      const screen = composeScreen(statsState(rows, cols, populatedStats()));
+      assertStatsCoherent(screen, rows, cols);
+      publish(`session stats ${rows}x${cols}`, screen.lines);
+    });
+  }
+
+  it("surfaces tool calls and a failure summary by name at a full height", () => {
+    // At a full height the whole body fits, so the per-name breakdowns are
+    // visible (the smallest terminal truncates the body before these rows).
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const screen = composeScreen(statsState(rows, cols, populatedStats()));
+    assertStatsCoherent(screen, rows, cols);
+    const joined = screen.lines.join("\n");
+    expect(joined).toContain("read_file×2, grep×1");
+    expect(joined).toContain("shell×1");
+    publish(`session stats breakdown ${rows}x${cols}`, screen.lines);
+  });
+
+  it("renders unavailable model fields as n/a when there is no live runtime", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const screen = composeScreen(statsState(rows, cols, headlessStats()));
+    assertStatsCoherent(screen, rows, cols);
+    const joined = screen.lines.join("\n");
+    // No fabricated zeros: model activity, failures, and timing read n/a.
+    expect(joined).toContain("n/a");
+    expect(joined).not.toContain("shell×1"); // no runtime → no failure summary
+    // Tool calls still come from the canonical log.
+    expect(joined).toContain("read_file×2, grep×1");
+    publish(`session stats n/a (no runtime) ${rows}x${cols}`, screen.lines);
+  });
+
+  it("renders the stats overlay within a narrow 24x80 terminal", () => {
+    const { rows, cols } = { rows: 24, cols: 80 };
+    const screen = composeScreen(statsState(rows, cols, populatedStats()));
+    assertStatsCoherent(screen, rows, cols);
+    publish(`session stats ${rows}x${cols} (narrow)`, screen.lines);
+  });
+
+  it("renders the stats overlay with no color (text + structure only)", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const screen = composeScreen(
+      statsState(rows, cols, populatedStats(), { color: false, colorDepth: "none" }),
+    );
+    assertStatsCoherent(screen, rows, cols);
+    expect(screen.lines.join("")).not.toMatch(/\x1b\[/);
+    publish(`session stats ${rows}x${cols} (NO_COLOR)`, screen.lines);
+  });
+
+  it("shows the same numbers as the machine-readable JSON (parity)", () => {
+    const stats = populatedStats();
+    const screen = composeScreen(statsState(36, 120, stats));
+    const joined = screen.lines.join("\n");
+    // The pane and the headless JSON come from the same engine, so every
+    // breakdown rendered in the overlay matches the JSON document field-for-field.
+    for (const [name, count] of Object.entries(stats.tools.calls.byName)) {
+      expect(joined).toContain(`${name}×${count}`);
+    }
+    expect(joined).toContain(String(stats.activity.messages));
+    const json = JSON.parse(JSON.stringify(stats));
+    expect(json.schema).toBe("oh-my-cli.stats");
+    expect(json.tools.calls.byName).toEqual(stats.tools.calls.byName);
+    expect(json.activity.messages).toBe(stats.activity.messages);
   });
 });

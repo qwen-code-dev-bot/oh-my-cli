@@ -241,6 +241,35 @@ provider call carries no tool schemas and any tool-call event is ignored, so a
 side turn can never run a tool or touch the workspace. A headless side question
 leaves the source session byte-identical (transcript and every sidecar).
 
+### Session activity stats (inspectable, no fabrication)
+
+To see where a session's time, context, model requests, and tool activity went
+without reading raw logs, open the read-only *stats view*. It is derived from the
+canonical session record (the persisted messages) plus an optional live-runtime
+enrichment captured during the current session, and is grouped into session
+activity, context usage, model activity, tool outcomes, and elapsed/waiting time.
+Every value states its provenance: a measurement is bare, an estimate (the
+chars/4 context size, the bundled-price cost) is tagged `(est.)`, and a value the
+provider or runtime never reported reads `n/a` — never a fabricated zero. Tool
+names and failure summaries are secret-safe before they reach the view.
+
+In the interactive shell, type `/stats` to open the overlay above the composer
+(the transcript underneath is untouched); **Esc**/**q**/**d** dismiss it. The same
+engine backs the headless form, so a session's numbers read identically in both.
+
+```bash
+# Headless: a read-only stats view for a session (no provider call, no mutation).
+oh-my-cli --session-stats <session-id>
+
+# Stable JSON for automation (no ANSI); add --output json.
+oh-my-cli --session-stats <session-id> --output json
+```
+
+Aggregation is deterministic: counts come from the message log, so resuming a
+session recomputes the same totals without double-counting restored events. A
+headless read (or a freshly resumed session) has no live runtime, so model
+activity, tool failures, and timing report `n/a` rather than an invented value.
+
 ### Options
 
 | Option | Description |
@@ -250,6 +279,7 @@ leaves the source session byte-identical (transcript and every sidecar).
 | `--resume <session-id>` | Resume a persisted session |
 | `--browse-sessions` | Interactively browse, search, and resume a previous session (requires a terminal) |
 | `--list-sessions` | List resumable sessions with a redacted usage summary and exit |
+| `--session-stats <session-id>` | Show a read-only, deterministic activity/efficiency stats view for a session (add `--output json` for automation) and exit; also `/stats` in interactive mode |
 | `--export-session <session-id>` | Export a session locally as redacted Markdown + a deterministic JSON manifest and exit |
 | `--out <dir>` | Output directory for `--export-session` (default: current directory) |
 | `--force` | Overwrite existing `--export-session` output files |
@@ -1760,6 +1790,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/session-export.ts` — deterministic, redacted local session export to Markdown + JSON manifest (`--export-session`)
 - `src/turn-checkpoint.ts` — content-based, fail-closed undo/redo of one completed agent turn (`--undo-turn`/`--redo-turn`/`--dry-run`)
 - `src/side-question.ts` — structurally-isolated side question against a bounded, read-only session snapshot, no tools/mutation/persistence (`--side-question`/`--session`, `/ask`)
+- `src/session-stats.ts` — deterministic, no-fabrication session activity/efficiency stats engine shared by the `/stats` overlay and the headless `--session-stats` form
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
 - `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`)
 - `src/run-scorecard.ts` — deterministic, privacy-safe comparison of two summaries (`--baseline`/`--candidate`)
