@@ -1,9 +1,5 @@
 import { fileURLToPath } from "node:url";
 import { BrowserWindow } from "electron";
-import {
-  createDesktopViewModel,
-  renderDesktopShell,
-} from "./renderer.js";
 import { createDesktopWindowOptions } from "./window-options.js";
 
 export async function createDesktopWindow(): Promise<BrowserWindow> {
@@ -13,9 +9,9 @@ export async function createDesktopWindow(): Promise<BrowserWindow> {
     event.preventDefault();
   });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  const shell = renderDesktopShell(createDesktopViewModel("ready"));
-  await window.loadURL(
-    `data:text/html;charset=utf-8,${encodeURIComponent(shell)}`,
+  const shell = fileURLToPath(
+    new URL("../../dist/desktop/index.html", import.meta.url),
   );
+  await window.loadFile(shell);
   return window;
 }

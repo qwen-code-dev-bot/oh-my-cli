@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 const electron = vi.hoisted(() => {
   const windows: Array<{
     options: unknown;
-    loadedUrl?: string;
+    loadedFile?: string;
   }> = [];
   const handlers = new Map<string, () => unknown>();
   class BrowserWindow {
@@ -42,8 +42,8 @@ const electron = vi.hoisted(() => {
       windows.push(this);
     }
 
-    async loadURL(url: string): Promise<void> {
-      this.loadedUrl = url;
+    async loadFile(file: string): Promise<void> {
+      this.loadedFile = file;
     }
   }
 
@@ -91,11 +91,7 @@ describe("desktop main process", () => {
         sandbox: true,
       },
     });
-    expect(window.loadedUrl).toMatch(/^data:text\/html;charset=utf-8,/);
-    expect(window.loadedUrl).not.toMatch(/https?:\/\//);
-    expect(decodeURIComponent(window.loadedUrl ?? "")).toContain(
-      "default-src 'none'",
-    );
+    expect(window.loadedFile).toMatch(/dist\/desktop\/index\.html$/);
     const preventDefault = vi.fn();
     window.webContents.navigationHandler?.({ preventDefault });
     expect(preventDefault).toHaveBeenCalledOnce();
