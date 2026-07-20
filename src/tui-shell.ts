@@ -24,6 +24,10 @@ import type { PaletteCommand } from "./palette.js";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
 import { MEDIUM_MARK, VERSION, WIDE_WORDMARK } from "./product-banner.js";
 import type { ColorDepth } from "./product-banner.js";
+import {
+  FOUNDATIONAL_SLASH_COMMANDS,
+  resolveSlashCommand,
+} from "./slash-command.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -2140,8 +2144,32 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // never queue a duplicate run; empty/whitespace input sends nothing.
     if (!submitAllowed(state.composer.mode, state.composer.text)) return;
     const text = state.composer.text.trim();
-    if (text === "/exit" || text === "/quit") {
-      shutdown(0);
+    const slash = text.startsWith("/attach")
+      ? { kind: "prompt" as const }
+      : resolveSlashCommand(text, FOUNDATIONAL_SLASH_COMMANDS);
+    if (slash.kind === "unknown") {
+      state.composer.text = "";
+      history = commitDraft(history, "");
+      refreshMode();
+      state.transcript.push({ kind: "notice", text: slash.message });
+      scheduleRender();
+      return;
+    }
+    if (slash.kind === "command") {
+      state.composer.text = "";
+      history = commitDraft(history, "");
+      refreshMode();
+      const command = opts.paletteCommands.find(
+        (candidate) => candidate.name === slash.name,
+      );
+      if (command) void runPaletteCommand(command);
+      else {
+        state.transcript.push({
+          kind: "notice",
+          text: `Command unavailable: ${slash.name}`,
+        });
+        scheduleRender();
+      }
       return;
     }
     if (text.startsWith("/attach")) {
