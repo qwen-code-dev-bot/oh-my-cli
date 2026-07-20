@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { parseTaskSnapshot, serializeTaskSnapshot } from "./task-runtime.js";
+import type { TaskSnapshot } from "./task-runtime.js";
 
 export interface SessionMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -141,6 +143,41 @@ export class SessionStore {
     const target = this.goalPath(id);
     const temp = `${target}.tmp`;
     fs.writeFileSync(temp, `${JSON.stringify(checkpoint)}\n`, "utf-8");
+    fs.renameSync(temp, target);
+  }
+
+  // Sidecar holding a session's durable background-task receipts. A distinct
+  // extension keeps it out of listIds() (which matches *.jsonl). The persisted
+  // form carries only redacted fields and opaque evidence digests — never task
+  // content or secrets.
+  tasksPath(id: string): string {
+    return path.join(this.dir, `${id}.tasks.json`);
+  }
+
+  // Read a session's durable task snapshot, or null when none exists. A missing
+  // file is honest (no recorded background tasks); a malformed or stale sidecar
+  // is refused (fail closed) rather than presented as current.
+  readTasks(id: string): TaskSnapshot | null {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.tasksPath(id), "utf-8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+      return null;
+    }
+    try {
+      return parseTaskSnapshot(JSON.parse(raw));
+    } catch {
+      return null;
+    }
+  }
+
+  // Atomically persist a session's durable task snapshot (write to a sibling
+  // temp file, then rename) so a crash never leaves a half-written sidecar.
+  writeTasks(id: string, snapshot: TaskSnapshot): void {
+    const target = this.tasksPath(id);
+    const temp = `${target}.tmp`;
+    fs.writeFileSync(temp, serializeTaskSnapshot(snapshot) + "\n", "utf-8");
     fs.renameSync(temp, target);
   }
 

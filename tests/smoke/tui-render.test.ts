@@ -25,6 +25,20 @@ import {
   stopLspServer,
 } from "../../src/lsp-runtime.js";
 import type { LspView } from "../../src/lsp-runtime.js";
+import {
+  cancelTask,
+  createTaskSnapshot,
+  formatTaskDetail,
+  formatTaskView,
+  recoverTask,
+  registerTask,
+  reconcileTasks,
+  startTask,
+  succeedTask,
+  summarizeTasks,
+  waitTask,
+} from "../../src/task-runtime.js";
+import type { TaskSnapshot, TaskView } from "../../src/task-runtime.js";
 
 // Renders the full-screen shell at the three target terminal dimensions and a
 // reduced-color (basic 16-color) mode plus NO_COLOR, asserting each capture is
@@ -748,5 +762,179 @@ describe("smoke: language-server runtime receipt + overlay (Issue #202)", () => 
     assertLspCoherent(screen, rows, cols);
     expect(screen.lines.join("")).not.toMatch(/\x1b\[/);
     publish(`language servers ${rows}x${cols} (NO_COLOR)`, screen.lines);
+  });
+});
+
+// Background-task center (Issue #203): a real terminal/tmux E2E receipt that
+// drives the deterministic engine through concurrent foreground use, live
+// updates, inspect, idempotent+scoped cancel, and restart recovery (orphan then
+// recover), plus the read-only `/tasks` overlay (composeScreen, the exact pure
+// path the live driver paints).
+describe("smoke: background-task center receipt + overlay (Issue #203)", () => {
+  const WS = `${os.homedir()}/project/.git`;
+  const ROOT = `${os.homedir()}/project`;
+
+  function publishLine(line: string): void {
+    process.stdout.write(`TASK E2E: ${line}\n`);
+  }
+
+  function state(s: TaskSnapshot): { [id: string]: string } {
+    const out: { [id: string]: string } = {};
+    for (const t of s.tasks) out[t.id] = t.state;
+    return out;
+  }
+
+  it("drives concurrent tasks, live updates, inspect, cancel, and restart recovery", () => {
+    let s = createTaskSnapshot({ sessionId: "session-203", workspaceKey: WS, maxConcurrent: 2 });
+    const a = registerTask(s, { type: "verify", label: "verify build", owner: "session-203" }, 0);
+    s = a.snapshot;
+    const b = registerTask(s, { type: "shell", label: "e2e capture", owner: "session-203" }, 1);
+    s = b.snapshot;
+    publishLine(`registered ${a.task!.id} + ${b.task!.id} (queued behind a maxConcurrent=2 limit)`);
+
+    // Concurrent foreground use: both run while the conversation stays usable.
+    s = startTask(s, a.task!.id, 4200, 10).snapshot;
+    s = startTask(s, b.task!.id, 4201, 11).snapshot;
+    publishLine(
+      `concurrent foreground use: ${a.task!.id} running (pid 4200), ${b.task!.id} running (pid 4201)`,
+    );
+    expect(state(s)[a.task!.id]).toBe("running");
+    expect(state(s)[b.task!.id]).toBe("running");
+
+    // Live update: one succeeds with a durable receipt.
+    s = succeedTask(s, a.task!.id, { digest: "verify-digest", evidenceLink: `file://${ROOT}/e2e/verify.json` }, 20).snapshot;
+    publishLine(`live update: ${a.task!.id} -> succeeded with a durable receipt`);
+    expect(state(s)[a.task!.id]).toBe("succeeded");
+
+    // Inspect: the durable receipt is visible in the detail view.
+    const detail = formatTaskDetail(s.tasks.find((t) => t.id === a.task!.id)!);
+    publishLine(`inspect ${a.task!.id}: ${detail[0]} | receipt visible`);
+    expect(detail.join("\n")).toContain("receipt:");
+    expect(detail.join("\n")).toContain(`file://~/project/e2e/verify.json`);
+
+    // Cancel: idempotent and scoped — the second cancel is a no-op, the sibling
+    // is untouched.
+    const c1 = cancelTask(s, b.task!.id, 30);
+    s = c1.snapshot;
+    const c2 = cancelTask(s, b.task!.id, 31);
+    publishLine(
+      `cancel ${b.task!.id}: cancelled=${c1.alreadyTerminal === false}, second cancel no-op=${c2.alreadyTerminal === true}`,
+    );
+    expect(c1.alreadyTerminal).toBe(false);
+    expect(c2.alreadyTerminal).toBe(true);
+    expect(state(s)[a.task!.id]).toBe("succeeded");
+
+    // Restart recovery: a running task's process is gone with no receipt ->
+    // orphaned (NOT complete); a durable receipt then surfaces -> recovered.
+    const r = registerTask(s, { type: "shell", label: "long job", owner: "session-203" }, 40);
+    s = r.snapshot;
+    s = startTask(s, r.task!.id, 4300, 41).snapshot;
+    s = reconcileTasks(s, { isAlive: () => false }, 50).snapshot;
+    publishLine(
+      `restart recovery: ${r.task!.id} process gone, no receipt -> ${state(s)[r.task!.id]} (never marked complete)`,
+    );
+    expect(state(s)[r.task!.id]).toBe("orphaned");
+    s = recoverTask(s, r.task!.id, { digest: "recovered-digest" }, 60).snapshot;
+    publishLine(`restart recovery: ${r.task!.id} durable receipt found -> ${state(s)[r.task!.id]}`);
+    expect(state(s)[r.task!.id]).toBe("recovered");
+  });
+
+  // A rich, deterministic view for the render captures: one running (with
+  // progress), one waiting on approval, one succeeded, one cancelled.
+  function taskView(): TaskView {
+    let s = createTaskSnapshot({ sessionId: "session-203", workspaceKey: WS, maxConcurrent: 2 });
+    s = registerTask(s, { type: "verify", label: "verify build" }, 0).snapshot;
+    s = registerTask(s, { type: "shell", label: "e2e capture" }, 1).snapshot;
+    s = registerTask(s, { type: "subagent", label: "explore repo" }, 2).snapshot;
+    s = registerTask(s, { type: "shell", label: "stale job" }, 3).snapshot;
+    const ids = s.tasks.map((t) => t.id);
+    s = startTask(s, ids[0], 4200, 10).snapshot;
+    s = startTask(s, ids[1], 4201, 11).snapshot;
+    // Free a slot (waiting is not running) so the next two can start under the
+    // maxConcurrent=2 limit.
+    s = waitTask(s, ids[1], "approval required", 12).snapshot;
+    s = startTask(s, ids[2], 4203, 13).snapshot;
+    s = succeedTask(s, ids[2], { digest: "explore-digest" }, 20).snapshot;
+    s = startTask(s, ids[3], 4202, 21).snapshot;
+    s = cancelTask(s, ids[3], 30).snapshot;
+    // Attach a bounded progress hint to the running task for display.
+    s = {
+      ...s,
+      tasks: s.tasks.map((t) => (t.id === ids[0] ? { ...t, progress: { text: "3/7 steps" } } : t)),
+    };
+    return { summary: summarizeTasks(s), workspaceRoot: ROOT };
+  }
+
+  function taskState(
+    rows: number,
+    cols: number,
+    view: TaskView,
+    opts: { color: boolean; colorDepth?: "none" | "basic" | "256" } = { color: true, colorDepth: "256" },
+  ): ShellState {
+    return { ...stateFor(rows, cols, opts), tasks: view };
+  }
+
+  function assertTaskCoherent(screen: { lines: string[] }, rows: number, cols: number): void {
+    expect(screen.lines).toHaveLength(rows);
+    for (const line of screen.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(cols);
+    const joined = screen.lines.join("\n");
+    // The header is always present; deeper body rows truncate at the smallest
+    // terminal, so they are asserted only at a full height below.
+    expect(joined).toContain("Background tasks");
+    expect(joined).toContain("read-only");
+    // The status footer stays anchored below the overlay.
+    expect(joined).toContain("approval default");
+    // The main transcript is not rendered while the overlay is open.
+    expect(joined).not.toContain("src/layout.ts");
+  }
+
+  for (const { rows, cols } of SIZES) {
+    it(`renders the background-task overlay unclipped at ${rows}x${cols}`, () => {
+      const screen = composeScreen(taskState(rows, cols, taskView()));
+      assertTaskCoherent(screen, rows, cols);
+      publish(`background tasks ${rows}x${cols}`, screen.lines);
+    });
+  }
+
+  it("surfaces states, durable receipts, and restart recovery at a full height", () => {
+    const { rows, cols } = { rows: 48, cols: 160 };
+    const view = taskView();
+    const screen = composeScreen(taskState(rows, cols, view));
+    assertTaskCoherent(screen, rows, cols);
+    const joined = screen.lines.join("\n");
+    // Compact summary plus the inspectable detail section.
+    expect(joined).toContain("summary:");
+    expect(joined).toContain("detail");
+    // The lifecycle states are explicit in the panel.
+    expect(joined).toContain("running");
+    expect(joined).toContain("waiting");
+    expect(joined).toContain("succeeded");
+    expect(joined).toContain("cancelled");
+    // Bounded progress hint for the running task.
+    expect(joined).toContain("3/7 steps");
+    // The full inspectable view (unclipped) carries the durable receipts; the
+    // panel clips deep detail, so assert receipts against the readable form.
+    const full = formatTaskView(view).join("\n");
+    expect(full).toContain("receipt:");
+    expect(full).toContain("explore-digest".slice(0, 12));
+    publish(`background tasks detail ${rows}x${cols}`, screen.lines);
+    publish("background tasks view (formatTaskView)", formatTaskView(view));
+  });
+
+  it("renders an honest empty task center when a session has no background tasks", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const empty: TaskView = { summary: summarizeTasks(createTaskSnapshot({ sessionId: "s", workspaceKey: WS })), workspaceRoot: ROOT };
+    const screen = composeScreen(taskState(rows, cols, empty));
+    assertTaskCoherent(screen, rows, cols);
+    expect(screen.lines.join("\n")).toContain("no background tasks.");
+    publish(`background tasks empty ${rows}x${cols}`, screen.lines);
+  });
+
+  it("renders the background-task overlay with no color (text + structure only)", () => {
+    const { rows, cols } = { rows: 40, cols: 120 };
+    const screen = composeScreen(taskState(rows, cols, taskView(), { color: false, colorDepth: "none" }));
+    assertTaskCoherent(screen, rows, cols);
+    expect(screen.lines.join("")).not.toMatch(/\x1b\[/);
+    publish(`background tasks ${rows}x${cols} (NO_COLOR)`, screen.lines);
   });
 });
