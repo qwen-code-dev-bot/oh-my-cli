@@ -22,7 +22,7 @@ import type { LoadedImage } from "./image-input.js";
 import { runPalette } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
-import { MEDIUM_MARK, VERSION, WIDE_WORDMARK } from "./product-banner.js";
+import { VERSION, WIDE_WORDMARK, colorizeBannerRow } from "./product-banner.js";
 import type { ColorDepth } from "./product-banner.js";
 import {
   INTERACTIVE_SLASH_COMMANDS,
@@ -314,8 +314,8 @@ export function shellStyle(color: boolean | ColorDepth): ShellStyle {
     return {
       bold: "\x1b[1m",
       dim: "\x1b[2m",
-      accent: "\x1b[36m", // cyan
-      accentSoft: "\x1b[35m", // magenta
+      accent: "\x1b[34m", // blue
+      accentSoft: "\x1b[36m", // cyan
       success: "\x1b[32m", // green
       reset: "\x1b[0m",
     };
@@ -323,8 +323,8 @@ export function shellStyle(color: boolean | ColorDepth): ShellStyle {
   return {
     bold: "\x1b[1m",
     dim: "\x1b[2m",
-    accent: "\x1b[38;5;81m",
-    accentSoft: "\x1b[38;5;141m",
+    accent: "\x1b[38;5;27m",
+    accentSoft: "\x1b[38;5;45m",
     success: "\x1b[38;5;114m",
     reset: "\x1b[0m",
   };
@@ -425,7 +425,7 @@ export function computeLayout(viewport: Viewport, opts: { composerRows?: number 
   // Identity scales from a full product wordmark to a compact title. Decoration
   // yields before conversation space on short or narrow terminals.
   const identityRows =
-    remaining >= 17 && cols >= 44
+    remaining >= 17 && cols >= 92
       ? IDENTITY_MAX_ROWS
       : remaining >= 8 && cols >= 20
         ? 2
@@ -1090,54 +1090,31 @@ function diffBodyTone(line: string, style: ShellStyle): string {
 // Region renderers (pure)
 // ---------------------------------------------------------------------------
 
-function panelLine(text: string, width: number, style: ShellStyle): string {
-  const inner = Math.max(0, width - 4);
-  // The panel body carries inline color codes, so clip by visible cells (not raw
-  // characters) to keep the colored panel aligned with its no-color form.
-  const body = clipVisible(text, inner);
-  return `${style.accent}│${style.reset} ${body}${" ".repeat(Math.max(0, inner - visibleWidth(body)))} ${style.accent}│${style.reset}`;
-}
-
 export function renderIdentity(
   layout: ShellLayout,
   style: ShellStyle,
   version: string,
   status: StatusInfo,
+  depth: ColorDepth = "none",
 ): string[] {
   const height = layout.identity.end - layout.identity.start;
   if (height <= 0) return [];
   const cols = layout.viewport.cols;
   const logoWidth = Math.max(...WIDE_WORDMARK.map((line) => visibleWidth(line)));
-  const gap = 2;
-  const panelWidth = Math.min(42, cols - logoWidth - gap);
-  if (height >= 7 && panelWidth >= 30) {
-    const panel = [
-      `${style.accent}┌${"─".repeat(panelWidth - 2)}┐${style.reset}`,
-      panelLine(`${style.bold}>_ OH MY CLI${style.reset}  ${style.dim}(v${version})${style.reset}`, panelWidth, style),
-      panelLine("", panelWidth, style),
-      panelLine(`${status.model}  (/model for details)`, panelWidth, style),
-      panelLine(status.workspace, panelWidth, style),
-      `${style.accent}└${"─".repeat(panelWidth - 2)}┘${style.reset}`,
-    ];
-    const rows = WIDE_WORDMARK.map((line, index) => {
-      const tone = index < 2 ? style.accent : style.accentSoft;
-      const logo = `${tone}${style.bold}${line}${style.reset}${" ".repeat(Math.max(0, logoWidth - visibleWidth(line)))}`;
-      return `${logo}${" ".repeat(gap)}${panel[index] ?? ""}`;
-    });
+  if (height >= 7 && cols >= logoWidth) {
+    const rows = WIDE_WORDMARK.map((line) => colorizeBannerRow(line, depth));
     return [
       ...rows,
-      `${" ".repeat(logoWidth + gap)}${panel[5] ?? ""}`,
       `${style.dim}Tips: /attach an image for vision, or Ctrl+K to browse commands.${style.reset}`,
     ];
   }
   if (height >= 2 && cols >= 20) {
-    const mark = MEDIUM_MARK[0] ?? "OMC";
     return [
-      `${style.accent}${style.bold}${clipLine(mark, cols)}${style.reset}`,
+      `${style.accent}${style.bold}${clipLine("Qwen3.8-Max", cols)}${style.reset}`,
       `${style.dim}${clipLine(`v${version}  ·  ${status.model}  ·  ${status.workspace}`, cols)}${style.reset}`,
     ];
   }
-  return [`${style.accent}${style.bold}${clipLine(`OH MY CLI  v${version}`, cols)}${style.reset}`];
+  return [`${style.accent}${style.bold}${clipLine(`Qwen3.8-Max  v${version}`, cols)}${style.reset}`];
 }
 
 // Composer-facing footer hints (criterion 1). They name the real terminal key
@@ -1556,7 +1533,8 @@ export function renderComposer(
 // ---------------------------------------------------------------------------
 
 export function composeScreen(state: ShellState): ComposedScreen {
-  const style = shellStyle(state.colorDepth ?? state.color);
+  const depth: ColorDepth = state.colorDepth ?? (state.color ? "256" : "none");
+  const style = shellStyle(depth);
   const composerRows = composerTotalRows(state.composer.text);
   const layout = computeLayout(state.viewport, { composerRows });
 
@@ -1574,7 +1552,7 @@ export function composeScreen(state: ShellState): ComposedScreen {
     // conversation (Issue #169).
     lines.push(...renderShortcutHelpPanel(layout.composer.start, layout.viewport.cols, style));
   } else {
-    const identityLines = renderIdentity(layout, style, state.version, state.status);
+    const identityLines = renderIdentity(layout, style, state.version, state.status, depth);
     const transcriptLines =
       state.transcript.length === 0
         ? renderEmptyTranscript(layout.transcript, layout.viewport.cols, style)

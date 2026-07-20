@@ -6,6 +6,7 @@ import {
   detectColorDepth,
   selectBannerVariant,
   buildProductBanner,
+  colorizeBannerRow,
   renderProductBanner,
   formatProductBanner,
 } from "../../src/product-banner.js";
@@ -27,19 +28,19 @@ const sample: BannerModel = {
 };
 
 describe("block art geometry", () => {
-  it("wide wordmark is a rectangular 5x41 outlined grid", () => {
-    expect(WIDE_WORDMARK).toHaveLength(5);
+  it("wide wordmark is a rectangular 6x89 ANSI Shadow grid", () => {
+    expect(WIDE_WORDMARK).toHaveLength(6);
     for (const row of WIDE_WORDMARK) {
-      expect([...row].length).toBe(41);
+      expect([...row].length).toBe(89);
     }
-    expect(WIDE_WORDMARK.join("\n")).toContain("╭───╮");
-    expect(WIDE_WORDMARK.join("\n")).toContain("├───┤");
+    expect(WIDE_WORDMARK.join("\n")).toContain("██╔═══██╗");
+    expect(WIDE_WORDMARK.join("\n")).toContain("╚══▀▀═╝");
   });
 
-  it("medium mark is a rectangular 3x13 grid", () => {
-    expect(MEDIUM_MARK).toHaveLength(3);
+  it("medium mark is the exact compact product label", () => {
+    expect(MEDIUM_MARK).toHaveLength(1);
     for (const row of MEDIUM_MARK) {
-      expect([...row].length).toBe(13);
+      expect([...row].length).toBe(11);
     }
   });
 
@@ -90,11 +91,11 @@ describe("selectBannerVariant", () => {
   });
 
   it("selects medium for mid-width terminals", () => {
-    expect(selectBannerVariant(30, "truecolor")).toBe("medium");
+    expect(selectBannerVariant(40, "truecolor")).toBe("medium");
   });
 
   it("selects wide for wide terminals", () => {
-    expect(selectBannerVariant(100, "truecolor")).toBe("wide");
+    expect(selectBannerVariant(120, "truecolor")).toBe("wide");
   });
 });
 
@@ -132,7 +133,7 @@ describe("renderProductBanner", () => {
   it("plain variant is pure ASCII art with no ANSI escapes", () => {
     const out = renderProductBanner(sample, { variant: "plain", depth: "none" });
     expect(out).not.toContain(ESC);
-    expect(out).toContain("OH MY CLI");
+    expect(out).toContain("Qwen3.8-Max");
     expect(out).not.toContain("█");
     expect(out).toContain("v0.1.0");
     expect(out).toContain("gpt-4o");
@@ -140,16 +141,23 @@ describe("renderProductBanner", () => {
     expect(out).toContain("approval default");
   });
 
-  it("wide truecolor emits 24-bit color and outlined glyphs", () => {
+  it("wide truecolor emits 24-bit color and block glyphs", () => {
     const out = renderProductBanner(sample, { variant: "wide", depth: "truecolor", width: 100 });
-    expect(out).toContain("\x1b[38;2;");
+    expect(out).toContain("\x1b[1;38;2;");
     expect(out).toContain("\x1b[0m");
-    expect(out).toContain("╭───╮");
+    expect(stripAnsi(out)).toContain("██╔═══██╗");
   });
 
   it("256 depth emits indexed color", () => {
     const out = renderProductBanner(sample, { variant: "wide", depth: "256", width: 100 });
-    expect(out).toContain("\x1b[38;5;");
+    expect(out).toContain("\x1b[1;38;5;");
+  });
+
+  it("applies a left-to-right blue, violet, and rose gradient within one row", () => {
+    const out = colorizeBannerRow("█".repeat(60), "256");
+    expect(out).toContain("\x1b[1;38;5;75m");
+    expect(out).toContain("\x1b[1;38;5;99m");
+    expect(out).toContain("\x1b[1;38;5;175m");
   });
 
   it("basic depth emits 16-color bold SGR", () => {
@@ -187,19 +195,19 @@ describe("formatProductBanner", () => {
       env: { COLORTERM: "truecolor" },
       isTTY: true,
     });
-    expect(out).toContain("╭───╮");
-    expect(out).toContain("\x1b[38;2;");
+    expect(stripAnsi(out)).toContain(WIDE_WORDMARK[0]);
+    expect(out).toContain("\x1b[1;38;2;");
   });
 
   it("renders the compact mark on a mid-width terminal", () => {
     const out = formatProductBanner({
       ...base,
-      width: 30,
+      width: 40,
       env: { COLORTERM: "truecolor" },
       isTTY: true,
     });
-    expect(out).toContain("█");
-    expect(out.split("\n").filter((l) => l.includes("█")).length).toBe(MEDIUM_MARK.length);
+    expect(stripAnsi(out)).toContain("Qwen3.8-Max");
+    expect(out.split("\n").filter((l) => stripAnsi(l).includes("Qwen3.8-Max")).length).toBe(MEDIUM_MARK.length);
   });
 
   it("falls back to plain ASCII when NO_COLOR is set", () => {
@@ -210,7 +218,7 @@ describe("formatProductBanner", () => {
       isTTY: true,
     });
     expect(out).not.toContain(ESC);
-    expect(out).toContain("OH MY CLI");
+    expect(out).toContain("Qwen3.8-Max");
     expect(out).not.toContain("█");
   });
 
@@ -221,7 +229,7 @@ describe("formatProductBanner", () => {
       env: { COLORTERM: "truecolor" },
       isTTY: true,
     });
-    expect(stripAnsi(out)).toContain("OH MY CLI");
+    expect(stripAnsi(out)).toContain("Qwen3.8-Max");
     expect(out).not.toContain("█");
   });
 });
