@@ -60,6 +60,9 @@ import {
   COMPOSER_MAX_ROWS,
   SLASH_PREVIEW_MAX_ITEMS,
   decodeTerminalEscape,
+  goalRailFromCheckpoint,
+  goalVisualState,
+  renderGoalRail,
   TRANSCRIPT_PREVIEW_LINES,
 } from "../../src/tui-shell.js";
 import type {
@@ -73,6 +76,7 @@ import type {
   TranscriptKind,
   TurnPhase,
   TurnState,
+  GoalRailState,
 } from "../../src/tui-shell.js";
 
 const ANSI = /\x1b\[/;
@@ -170,7 +174,7 @@ describe("tui-shell: inline slash command preview", () => {
       { slashPreview: preview },
     );
     const text = lines.join("\n");
-    expect(lines).toHaveLength(COMPOSER_MAX_ROWS);
+    expect(lines).toHaveLength(composerTotalRows("/", preview));
     expect(text).toContain("COMMANDS 5/5");
     expect(text).toContain("◆ /exit");
     expect(text).toContain("Tab complete");
@@ -195,8 +199,67 @@ describe("tui-shell: inline slash command preview", () => {
 
   it("keeps the preview within the maximum composer height", () => {
     const preview = { items: commands, selected: 0 };
-    expect(composerTotalRows("/", preview)).toBe(COMPOSER_MAX_ROWS);
+    expect(composerTotalRows("/", preview)).toBeLessThanOrEqual(COMPOSER_MAX_ROWS);
+    expect(composerTotalRows("/", preview, {
+      objective: "Ship workspace health",
+      status: "active",
+      createdAt: 0,
+      revision: 1,
+    }, 120)).toBe(COMPOSER_MAX_ROWS);
     expect(SLASH_PREVIEW_MAX_ITEMS).toBe(4);
+  });
+});
+
+describe("tui-shell: compact goal rail", () => {
+  const goal: GoalRailState = {
+    objective: "Ship workspace health",
+    status: "active",
+    createdAt: 1_000,
+    revision: 3,
+  };
+
+  it("maps lifecycle and turn states to distinct text markers", () => {
+    expect(goalVisualState(goal, { phase: "running-tool" })).toBe("running");
+    expect(goalVisualState({ ...goal, status: "paused" }, { phase: "idle" })).toBe("paused");
+    expect(goalVisualState(goal, { phase: "awaiting-approval" })).toBe("waiting");
+    expect(goalVisualState(goal, { phase: "completed" })).toBe("completed");
+    expect(goalVisualState(goal, { phase: "failed" })).toBe("failed");
+  });
+
+  it("renders a stable two-line rail with elapsed time, revision, and controls", () => {
+    const lines = renderGoalRail(goal, { phase: "running-tool" }, 120, shellStyle("256"), {
+      now: 121_000,
+      reducedMotion: true,
+    });
+    const text = lines.join("\n");
+    expect(lines).toHaveLength(2);
+    expect(text).toContain("◆ GOAL running · 2m · iteration 3");
+    expect(text).toContain("Ship workspace health");
+    expect(text).toContain("/goal status · pause · resume · clear");
+  });
+
+  it("collapses on narrow terminals and stays textual without color or motion", () => {
+    const lines = renderGoalRail(goal, { phase: "waiting" }, 54, shellStyle(false), {
+      now: 31_000,
+      reducedMotion: true,
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("◇ GOAL waiting · 30s · iteration 3");
+    expect(lines[0]).not.toMatch(ANSI);
+  });
+
+  it("appears and disappears directly from the persisted checkpoint", () => {
+    expect(goalRailFromCheckpoint({
+      revision: 3,
+      goal: {
+        objective: goal.objective,
+        status: "active",
+        createdAt: goal.createdAt,
+        updatedAt: goal.createdAt,
+      },
+    })).toEqual(goal);
+    expect(goalRailFromCheckpoint({ revision: 4, goal: null })).toBeUndefined();
+    expect(composerTotalRows("", undefined, goal, 120)).toBe(5);
   });
 });
 
