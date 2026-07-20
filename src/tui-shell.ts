@@ -28,6 +28,20 @@ import {
   formatRuntimeSlashCommand,
   resolveSlashCommand,
 } from "./slash-command.js";
+import {
+  collectWorkspaceReferences,
+  filterReferences,
+  referenceQuery,
+  escapeReference,
+  dedupeReferences,
+  formatReferenceSize,
+} from "./workspace-reference.js";
+import type {
+  ReferenceCandidate,
+  ReferenceState,
+  ReferenceExclusions,
+  ReferenceUniverse,
+} from "./workspace-reference.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -37,6 +51,9 @@ import {
 export const COMPOSER_MAX_ROWS = 10;
 export const COMPOSER_MIN_ROWS = 1;
 export const SLASH_PREVIEW_MAX_ITEMS = 4;
+// Rows of workspace file/directory candidates the `@` reference picker shows at
+// once; bounded so the composer band never crowds out the transcript.
+export const REFERENCE_PREVIEW_MAX_ITEMS = 5;
 export const IDENTITY_MAX_ROWS = 7;
 export const STATUS_ROWS = 2;
 
@@ -133,6 +150,22 @@ export interface ShellStyle {
 export interface SlashPreviewState {
   items: readonly PaletteCommand[];
   selected: number;
+}
+
+// The composer's `@` workspace-reference picker (Issue #196). Mirrors the slash
+// preview shape: a scored candidate list plus the active selection, augmented
+// with the query, the match count before the render cap, and the enumeration's
+// exclusion counts so the band can name what it filtered out. `state` carries
+// the engine's reason when there is nothing to show (no-match / empty /
+// untrusted / unreadable) so the picker is explicit rather than blank.
+export interface ReferencePreviewState {
+  candidates: readonly ReferenceCandidate[];
+  selected: number;
+  query: string;
+  total: number;
+  truncated: boolean;
+  state: ReferenceState;
+  excluded: ReferenceExclusions;
 }
 
 export type EscapeInputResult =
@@ -297,6 +330,10 @@ export interface ShellState {
   // omit it (treated as closed).
   helpOpen?: boolean;
   slashPreview?: SlashPreviewState;
+  // The `@` workspace-reference picker (Issue #196). When present it takes
+  // precedence over the slash preview in both layout and key handling. Optional
+  // so pure render callers and tests can omit it (treated as closed).
+  referencePreview?: ReferencePreviewState;
   goal?: GoalRailState;
   now?: number;
   reducedMotion?: boolean;
@@ -553,20 +590,28 @@ export function computeLayout(viewport: Viewport, opts: { composerRows?: number 
   };
 }
 
-// Desired total composer band height (state rule + bounded input rows).
+// Desired total composer band height (state rule + bounded input rows). The `@`
+// reference picker, when present, takes precedence over the slash preview (only
+// one inline picker shows at a time).
 export function composerTotalRows(
   text: string,
   preview?: SlashPreviewState,
   goal?: GoalRailState,
   cols = 80,
+  referencePreview?: ReferencePreviewState,
 ): number {
   const textLines = text === "" ? 1 : text.split("\n").length;
-  const previewRows = preview
+  const previewRows = referencePreview
     ? 1 + Math.min(
-        Math.max(1, preview.items.length),
-        SLASH_PREVIEW_MAX_ITEMS,
+        Math.max(1, referencePreview.candidates.length),
+        REFERENCE_PREVIEW_MAX_ITEMS,
       )
-    : 0;
+    : preview
+      ? 1 + Math.min(
+          Math.max(1, preview.items.length),
+          SLASH_PREVIEW_MAX_ITEMS,
+        )
+      : 0;
   const goalRows = goal ? (cols >= 72 ? 2 : 1) : 0;
   return clamp(textLines + 2 + previewRows + goalRows, 3, COMPOSER_MAX_ROWS);
 }
@@ -1659,6 +1704,7 @@ export function renderComposer(
   opts: {
     turn?: TurnState;
     slashPreview?: SlashPreviewState;
+    referencePreview?: ReferencePreviewState;
     goal?: GoalRailState;
     now?: number;
     reducedMotion?: boolean;
@@ -1675,13 +1721,21 @@ export function renderComposer(
     : `${marker.glyph} ${marker.label}`;
   const useFrame = height >= 3;
   const useTopRule = height >= 2;
-  const preview = opts.slashPreview;
-  const previewRows = preview
+  // The `@` reference picker, when present, takes precedence over the slash
+  // preview: only one inline picker renders at a time.
+  const reference = opts.referencePreview;
+  const preview = reference ? undefined : opts.slashPreview;
+  const previewRows = reference
     ? 1 + Math.min(
-        Math.max(1, preview.items.length),
-        SLASH_PREVIEW_MAX_ITEMS,
+        Math.max(1, reference.candidates.length),
+        REFERENCE_PREVIEW_MAX_ITEMS,
       )
-    : 0;
+    : preview
+      ? 1 + Math.min(
+          Math.max(1, preview.items.length),
+          SLASH_PREVIEW_MAX_ITEMS,
+        )
+      : 0;
   const goalLines = opts.goal
     ? renderGoalRail(opts.goal, turn ?? { phase: "idle" }, cols, style, {
         now: opts.now,
@@ -1712,6 +1766,49 @@ export function renderComposer(
     const wrapped = wrapText(state.text, bodyWidth);
     const shown = wrapped.slice(Math.max(0, wrapped.length - textHeight));
     for (const w of shown) lines.push(`${style.accent}${lead}${style.reset}${w}`);
+  }
+  if (reference) {
+    const total = reference.total;
+    const candidates = reference.candidates;
+    const selected = clamp(reference.selected, 0, Math.max(0, candidates.length - 1));
+    const position = candidates.length === 0 ? "0/0" : `${selected + 1}/${total}`;
+    const hints = `FILES ${position}  ↑↓ select · Tab insert · Esc close`;
+    lines.push(clipVisible(`${style.dim}${hints}${style.reset}`, cols));
+
+    if (reference.state !== "ok") {
+      const message =
+        reference.state === "no-match"
+          ? `No files match “${reference.query}”`
+          : reference.state === "empty"
+            ? "Workspace has no referenceable files"
+            : reference.state === "untrusted"
+              ? "Workspace not trusted — references disabled"
+              : "Workspace not readable";
+      lines.push(clipVisible(`${style.accentWarm}◇${style.reset} ${style.dim}${message}${style.reset}`, cols));
+    } else {
+      const visible = Math.min(candidates.length, REFERENCE_PREVIEW_MAX_ITEMS);
+      const start = clamp(selected - visible + 1, 0, Math.max(0, candidates.length - visible));
+      for (let index = start; index < start + visible; index++) {
+        const candidate = candidates[index];
+        const active = index === selected;
+        const bullet = active
+          ? `${style.accentSoft}◆${style.reset}`
+          : `${style.dim}·${style.reset}`;
+        // Directories carry no byte size, so their label is just "dir"; files
+        // pair the type with a human-readable size.
+        const metaText =
+          candidate.type === "directory"
+            ? "dir"
+            : `file ${formatReferenceSize(candidate.type, candidate.sizeBytes)}`;
+        const name = active
+          ? `${style.bold}${style.accent}${candidate.path}${style.reset}`
+          : candidate.path;
+        const meta = active
+          ? `${style.accentWarm}${metaText}${style.reset}`
+          : `${style.dim}${metaText}${style.reset}`;
+        lines.push(clipVisible(`${bullet} ${name}  ${meta}`, cols));
+      }
+    }
   }
   if (preview) {
     const total = preview.items.length;
@@ -1762,12 +1859,14 @@ export function composeScreen(state: ShellState): ComposedScreen {
     state.slashPreview,
     state.goal,
     state.viewport.cols,
+    state.referencePreview,
   );
   const layout = computeLayout(state.viewport, { composerRows });
 
   const composerLines = renderComposer(state.composer, layout, style, {
     turn: state.turn,
     slashPreview: state.slashPreview,
+    referencePreview: state.referencePreview,
     goal: state.goal,
     now: state.now,
     reducedMotion: state.reducedMotion,
@@ -1965,6 +2064,11 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   // the underlying provider call cannot be aborted (no new provider capability).
   let runGeneration = 0;
   let slashPreviewDismissedFor: string | null = null;
+  // The `@` reference picker (Issue #196): the text for which an open picker was
+  // dismissed (so it does not immediately reopen), and the cached candidate
+  // universe collected once per picker open and re-filtered per keystroke.
+  let referencePreviewDismissedFor: string | null = null;
+  let referenceUniverse: ReferenceUniverse | null = null;
   let escapeBuffer = "";
   let escapeTimer: NodeJS.Timeout | null = null;
   const motionTimer = setInterval(() => {
@@ -2027,9 +2131,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
 
   function refreshSlashPreview(resetSelection = false): void {
     const query = slashPreviewQuery(state.composer.text);
+    // The `@` reference picker takes precedence: while a reference token is
+    // active the slash preview stays closed so only one inline picker shows.
     if (
       query === null ||
-      slashPreviewDismissedFor === state.composer.text
+      slashPreviewDismissedFor === state.composer.text ||
+      referenceQuery(state.composer.text) !== null
     ) {
       state.slashPreview = undefined;
       return;
@@ -2070,6 +2177,74 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     scheduleRender();
   }
 
+  // Refresh the `@` reference picker from the composer text. The candidate
+  // universe is collected once when the picker opens (bounded, confined, never
+  // following symlinks) and re-filtered in memory per keystroke, so selection
+  // stays responsive in large repositories. When no reference token is active
+  // the picker closes and the cached universe is dropped so the next `@` sees
+  // fresh files.
+  function refreshReferencePreview(resetSelection = false): void {
+    const active = referenceQuery(state.composer.text);
+    if (active === null || referencePreviewDismissedFor === state.composer.text) {
+      state.referencePreview = undefined;
+      referenceUniverse = null;
+      return;
+    }
+    if (!referenceUniverse) {
+      referenceUniverse = collectWorkspaceReferences(opts.workspace);
+    }
+    const filter = filterReferences(referenceUniverse, active.query);
+    const previous = resetSelection ? 0 : (state.referencePreview?.selected ?? 0);
+    state.referencePreview = {
+      candidates: filter.candidates,
+      selected: clamp(previous, 0, Math.max(0, filter.candidates.length - 1)),
+      query: filter.query,
+      total: filter.total,
+      truncated: filter.truncated,
+      state: filter.state,
+      excluded: referenceUniverse.excluded,
+    };
+  }
+
+  function moveReferenceSelection(delta: number): void {
+    const preview = state.referencePreview;
+    if (!preview || preview.candidates.length === 0) return;
+    const count = preview.candidates.length;
+    preview.selected = (preview.selected + delta + count) % count;
+    scheduleRender();
+  }
+
+  // Insert the selected candidate as an escaped reference, replacing the active
+  // `@query` token and appending a trailing space so the reference closes and
+  // the user can keep typing. Duplicate references collapse deterministically
+  // (criterion 3). Insertion never submits, so no provider turn starts here
+  // (criterion 6).
+  function completeReferenceSelection(): void {
+    const preview = state.referencePreview;
+    const candidate = preview?.candidates[preview.selected];
+    const active = referenceQuery(state.composer.text);
+    if (!candidate || !active) return;
+    const token = "@" + escapeReference(candidate.path);
+    const before = state.composer.text.slice(0, active.start);
+    const after = state.composer.text.slice(active.start + 1 + active.query.length);
+    state.composer.text = dedupeReferences(`${before}${token} ${after}`);
+    history = commitDraft(history, state.composer.text);
+    referencePreviewDismissedFor = null;
+    referenceUniverse = null;
+    state.referencePreview = undefined;
+    refreshMode();
+    refreshReferencePreview();
+    scheduleRender();
+  }
+
+  function dismissReferencePreview(): void {
+    if (!state.referencePreview) return;
+    referencePreviewDismissedFor = state.composer.text;
+    state.referencePreview = undefined;
+    referenceUniverse = null;
+    scheduleRender();
+  }
+
   function insert(text: string): void {
     if (!editable()) return;
     // Typing again clears a lingering terminal outcome (completed/failed/cancelled)
@@ -2077,10 +2252,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     state.turn = advanceTurn(state.turn, { type: "engage" });
     state.composer.text += text;
     slashPreviewDismissedFor = null;
+    referencePreviewDismissedFor = null;
     // Editing commits the visible text as the draft and leaves history navigation
     // so a recalled prompt the user modifies is not lost on the next recall.
     history = commitDraft(history, state.composer.text);
     refreshMode();
+    refreshReferencePreview(true);
     refreshSlashPreview(true);
     scheduleRender();
   }
@@ -2090,7 +2267,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     state.turn = advanceTurn(state.turn, { type: "engage" });
     state.composer.text += "\n";
     slashPreviewDismissedFor = null;
+    referencePreviewDismissedFor = null;
     state.composer.mode = "multiline";
+    refreshReferencePreview(true);
     refreshSlashPreview(true);
     history = commitDraft(history, state.composer.text);
     scheduleRender();
@@ -2100,8 +2279,10 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     if (!editable() || state.composer.text.length === 0) return;
     state.composer.text = state.composer.text.slice(0, -1);
     slashPreviewDismissedFor = null;
+    referencePreviewDismissedFor = null;
     history = commitDraft(history, state.composer.text);
     refreshMode();
+    refreshReferencePreview(true);
     refreshSlashPreview(true);
     scheduleRender();
   }
@@ -2161,6 +2342,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     const composerRows = composerTotalRows(
       state.composer.text,
       state.slashPreview,
+      state.goal,
+      state.viewport.cols,
+      state.referencePreview,
     );
     return computeLayout(state.viewport, { composerRows }).transcriptRows;
   }
@@ -2440,6 +2624,10 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // (criterion 3): while a turn is in flight the composer is not editable, so we
     // never queue a duplicate run; empty/whitespace input sends nothing.
     if (!submitAllowed(state.composer.mode, state.composer.text)) return;
+    // Submitting clears any open reference picker along with the composer.
+    state.referencePreview = undefined;
+    referenceUniverse = null;
+    referencePreviewDismissedFor = null;
     const text = state.composer.text.trim();
     const slash = text.startsWith("/attach")
       ? { kind: "prompt" as const }
@@ -2584,6 +2772,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         state.composer.text = "";
         state.slashPreview = undefined;
         slashPreviewDismissedFor = null;
+        state.referencePreview = undefined;
+        referenceUniverse = null;
+        referencePreviewDismissedFor = null;
         history = commitDraft(history, "");
         refreshMode();
         scheduleRender();
@@ -2729,7 +2920,13 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       const b = buf[0];
       if (b === 0x03) return onCtrlC(); // Ctrl+C
       if (b === 0x04) return shutdown(0); // Ctrl+D
-      if (b === 0x1b && state.slashPreview) return dismissSlashPreview();
+      if (b === 0x1b) {
+        // Esc closes whichever overlay is open; the reference picker takes
+        // precedence over the slash palette (it owns the composer row).
+        if (state.referencePreview) return dismissReferencePreview();
+        if (state.slashPreview) return dismissSlashPreview();
+        return;
+      }
       if (b === 0x0b) {
         void openPalette();
         return;
@@ -2739,11 +2936,20 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         return;
       } // Ctrl+L redraw
       if (b === 0x09) {
+        if (state.referencePreview) return completeReferenceSelection();
         if (state.slashPreview) return completeSlashSelection(false);
         return toggleExpandSelected();
-      } // Tab: complete a slash command, otherwise expand/collapse transcript
+      } // Tab: insert the reference, complete a slash command, else expand/collapse
       if (b === 0x7f || b === 0x08) return backspace();
       if (b === 0x0d || b === 0x0a) {
+        if (state.referencePreview) {
+          // Enter while the picker is open never submits: it inserts the
+          // highlighted candidate when one is available, otherwise it closes
+          // the picker (criterion 6: no provider turn before submit).
+          if (state.referencePreview.candidates.length > 0) completeReferenceSelection();
+          else dismissReferencePreview();
+          return;
+        }
         if (state.slashPreview?.items.length) {
           completeSlashSelection(true);
           return;
@@ -2764,10 +2970,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // normal (\x1b[A/B) and application (\x1bOA/OB) cursor modes. This slice keeps
     // the caret at end-of-input, so recall never hijacks intra-text cursor movement.
     if (s === "\x1b[A" || s === "\x1bOA") {
+      if (state.referencePreview) return moveReferenceSelection(-1);
       if (state.slashPreview) return moveSlashSelection(-1);
       return recallPrevious();
     }
     if (s === "\x1b[B" || s === "\x1bOB") {
+      if (state.referencePreview) return moveReferenceSelection(1);
       if (state.slashPreview) return moveSlashSelection(1);
       return recallNext();
     }
