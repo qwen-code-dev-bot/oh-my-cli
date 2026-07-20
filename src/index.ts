@@ -94,6 +94,10 @@ import {
   runSideQuestion,
 } from "./side-question.js";
 import {
+  buildSessionStats,
+  formatSessionStats,
+} from "./session-stats.js";
+import {
   TurnImageCollector,
   buildTurnCheckpoint,
   loadTurnLog,
@@ -176,6 +180,7 @@ program
   .option("--list-workflows", "List declared workflows from user settings (read-only, redacted) and exit")
   .option("--run-workflow <name>", "Run a named workflow from user settings non-interactively (sequential headless steps) and exit")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
+  .option("--session-stats <session-id>", "Show a read-only, deterministic activity/efficiency stats view for a session (add --output json for automation) and exit")
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
   .option("--export-session <session-id>", "Export a session locally as redacted Markdown + a deterministic JSON manifest and exit")
   .option("--out <dir>", "Output directory for --export-session (default: current directory)")
@@ -304,6 +309,39 @@ program
         const store = new SessionStore();
         const summaries = collectSessionSummaries(store);
         process.stdout.write(formatSessionList(summaries) + "\n");
+        process.exit(0);
+      }
+
+      // Session-stats mode (Issue #201): render a read-only, deterministic
+      // activity/efficiency view for a session, backed only by the canonical
+      // message log (no provider call, no mutation, nothing created). Every
+      // value states its provenance (measured / estimate / n/a) so a headless
+      // read never fabricates a cost, token, or latency the runtime never
+      // reported. Exits 0 on success, 2 on a missing session or bad format.
+      if (opts.sessionStats !== undefined) {
+        const store = new SessionStore();
+        const id = String(opts.sessionStats);
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        if (store.integrity(id).status === "missing") {
+          process.stderr.write(`Error: session "${id}" not found\n`);
+          process.exit(2);
+        }
+        const meta = store.readMeta(id);
+        const stats = buildSessionStats({
+          sessionId: id,
+          messages: loadSessionMessages(store, id),
+          model: meta?.model ?? null,
+          workspace: meta?.workspace ? redactHomePath(meta.workspace) : null,
+        });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(stats) + "\n");
+        } else {
+          process.stdout.write(formatSessionStats(stats).join("\n") + "\n");
+        }
         process.exit(0);
       }
 
@@ -1758,6 +1796,24 @@ program
               });
               process.stderr.write("\n");
               return result.ok ? undefined : `side question failed: ${result.reason}`;
+            },
+          },
+          {
+            // Session stats (Issue #201) for the plain readline REPL. The
+            // full-screen shell opens a dedicated overlay for `/stats`; this
+            // action covers the non-full-screen fallback and a palette
+            // selection. It reads the session's canonical log only — no tools,
+            // no mutation, nothing appended to the transcript.
+            name: "/stats",
+            description: "Show session activity and efficiency (read-only)",
+            action: () => {
+              const stats = buildSessionStats({
+                sessionId,
+                messages: loadSessionMessages(store, sessionId),
+                model: config.model,
+                workspace: redactHomePath(workspace.root),
+              });
+              return formatSessionStats(stats).join("\n");
             },
           },
         ];
