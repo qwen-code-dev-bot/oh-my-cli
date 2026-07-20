@@ -1510,6 +1510,7 @@ program
             color: useColor,
             colorDepth,
             paletteCommands,
+            loadGoal: () => store.readGoal(sessionId),
             settingsPath,
             tools: toolNames,
           });

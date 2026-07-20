@@ -14,7 +14,7 @@ import type { Config } from "./config.js";
 import type { Workspace } from "./workspace.js";
 import type { ApprovalMode } from "./approval.js";
 import { promptApproval } from "./approval.js";
-import type { SessionMessage } from "./session.js";
+import type { SessionGoalCheckpoint, SessionMessage } from "./session.js";
 import type { AgentSink, AgentUsage, AgentRetry } from "./agent.js";
 import { runAgent } from "./agent.js";
 import { loadImageAttachments } from "./image-input.js";
@@ -34,7 +34,7 @@ import {
 // ---------------------------------------------------------------------------
 
 // Total composer band height (a state rule line plus bounded input rows).
-export const COMPOSER_MAX_ROWS = 8;
+export const COMPOSER_MAX_ROWS = 10;
 export const COMPOSER_MIN_ROWS = 1;
 export const SLASH_PREVIEW_MAX_ITEMS = 4;
 export const IDENTITY_MAX_ROWS = 7;
@@ -297,6 +297,46 @@ export interface ShellState {
   // omit it (treated as closed).
   helpOpen?: boolean;
   slashPreview?: SlashPreviewState;
+  goal?: GoalRailState;
+  now?: number;
+  reducedMotion?: boolean;
+}
+
+export interface GoalRailState {
+  objective: string;
+  status: "active" | "paused";
+  createdAt: number;
+  revision: number;
+}
+
+export type GoalVisualState =
+  | "running"
+  | "paused"
+  | "waiting"
+  | "completed"
+  | "failed";
+
+export function goalRailFromCheckpoint(
+  checkpoint: SessionGoalCheckpoint,
+): GoalRailState | undefined {
+  if (!checkpoint.goal) return undefined;
+  return {
+    objective: checkpoint.goal.objective,
+    status: checkpoint.goal.status,
+    createdAt: checkpoint.goal.createdAt,
+    revision: checkpoint.revision,
+  };
+}
+
+export function goalVisualState(
+  goal: GoalRailState,
+  turn: TurnState,
+): GoalVisualState {
+  if (goal.status === "paused") return "paused";
+  if (turn.phase === "waiting" || turn.phase === "awaiting-approval") return "waiting";
+  if (turn.phase === "failed" || turn.phase === "cancelled") return "failed";
+  if (turn.phase === "completed") return "completed";
+  return "running";
 }
 
 // Options controlling how transcript blocks are flattened/rendered.
@@ -517,6 +557,8 @@ export function computeLayout(viewport: Viewport, opts: { composerRows?: number 
 export function composerTotalRows(
   text: string,
   preview?: SlashPreviewState,
+  goal?: GoalRailState,
+  cols = 80,
 ): number {
   const textLines = text === "" ? 1 : text.split("\n").length;
   const previewRows = preview
@@ -525,7 +567,8 @@ export function composerTotalRows(
         SLASH_PREVIEW_MAX_ITEMS,
       )
     : 0;
-  return clamp(textLines + 2 + previewRows, 3, COMPOSER_MAX_ROWS);
+  const goalRows = goal ? (cols >= 72 ? 2 : 1) : 0;
+  return clamp(textLines + 2 + previewRows + goalRows, 3, COMPOSER_MAX_ROWS);
 }
 
 // ---------------------------------------------------------------------------
@@ -1555,6 +1598,53 @@ function renderBottomRule(cols: number, style: ShellStyle): string {
   return `${style.accent}${"─".repeat(cols)}${style.reset}`;
 }
 
+export function renderGoalRail(
+  goal: GoalRailState,
+  turn: TurnState,
+  cols: number,
+  style: ShellStyle,
+  opts: { now?: number; reducedMotion?: boolean } = {},
+): string[] {
+  const visual = goalVisualState(goal, turn);
+  const marker = {
+    running: "◆",
+    paused: "Ⅱ",
+    waiting: "◇",
+    completed: "✓",
+    failed: "✕",
+  }[visual];
+  const elapsedSeconds = Math.max(
+    0,
+    Math.floor(((opts.now ?? Date.now()) - goal.createdAt) / 1000),
+  );
+  const elapsed = elapsedSeconds >= 3600
+    ? `${Math.floor(elapsedSeconds / 3600)}h`
+    : elapsedSeconds >= 60
+      ? `${Math.floor(elapsedSeconds / 60)}m`
+      : `${elapsedSeconds}s`;
+  const label = `${marker} GOAL ${visual} · ${elapsed} · iteration ${goal.revision}`;
+  if (cols < 72) {
+    return [clipVisible(`${style.bold}${label}${style.reset} · ${goal.objective}`, cols)];
+  }
+
+  const railWidth = clamp(cols - 58, 12, 32);
+  const cue = visual === "running" && !opts.reducedMotion
+    ? Math.floor((opts.now ?? Date.now()) / 500) % railWidth
+    : -1;
+  const rail = Array.from({ length: railWidth }, (_, index) => {
+    const color = index < railWidth / 3
+      ? style.accent
+      : index < (railWidth * 2) / 3
+        ? style.accentSoft
+        : style.accentWarm;
+    return `${color}${index === cue ? "●" : "━"}${style.reset}`;
+  }).join("");
+  return [
+    clipVisible(`${style.bold}${label}${style.reset}  ${goal.objective}`, cols),
+    clipVisible(`${rail}  ${style.dim}/goal status · pause · resume · clear${style.reset}`, cols),
+  ];
+}
+
 // Render the composer band. When there is room (>= 2 rows) the first row is a
 // state rule. That rule shows the active-turn phase in place when a turn is in
 // flight (or reporting its outcome) so streaming/waiting/tool/approval/
@@ -1566,7 +1656,13 @@ export function renderComposer(
   state: ComposerState,
   layout: ShellLayout,
   style: ShellStyle,
-  opts: { turn?: TurnState; slashPreview?: SlashPreviewState } = {},
+  opts: {
+    turn?: TurnState;
+    slashPreview?: SlashPreviewState;
+    goal?: GoalRailState;
+    now?: number;
+    reducedMotion?: boolean;
+  } = {},
 ): string[] {
   const height = Math.max(0, layout.composer.end - layout.composer.start);
   if (height === 0) return [];
@@ -1586,15 +1682,22 @@ export function renderComposer(
         SLASH_PREVIEW_MAX_ITEMS,
       )
     : 0;
+  const goalLines = opts.goal
+    ? renderGoalRail(opts.goal, turn ?? { phase: "idle" }, cols, style, {
+        now: opts.now,
+        reducedMotion: opts.reducedMotion,
+      })
+    : [];
   const textHeight = Math.max(
     1,
     height -
       (useTopRule ? 1 : 0) -
       (useFrame ? 1 : 0) -
-      previewRows,
+      previewRows -
+      goalLines.length,
   );
 
-  const lines: string[] = [];
+  const lines: string[] = [...goalLines];
   if (useTopRule) lines.push(renderRule(label, cols, style));
 
   const lead = `${marker.glyph} `;
@@ -1657,12 +1760,17 @@ export function composeScreen(state: ShellState): ComposedScreen {
   const composerRows = composerTotalRows(
     state.composer.text,
     state.slashPreview,
+    state.goal,
+    state.viewport.cols,
   );
   const layout = computeLayout(state.viewport, { composerRows });
 
   const composerLines = renderComposer(state.composer, layout, style, {
     turn: state.turn,
     slashPreview: state.slashPreview,
+    goal: state.goal,
+    now: state.now,
+    reducedMotion: state.reducedMotion,
   });
   const statusLines = renderStatusLine(state.status, layout, style, {
     learned: state.hintsLearned ?? false,
@@ -1765,6 +1873,7 @@ export interface ConversationShellOptions {
   // Optional; when omitted the shell derives depth from `color` (true → "256").
   colorDepth?: ColorDepth;
   paletteCommands: PaletteCommand[];
+  loadGoal?: () => SessionGoalCheckpoint;
   settingsPath: string;
   tools: readonly string[];
   stdin?: NodeJS.ReadStream;
@@ -1840,6 +1949,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     scroll: 0,
     hintsLearned: history.entries.length > 0,
     helpOpen: false,
+    goal: opts.loadGoal ? goalRailFromCheckpoint(opts.loadGoal()) : undefined,
+    now: Date.now(),
+    reducedMotion:
+      !opts.color ||
+      (opts.env ?? process.env).NO_COLOR !== undefined ||
+      (opts.env ?? process.env).OMC_REDUCE_MOTION === "1",
   };
 
   let running = true;
@@ -1852,6 +1967,15 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   let slashPreviewDismissedFor: string | null = null;
   let escapeBuffer = "";
   let escapeTimer: NodeJS.Timeout | null = null;
+  const motionTimer = setInterval(() => {
+    if (
+      !state.goal ||
+      state.reducedMotion ||
+      goalVisualState(state.goal, state.turn) !== "running"
+    ) return;
+    state.now = Date.now();
+    scheduleRender();
+  }, 500);
 
   const write = (s: string): void => {
     stdout.write(s);
@@ -1861,6 +1985,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     if (cleaned) return;
     cleaned = true;
     if (escapeTimer) clearTimeout(escapeTimer);
+    clearInterval(motionTimer);
     try {
       stdin.setRawMode(false);
     } catch {
@@ -2521,6 +2646,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     }
     try {
       const output = await cmd.action(args);
+      if (opts.loadGoal) state.goal = goalRailFromCheckpoint(opts.loadGoal());
       state.transcript.push({ kind: "notice", text: output ?? `${cmd.name} — ${cmd.description}` });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
