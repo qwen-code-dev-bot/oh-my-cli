@@ -1,7 +1,7 @@
 // Responsive pixel-art product banner for the interactive REPL.
 //
-// Renders an original "OH MY CLI" wordmark (wide), a compact "OMC" mark
-// (medium), or a pure-ASCII fallback (plain) chosen from the terminal width and
+// Renders a Qwen Code-style "Qwen3.8-Max" ANSI Shadow wordmark (wide), a
+// compact label (medium), or a pure-ASCII fallback (plain) chosen from width and
 // color capability. The banner is printed once at startup and never redrawn, so
 // it yields space naturally as the conversation scrolls — no redraw corruption.
 // Display metadata is redacted (workspace collapsed to ~, no credentials) so it
@@ -25,29 +25,26 @@ export interface BannerModel {
 
 // Minimum terminal widths for each art variant. Below MEDIUM_MIN we fall back to
 // the pure-ASCII plain variant so nothing clips or wraps. The wide wordmark is
-// 41 columns and the medium mark is 13, so each threshold leaves a margin.
-const WIDE_MIN = 44;
+// 89 columns, so the threshold leaves a small margin around the wordmark.
+const WIDE_MIN = 92;
 const MEDIUM_MIN = 20;
 
-// Original 5-row outlined wordmark "OH MY CLI" (41 columns).
+// Six-row ANSI Shadow wordmark, matching Qwen Code's terminal-art language.
 export const WIDE_WORDMARK: readonly string[] = [
-  "╭───╮ ╷   ╷ ╷   ╷ ╷   ╷ ╭───╮ ╷     ╭───╮",
-  "│   │ │   │ │╲ ╱│ ╰╮ ╭╯ │     │       │  ",
-  "│   │ ├───┤ │ ╳ │  ╰─╯  │     │       │  ",
-  "│   │ │   │ │   │   │   │     │       │  ",
-  "╰───╯ ╵   ╵ ╵   ╵   ╵   ╰───╯ ╰───╯ ╰───╯",
+  " ██████╗ ██╗    ██╗███████╗███╗   ██╗██████╗     █████╗       ███╗   ███╗ █████╗ ██╗  ██╗",
+  "██╔═══██╗██║    ██║██╔════╝████╗  ██║╚════██╗   ██╔══██╗      ████╗ ████║██╔══██╗╚██╗██╔╝",
+  "██║   ██║██║ █╗ ██║█████╗  ██╔██╗ ██║ █████╔╝   ╚█████╔╝█████╗██╔████╔██║███████║ ╚███╔╝ ",
+  "██║▄▄ ██║██║███╗██║██╔══╝  ██║╚██╗██║ ╚═══██╗   ██╔══██╗╚════╝██║╚██╔╝██║██╔══██║ ██╔██╗ ",
+  "╚██████╔╝╚███╔███╔╝███████╗██║ ╚████║██████╔╝██╗╚█████╔╝      ██║ ╚═╝ ██║██║  ██║██╔╝ ██╗",
+  " ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝╚═════╝ ╚═╝ ╚════╝       ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝",
 ];
 
-// Compact 3-row "OMC" mark (13 columns) for medium widths.
-export const MEDIUM_MARK: readonly string[] = [
-  "███ █   █ ███",
-  "█ █ ██ ██ █  ",
-  "███ █ █ █ ███",
-];
+const PLAIN_TEXT = "Qwen3.8-Max";
+export const MEDIUM_MARK: readonly string[] = [PLAIN_TEXT];
 
-const PLAIN_TEXT = "OH MY CLI";
-
-// Brand palette: dark blue → violet → rose, applied as a left-to-right gradient.
+// Brand palette: ice blue → electric blue → violet → rose, applied left to
+// right. Truecolor terminals interpolate between these anchors; reduced
+// palettes use the nearest stable terminal color at each stop.
 // Each stop carries a truecolor RGB triple, a 256-color index, and a 16-color
 // (basic) SGR base so the same art degrades across color capabilities.
 interface PaletteStop {
@@ -56,9 +53,12 @@ interface PaletteStop {
   basic: number;
 }
 const GRADIENT: readonly PaletteStop[] = [
-  { rgb: [80, 120, 220], c256: 63, basic: 34 }, // blue
-  { rgb: [150, 100, 220], c256: 134, basic: 35 }, // violet
-  { rgb: [220, 110, 160], c256: 168, basic: 31 }, // rose
+  { rgb: [92, 180, 232], c256: 75, basic: 36 }, // ice blue
+  { rgb: [71, 150, 228], c256: 69, basic: 34 }, // bright blue
+  { rgb: [85, 105, 225], c256: 63, basic: 34 }, // electric blue
+  { rgb: [142, 101, 214], c256: 99, basic: 35 }, // violet
+  { rgb: [186, 105, 193], c256: 134, basic: 35 }, // orchid
+  { rgb: [218, 116, 159], c256: 175, basic: 31 }, // rose
 ];
 
 const RESET = "\x1b[0m";
@@ -110,11 +110,28 @@ export function buildProductBanner(input: {
   };
 }
 
-function fg(stop: PaletteStop, depth: ColorDepth): string {
+function interpolateRgb(col: number, width: number): readonly [number, number, number] {
+  if (width <= 1) return GRADIENT[0].rgb;
+  const position = (col / (width - 1)) * (GRADIENT.length - 1);
+  const left = Math.floor(position);
+  const right = Math.min(GRADIENT.length - 1, left + 1);
+  const amount = position - left;
+  const from = GRADIENT[left].rgb;
+  const to = GRADIENT[right].rgb;
+  return [
+    Math.round(from[0] + (to[0] - from[0]) * amount),
+    Math.round(from[1] + (to[1] - from[1]) * amount),
+    Math.round(from[2] + (to[2] - from[2]) * amount),
+  ];
+}
+
+function fg(col: number, width: number, depth: ColorDepth): string {
+  const stop = GRADIENT[colorIndexFor(col, width)];
   if (depth === "truecolor") {
-    return `\x1b[38;2;${stop.rgb[0]};${stop.rgb[1]};${stop.rgb[2]}m`;
+    const rgb = interpolateRgb(col, width);
+    return `\x1b[1;38;2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
   }
-  if (depth === "256") return `\x1b[38;5;${stop.c256}m`;
+  if (depth === "256") return `\x1b[1;38;5;${stop.c256}m`;
   if (depth === "basic") return `\x1b[1;${stop.basic}m`;
   return "";
 }
@@ -127,7 +144,7 @@ function colorIndexFor(col: number, width: number): number {
 // Apply the gradient to a single art row, coloring only non-space cells and
 // grouping consecutive same-color cells into one SGR run. With depth "none" the
 // row is returned untouched (no escapes).
-function colorizeRow(row: string, depth: ColorDepth): string {
+export function colorizeBannerRow(row: string, depth: ColorDepth): string {
   if (depth === "none") return row;
   const cells = Array.from(row);
   const width = cells.length;
@@ -141,10 +158,15 @@ function colorizeRow(row: string, depth: ColorDepth): string {
       i = j;
       continue;
     }
-    const ci = colorIndexFor(i, width);
+    const ci = depth === "truecolor" ? i : colorIndexFor(i, width);
     let j = i;
-    while (j < width && cells[j] !== " " && colorIndexFor(j, width) === ci) j++;
-    out += fg(GRADIENT[ci], depth) + cells.slice(i, j).join("") + RESET;
+    while (
+      j < width &&
+      cells[j] !== " " &&
+      (depth === "truecolor" ? j : colorIndexFor(j, width)) === ci
+    )
+      j++;
+    out += fg(i, width, depth) + cells.slice(i, j).join("") + RESET;
     i = j;
   }
   return out;
@@ -182,8 +204,9 @@ export function renderProductBanner(
   banner: BannerModel,
   opts: { variant: BannerVariant; depth: ColorDepth; width?: number },
 ): string {
-  const rows = artRows(opts.variant).map((r) => colorizeRow(r, opts.depth));
-  const meta = metadataLine(banner, opts.depth, opts.width ?? Number.MAX_SAFE_INTEGER);
+  const width = opts.width ?? Number.MAX_SAFE_INTEGER;
+  const rows = artRows(opts.variant).map((r) => colorizeBannerRow(truncate(r, width), opts.depth));
+  const meta = metadataLine(banner, opts.depth, width);
   return [...rows, meta].join("\n");
 }
 

@@ -483,19 +483,22 @@ describe("tui-shell: resume restores durable state without transient indicators"
 
 describe("tui-shell: whole-screen composition", () => {
   it("uses a Qwen-style product header and quiet first-run canvas", () => {
-    const text = renderShell(baseState()).join("\n");
-    expect(text).toContain("╭───╮");
-    expect(text).toContain(">_ OH MY CLI");
-    expect(text).toContain("(/model for details)");
-    expect(text).toContain("Tips: /attach an image");
+    const text = renderShell(baseState({ viewport: { rows: 24, cols: 120 } })).join("\n");
+    expect(text).toContain("██╔═══██╗");
+    expect(text).toContain("Tips: /attach an image for vision, or Ctrl+K to browse commands.");
+    expect(text).not.toContain("/model switch");
     expect(text).toContain("Ctrl+K");
+    expect(text).not.toContain("┌");
+    expect(text).toContain("\x1b[1;38;5;75m");
+    expect(text).toContain("\x1b[1;38;5;99m");
+    expect(text).toContain("\x1b[1;38;5;175m");
   });
 
   it("reduces the identity before sacrificing the composer on short terminals", () => {
     const text = renderShell(baseState({ viewport: { rows: 12, cols: 40 } })).join("\n");
-    expect(text).toContain("███ █   █ ███");
+    expect(text).toContain("Qwen3.8-Max");
     expect(text).toContain("❯ edit");
-    expect(text).not.toContain("╭───╮");
+    expect(text).not.toContain("██╔═══██╗");
   });
 
   it("renders exactly viewport.rows rows with the composer above the status footer", () => {
@@ -1395,8 +1398,8 @@ describe("tui-shell: color modes — none, basic (reduced), and 256 (Issue #164,
 
   it("uses the portable 16-color SGR set for a basic (reduced-color) terminal", () => {
     const basic = shellStyle("basic");
-    expect(basic.accent).toBe("\x1b[36m"); // cyan
-    expect(basic.accentSoft).toBe("\x1b[35m"); // magenta
+    expect(basic.accent).toBe("\x1b[34m"); // blue
+    expect(basic.accentSoft).toBe("\x1b[36m"); // cyan
     expect(basic.success).toBe("\x1b[32m"); // green
     // Never the indexed 256-color form a reduced-color terminal cannot map.
     expect(basic.accent).not.toContain("38;5");
@@ -1404,17 +1407,17 @@ describe("tui-shell: color modes — none, basic (reduced), and 256 (Issue #164,
   });
 
   it("uses the indexed 256-color palette for 256/truecolor and legacy boolean true", () => {
-    expect(shellStyle("256").accent).toBe("\x1b[38;5;81m");
-    expect(shellStyle("truecolor").accent).toBe("\x1b[38;5;81m");
-    expect(shellStyle(true).accent).toBe("\x1b[38;5;81m");
+    expect(shellStyle("256").accent).toBe("\x1b[38;5;27m");
+    expect(shellStyle("truecolor").accent).toBe("\x1b[38;5;27m");
+    expect(shellStyle(true).accent).toBe("\x1b[38;5;27m");
   });
 
   it("clips colored text by visible cells so color codes never truncate early", () => {
-    const colored = "\x1b[1m>_ OH MY CLI\x1b[0m  \x1b[2m(v0.1.0)\x1b[0m";
+    const colored = "\x1b[1m>_ Qwen3.8-Max\x1b[0m  \x1b[2m(v0.1.0)\x1b[0m";
     // clipLine counts raw chars (incl. escapes) and would cut the version short;
     // clipVisible counts only visible cells, so the full text fits at its width.
-    expect(visibleWidth(colored)).toBe(22);
-    expect(clipVisible(colored, 30)).toBe(colored); // 22 visible cells <= 30, untouched
+    expect(visibleWidth(colored)).toBe(24);
+    expect(clipVisible(colored, 30)).toBe(colored); // 24 visible cells <= 30, untouched
     expect(clipVisible(colored, 30)).toContain("(v0.1.0)");
     // When genuinely too long, it ellipsizes by visible width and keeps escapes intact.
     const clipped = clipVisible(colored, 12);
