@@ -2341,7 +2341,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       const command = opts.paletteCommands.find(
         (candidate) => candidate.name === slash.name,
       );
-      if (command) void runPaletteCommand(command);
+      if (command) void runPaletteCommand(command, slash.args);
       else {
         state.transcript.push({
           kind: "notice",
@@ -2486,7 +2486,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     process.exit(code);
   }
 
-  async function runPaletteCommand(cmd: PaletteCommand): Promise<void> {
+  async function runPaletteCommand(cmd: PaletteCommand, args = ""): Promise<void> {
     // Shell-specific handling for commands whose default action would otherwise
     // bypass terminal cleanup or the shell's own state.
     if (cmd.name === "/exit" || cmd.name === "/quit") {
@@ -2519,13 +2519,14 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       scheduleRender();
       return;
     }
-    state.transcript.push({ kind: "notice", text: `${cmd.name} — ${cmd.description}` });
     try {
-      await cmd.action();
+      const output = await cmd.action(args);
+      state.transcript.push({ kind: "notice", text: output ?? `${cmd.name} — ${cmd.description}` });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       state.transcript.push({ kind: "error", text: redactSecrets(msg).text });
     }
+    scheduleRender();
   }
 
   async function openPalette(): Promise<void> {
