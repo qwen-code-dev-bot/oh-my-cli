@@ -100,6 +100,12 @@ oh-my-cli
 oh-my-cli --resume <session-id>
 ```
 
+Prefer to browse instead of copying an id? Run `oh-my-cli --browse-sessions` in
+a terminal to search and arrow through your sessions, then resume the selected
+one. It resumes the exact session and restores its declared workspace, and it
+fails closed with an actionable message rather than resuming something else when
+the chosen session is missing, corrupt, or its workspace no longer exists.
+
 Sessions are persisted as JSONL under `~/.oh-my-cli/sessions/`. Each
 non-interactive run seals the session with an atomic checkpoint (a temp file
 renamed over the canonical one), so an interrupted write leaves either the
@@ -148,6 +154,8 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `-p, --prompt <prompt>` | Run a single non-interactive request |
 | `--image <paths...>` | Attach image file(s) by path for vision-capable analysis (PNG, JPEG, GIF, or WebP); also `/attach` in interactive mode |
 | `--resume <session-id>` | Resume a persisted session |
+| `--browse-sessions` | Interactively browse, search, and resume a previous session (requires a terminal) |
+| `--list-sessions` | List resumable sessions with a redacted usage summary and exit |
 | `--compact <session-id>` | Compact a session into a bounded summary sidecar (original transcript preserved) and exit |
 | `--compact-threshold <tokens>` | Auto-compact the in-memory transcript when the latest prompt size reaches this (also honors `OMC_COMPACT_THRESHOLD`) |
 | `--approval-mode <mode>` | `default`, `auto-edit`, or `yolo` |
