@@ -42,6 +42,9 @@ describe("desktop workbench renderer", () => {
   it("keeps the document locked to local content", () => {
     const html = renderDesktopShell(createDesktopViewModel("ready"));
 
+    expect(html).toContain('meta name="color-scheme" content="light"');
+    expect(html).toContain("color-scheme: light");
+    expect(html).not.toContain('content="dark"');
     expect(html).toContain(
       "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data:",
     );
