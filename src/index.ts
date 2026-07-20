@@ -85,6 +85,7 @@ import {
   EvidenceArchiveError,
 } from "./evidence-archive.js";
 import type { EvidenceInput } from "./evidence-archive.js";
+import { exportSession, formatSessionExport } from "./session-export.js";
 import {
   createWorktreeLease,
   cleanWorktreeLease,
@@ -158,6 +159,9 @@ program
   .option("--run-workflow <name>", "Run a named workflow from user settings non-interactively (sequential headless steps) and exit")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
+  .option("--export-session <session-id>", "Export a session locally as redacted Markdown + a deterministic JSON manifest and exit")
+  .option("--out <dir>", "Output directory for --export-session (default: current directory)")
+  .option("--force", "Overwrite existing --export-session output files")
   .option("--compact <session-id>", "Compact a session into a bounded summary sidecar (original preserved) and exit")
   .option("--compact-threshold <tokens>", "Auto-compact the in-memory transcript when the latest prompt size reaches this (env: OMC_COMPACT_THRESHOLD)")
   .option("--doctor", "Run read-only installation and platform readiness checks and exit")
@@ -295,6 +299,47 @@ program
         const { summary } = compactMessages(full);
         saveCompaction(store.compactPath(id), summary);
         process.stdout.write(formatCompaction(summary) + "\n");
+        process.exit(0);
+      }
+
+      // Session-export mode: render a session's canonical record to redacted
+      // Markdown plus a deterministic JSON manifest, written locally (no network,
+      // no provider config needed). Redaction is applied before bytes are
+      // written; writes are atomic and never overwrite without --force. Exits 0
+      // on success (a corrupt/partial session still exports, flagged), 2 on a
+      // missing session, collision, or write error.
+      if (opts.exportSession !== undefined) {
+        const store = new SessionStore();
+        const id = String(opts.exportSession);
+        const outDir = opts.out ? String(opts.out) : process.cwd();
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        try {
+          const result = exportSession(store, id, { outDir, force: Boolean(opts.force) });
+          if (result.manifest.integrity !== "ok") {
+            process.stderr.write(
+              `Warning: session ${id} is ${result.manifest.integrity}; the export reflects the recoverable content.\n`,
+            );
+          }
+          if (format === "json") {
+            process.stdout.write(
+              JSON.stringify({
+                markdownPath: result.markdownPath,
+                manifestPath: result.manifestPath,
+                manifest: result.manifest,
+              }) + "\n",
+            );
+          } else {
+            process.stdout.write(formatSessionExport(result) + "\n");
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
         process.exit(0);
       }
 
