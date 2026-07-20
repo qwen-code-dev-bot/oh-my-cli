@@ -25,6 +25,7 @@ import { runPreflight, formatPreflight } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
 import { collectSessionSummaries, formatSessionList } from "./session-summary.js";
+import { runSessionPicker, resolveResumeTarget } from "./session-picker.js";
 import {
   compactMessages,
   saveCompaction,
@@ -156,6 +157,7 @@ program
   .option("--list-workflows", "List declared workflows from user settings (read-only, redacted) and exit")
   .option("--run-workflow <name>", "Run a named workflow from user settings non-interactively (sequential headless steps) and exit")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
+  .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
   .option("--compact <session-id>", "Compact a session into a bounded summary sidecar (original preserved) and exit")
   .option("--compact-threshold <tokens>", "Auto-compact the in-memory transcript when the latest prompt size reaches this (env: OMC_COMPACT_THRESHOLD)")
   .option("--doctor", "Run read-only installation and platform readiness checks and exit")
@@ -1199,8 +1201,37 @@ program
         settingsPath,
         env: process.env,
       }).config;
-      const workspace = new Workspace(opts.workspace);
       const store = new SessionStore();
+
+      // Interactive session browser (Issue #197): pick an exact session to
+      // resume before the conversation starts. Runs only with a terminal; a
+      // cancel exits cleanly. The chosen session's declared workspace is
+      // restored, and a missing/corrupt/stale selection fails closed instead of
+      // silently resuming something else. The active session and any draft are
+      // untouched until a selection is confirmed.
+      let browseResume: { sessionId: string; workspace?: string } | null = null;
+      if (opts.browseSessions) {
+        if (!process.stdin.isTTY || !process.stdout.isTTY) {
+          process.stderr.write("Error: --browse-sessions requires an interactive terminal.\n");
+          process.exit(1);
+        }
+        const pickerColor = colorEnabled({ noColor: opts.color === false, env: process.env });
+        const picked = await runSessionPicker(store, process.stdin, process.stdout, {
+          color: pickerColor,
+        });
+        if (!picked) {
+          process.stderr.write("No session selected.\n");
+          process.exit(0);
+        }
+        const target = resolveResumeTarget(picked.sessionId, store);
+        if (!target.ok) {
+          process.stderr.write(`Cannot resume: ${target.reason}\n`);
+          process.exit(1);
+        }
+        browseResume = { sessionId: target.sessionId, workspace: target.workspace };
+      }
+
+      const workspace = new Workspace(browseResume?.workspace ?? opts.workspace);
       const approvalMode = opts.approvalMode as ApprovalMode;
 
       if (!["default", "auto-edit", "yolo"].includes(approvalMode)) {
@@ -1259,8 +1290,11 @@ program
       let sessionId: string;
       let existingMessages: SessionMessage[] = [];
 
-      if (opts.resume) {
-        sessionId = opts.resume;
+      // A picker selection resumes the exact chosen session; --resume <id> keeps
+      // working unchanged. Both share the same heal-then-load path.
+      const resumeId = browseResume?.sessionId ?? opts.resume;
+      if (resumeId) {
+        sessionId = resumeId;
         // Heal an interrupted or corrupt checkpoint before loading. Recovery is
         // scoped to this session and never touches sibling sessions.
         const recovery = store.recover(sessionId);
