@@ -106,6 +106,13 @@ import {
 } from "./lsp-runtime.js";
 import type { LspView } from "./lsp-runtime.js";
 import {
+  emptyTaskView,
+  formatTaskView,
+  reconcileTasks,
+  summarizeTasks,
+} from "./task-runtime.js";
+import type { TaskView } from "./task-runtime.js";
+import {
   TurnImageCollector,
   buildTurnCheckpoint,
   loadTurnLog,
@@ -217,6 +224,34 @@ function buildLspView(workspaceRoot: string): LspView {
   return { report, servers: [] };
 }
 
+// Existence check for a process id: signal 0 sends no signal but reports whether
+// the process is alive. Used by restart reconciliation to consult REAL process
+// state rather than trusting a persisted "running" label.
+function processAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Background-task center (Issue #203): a read-only, session-owned view of runtime
+// background work and its durable receipts. The CLI does not itself spawn tracked
+// background tasks yet, so the live list is empty in normal use; the engine, the
+// durable-receipt sidecar, and restart reconciliation are exercised by the tests
+// and the E2E receipt. Reading is honest: a missing sidecar yields a quiet empty
+// view, a malformed/stale one is refused (fail closed), and a present one is
+// reconciled against real process state so a dead task is never presented as
+// running. Read-only; it never spawns, cancels, or edits.
+function buildTaskView(store: SessionStore, sessionId: string, workspaceRoot: string): TaskView {
+  const snapshot = store.readTasks(sessionId);
+  if (!snapshot) return emptyTaskView(workspaceRoot);
+  const reconciled = reconcileTasks(snapshot, { isAlive: processAlive }, Date.now());
+  return { summary: summarizeTasks(reconciled.snapshot), workspaceRoot };
+}
+
 const program = new Command();
 
 program
@@ -250,6 +285,7 @@ program
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
   .option("--session-stats <session-id>", "Show a read-only, deterministic activity/efficiency stats view for a session (add --output json for automation) and exit")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
+  .option("--tasks <session-id>", "Show a session's read-only background-task center with durable receipts, reconciled against real process state (add --output json for automation) and exit")
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
   .option("--export-session <session-id>", "Export a session locally as redacted Markdown + a deterministic JSON manifest and exit")
   .option("--out <dir>", "Output directory for --export-session (default: current directory)")
@@ -440,6 +476,52 @@ program
           );
         } else {
           process.stdout.write(formatLspView(view).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Background-task center mode (Issue #203): render a read-only,
+      // session-owned view of runtime background work and its durable receipts,
+      // reconciled against real process state. A missing sidecar is a quiet empty
+      // view; a malformed or stale one is refused (fail closed); a dead task is
+      // never presented as running. No provider call, no mutation, no edits.
+      // Exits 0 on success, 2 on a missing session or bad output format.
+      if (opts.tasks !== undefined) {
+        const store = new SessionStore();
+        const id = String(opts.tasks);
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        if (store.integrity(id).status === "missing") {
+          process.stderr.write(`Error: session "${id}" not found\n`);
+          process.exit(2);
+        }
+        const meta = store.readMeta(id);
+        const view = buildTaskView(store, id, meta?.workspace ?? "");
+        if (format === "json") {
+          // The workspace key is the canonical trust identity (an absolute path);
+          // redact the home prefix so a shared dump never leaks the host home.
+          const redactTask = (t: (typeof view.summary.active)[number]) => ({
+            ...t,
+            workspaceKey: redactHomePath(t.workspaceKey),
+          });
+          process.stdout.write(
+            JSON.stringify({
+              schema: view.summary.schema,
+              v: view.summary.v,
+              sessionId: view.summary.sessionId,
+              workspace: redactHomePath(view.summary.workspaceKey),
+              counts: view.summary.counts,
+              total: view.summary.total,
+              evicted: view.summary.evicted,
+              active: view.summary.active.map(redactTask),
+              recent: view.summary.recent.map(redactTask),
+            }) + "\n",
+          );
+        } else {
+          process.stdout.write(formatTaskView(view).join("\n") + "\n");
         }
         process.exit(0);
       }
@@ -1926,6 +2008,16 @@ program
             description: "Show language-server discovery and readiness (read-only)",
             action: () => formatLspView(buildLspView(workspace.root)).join("\n"),
           },
+          {
+            // Background-task center (Issue #203) for the plain readline REPL. The
+            // full-screen shell opens a dedicated overlay for `/tasks`; this action
+            // covers the non-full-screen fallback and a palette selection. It is
+            // read-only: it reads the session's durable task receipts, reconciled
+            // against real process state, and performs no edits.
+            name: "/tasks",
+            description: "Show background tasks and durable receipts (read-only)",
+            action: () => formatTaskView(buildTaskView(store, sessionId, workspace.root)).join("\n"),
+          },
         ];
 
         // Prefer the stable full-screen conversation shell (regions + fixed
@@ -1955,6 +2047,7 @@ program
             paletteCommands,
             loadGoal: () => store.readGoal(sessionId),
             loadLsp: () => buildLspView(workspace.root),
+            loadTasks: () => buildTaskView(store, sessionId, workspace.root),
             settingsPath,
             tools: toolNames,
           });

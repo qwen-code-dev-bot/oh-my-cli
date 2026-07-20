@@ -304,6 +304,45 @@ list is empty in normal use; the deterministic runtime engine that produces
 live, workspace-bound state (and rejects stale events) is covered by focused
 tests and the end-to-end receipt.
 
+### Background-task center (read-only monitor with durable receipts)
+
+Long-running work — verification, evidence collection, recovery — can outlive the
+turn that started it. The read-only *task center* monitors that background work
+without ever performing it: it shows each task's lifecycle state (`queued`,
+`running`, `waiting` on approval, `succeeded`, `failed`, `cancelled`, `orphaned`,
+`recovered`) and the durable receipt a terminal task leaves behind (an opaque
+digest plus an optional evidence link). Concurrency limits, leases, approval
+gates, and workspace ownership stay authoritative — the center reflects them and
+never grants a slot, releases a lease, or bypasses an approval. Cancellation is
+idempotent and scoped to the one selected task, and a cancelled task keeps its
+receipt rather than being rewritten as something else.
+
+On restart the center reconciles recorded state against **real** process state: a
+running task whose process is gone with no receipt is marked `orphaned` (never
+`succeeded`), and one whose durable receipt has surfaced is marked `recovered`.
+Work is never inferred complete from UI state alone. All task text is secret-safe
+and length-bounded, and the home path is redacted.
+
+In the interactive shell, type `/tasks` to open the overlay above the composer
+(the transcript underneath is untouched, and no edits are performed); **Esc**/**q**/**d**
+dismiss it. The same engine backs the headless form, so the view reads identically
+in both.
+
+```bash
+# Headless: the read-only task-center view for a session
+# (monitor only — no start, no cancel, no mutation, no edits).
+oh-my-cli --tasks <session-id>
+
+# Stable JSON for automation (no ANSI); add --output json.
+oh-my-cli --tasks <session-id> --output json
+```
+
+The durable task snapshot lives in a per-session sidecar and is parsed
+fail-closed: a malformed, truncated, or incompatible snapshot is rejected rather
+than presented as live. The deterministic runtime engine that drives the state
+machine, concurrency, cancellation, and restart reconciliation is covered by
+focused tests and the end-to-end receipt.
+
 ### Options
 
 | Option | Description |
@@ -315,6 +354,7 @@ tests and the end-to-end receipt.
 | `--list-sessions` | List resumable sessions with a redacted usage summary and exit |
 | `--session-stats <session-id>` | Show a read-only, deterministic activity/efficiency stats view for a session (add `--output json` for automation) and exit; also `/stats` in interactive mode |
 | `--lsp-status` | Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add `--output json` for automation) and exit; also `/lsp` in interactive mode |
+| `--tasks <session-id>` | Show the read-only background-task center for a session — lifecycle states, durable receipts, and restart reconciliation (add `--output json` for automation) and exit; also `/tasks` in interactive mode |
 | `--export-session <session-id>` | Export a session locally as redacted Markdown + a deterministic JSON manifest and exit |
 | `--out <dir>` | Output directory for `--export-session` (default: current directory) |
 | `--force` | Overwrite existing `--export-session` output files |
@@ -1827,6 +1867,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/side-question.ts` — structurally-isolated side question against a bounded, read-only session snapshot, no tools/mutation/persistence (`--side-question`/`--session`, `/ask`)
 - `src/session-stats.ts` — deterministic, no-fabrication session activity/efficiency stats engine shared by the `/stats` overlay and the headless `--session-stats` form
 - `src/lsp-runtime.ts` — deterministic, secret-safe language-server runtime engine: trust-gated discovery (no implicit install) plus workspace/version/instance-bound diagnostics with stale-event rejection, shared by the `/lsp` overlay and the headless `--lsp-status` form
+- `src/task-runtime.ts` — deterministic, secret-safe background-task engine: an eight-state lifecycle with authoritative concurrency/leases/approvals, idempotent scoped cancellation with durable receipts, and restart reconciliation against real process state (never complete from UI alone), shared by the `/tasks` overlay and the headless `--tasks` form
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
 - `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`)
 - `src/run-scorecard.ts` — deterministic, privacy-safe comparison of two summaries (`--baseline`/`--candidate`)
