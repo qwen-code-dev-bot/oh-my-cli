@@ -147,6 +147,34 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 # or: OMC_COMPACT_THRESHOLD=100000 oh-my-cli -p "Long task"
 ```
 
+### Session export
+
+Export a single session to a portable, local record for debugging, review, or
+handoff — without copying raw terminal output that loses structure or leaks
+credentials. The export reads the canonical session record and writes two files
+next to each other: a readable Markdown transcript and a machine-readable JSON
+manifest. Secrets, auth tokens, sensitive environment values, and the host home
+directory are redacted **before any bytes are written**. The manifest records the
+session id, redacted workspace and model, timestamps, per-tool call/result
+tallies, attachment references (by name/type/size — never embedded), and a sha256
+of the source session file as its evidence reference.
+
+```bash
+# Write <session-id>.session-export.md and <session-id>.session-export.manifest.json
+oh-my-cli --export-session <session-id> --out ./exports
+
+# JSON output prints the manifest and the two stable output paths.
+oh-my-cli --export-session <session-id> --out ./exports --output json
+```
+
+Exports are deterministic: repeated exports of an unchanged session produce
+byte-identical files (no export-time wall clock). Writes are atomic (a temp file
+renamed over the canonical one, temps cleaned up on failure), and an existing
+output file is never overwritten without `--force`. The export is purely local —
+it performs no network or external-state action. A missing session exits non-zero;
+a corrupt or partial session still exports the recoverable content with its
+integrity flagged.
+
 ### Options
 
 | Option | Description |
@@ -156,6 +184,9 @@ oh-my-cli -p "Long task" --compact-threshold 100000
 | `--resume <session-id>` | Resume a persisted session |
 | `--browse-sessions` | Interactively browse, search, and resume a previous session (requires a terminal) |
 | `--list-sessions` | List resumable sessions with a redacted usage summary and exit |
+| `--export-session <session-id>` | Export a session locally as redacted Markdown + a deterministic JSON manifest and exit |
+| `--out <dir>` | Output directory for `--export-session` (default: current directory) |
+| `--force` | Overwrite existing `--export-session` output files |
 | `--compact <session-id>` | Compact a session into a bounded summary sidecar (original transcript preserved) and exit |
 | `--compact-threshold <tokens>` | Auto-compact the in-memory transcript when the latest prompt size reaches this (also honors `OMC_COMPACT_THRESHOLD`) |
 | `--approval-mode <mode>` | `default`, `auto-edit`, or `yolo` |
@@ -1655,6 +1686,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/color.ts` — ANSI color toggle (`--no-color` / `NO_COLOR`) and palette factory
 - `src/session.ts` — JSONL session persistence
 - `src/compaction.ts` — bounded, versioned, fail-closed session compaction (`--compact`/`--compact-threshold`)
+- `src/session-export.ts` — deterministic, redacted local session export to Markdown + JSON manifest (`--export-session`)
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
 - `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`)
 - `src/run-scorecard.ts` — deterministic, privacy-safe comparison of two summaries (`--baseline`/`--candidate`)

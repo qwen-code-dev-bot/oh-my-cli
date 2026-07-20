@@ -119,6 +119,13 @@ oh-my-cli -p "Summarize README.md" --output json
   workspace, and fails closed if that session is missing, corrupt, or its
   workspace is gone).
 
+  To hand off or review a session, export it locally with
+  `oh-my-cli --export-session <session-id> --out <dir>`: it writes a readable
+  Markdown transcript plus a deterministic JSON manifest, with secrets, auth
+  tokens, sensitive environment values, and your home path redacted before any
+  bytes are written. The export is local-only (no upload), atomic, and never
+  overwrites an existing file without `--force`.
+
 ## 6. Troubleshooting
 
 | Symptom | Likely cause | Fix |
