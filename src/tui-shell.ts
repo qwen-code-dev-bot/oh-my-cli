@@ -35,6 +35,8 @@ import {
 } from "./side-question.js";
 import { buildSessionStats, formatSessionStats } from "./session-stats.js";
 import type { SessionStats, SessionStatsRuntime } from "./session-stats.js";
+import { emptyLspView, formatLspView } from "./lsp-runtime.js";
+import type { LspView } from "./lsp-runtime.js";
 import {
   collectWorkspaceReferences,
   filterReferences,
@@ -374,6 +376,13 @@ export interface ShellState {
   // runtime, so it never mutates the session it inspects. Optional so pure
   // render callers and tests can omit it.
   stats?: SessionStats;
+  // A read-only language-server view (Issue #202): a workspace-trust-gated
+  // discovery report plus any live, workspace/version/instance-bound servers.
+  // Rendered as a distinct overlay over the main area; the composer and status
+  // stay anchored. A snapshot computed on open, so it never mutates the session
+  // it inspects and performs no edits. Optional so pure render callers and tests
+  // can omit it.
+  lsp?: LspView;
   now?: number;
   reducedMotion?: boolean;
 }
@@ -1574,6 +1583,45 @@ export function renderStatsPanel(
   return clipped;
 }
 
+// The language-server overlay (Issue #202): a read-only, workspace-bound view of
+// configured-server discovery plus any live servers and their diagnostics. It
+// takes over the main area above the composer exactly like the stats overlay, so
+// the transcript underneath is untouched and closing it returns to the same
+// conversation. It never performs edits.
+export function renderLspPanel(
+  height: number,
+  cols: number,
+  style: ShellStyle,
+  view: LspView,
+): string[] {
+  const h = Math.max(0, Math.floor(height));
+  if (h === 0) return [];
+  const w = Math.max(0, Math.floor(cols));
+
+  const head: string[] = [
+    clipVisible(
+      `${style.bold}${style.accent}▤ Language servers${style.reset}  ${style.dim}(read-only · no edits performed)${style.reset}`,
+      w,
+    ),
+    renderRule("discovery · readiness · workspace-bound diagnostics", w, style),
+  ];
+
+  const body = formatLspView(view).map((line) => clipVisible(line, w));
+
+  const foot: string[] = ["", clipVisible(`${style.dim}Esc close${style.reset}`, w)];
+
+  const out: string[] = [];
+  const bodyBudget = h - head.length - foot.length;
+  if (bodyBudget <= 0) {
+    out.push(...head.slice(0, h));
+  } else {
+    out.push(...head, ...body.slice(0, bodyBudget), ...foot);
+  }
+  const clipped = out.slice(0, h);
+  while (clipped.length < h) clipped.push("");
+  return clipped;
+}
+
 function renderEmptyTranscript(region: Region, _cols: number, _style: ShellStyle): string[] {
   const height = Math.max(0, region.end - region.start);
   if (height === 0) return [];
@@ -2080,6 +2128,14 @@ export function composeScreen(state: ShellState): ComposedScreen {
     lines.push(
       ...renderStatsPanel(layout.composer.start, layout.viewport.cols, style, state.stats),
     );
+  } else if (state.lsp) {
+    // The language-server overlay (Issue #202) takes over the main area the same
+    // way: a read-only, workspace-bound snapshot, so the transcript underneath is
+    // untouched and closing it returns to the same conversation. An active side
+    // question or stats view (above) wins so it is never hidden behind this.
+    lines.push(
+      ...renderLspPanel(layout.composer.start, layout.viewport.cols, style, state.lsp),
+    );
   } else if (state.helpOpen) {
     // The help panel takes over the main area above the composer (identity +
     // transcript) so the full shortcut list is visible in place; the composer
@@ -2176,6 +2232,11 @@ export interface ConversationShellOptions {
   colorDepth?: ColorDepth;
   paletteCommands: PaletteCommand[];
   loadGoal?: () => SessionGoalCheckpoint;
+  // Computes the read-only language-server view on demand for the `/lsp` overlay
+  // (Issue #202): a workspace-trust-gated discovery report plus any live servers.
+  // The shell never installs a binary or performs edits; the supplier does the
+  // read-only discovery. Optional so a shell without LSP discovery still renders.
+  loadLsp?: () => LspView;
   settingsPath: string;
   tools: readonly string[];
   stdin?: NodeJS.ReadStream;
@@ -2676,6 +2737,32 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     const b = buf[0];
     // Esc, Ctrl+C, q, ?, d
     if (b === 0x1b || b === 0x03 || b === 0x71 || b === 0x3f || b === 0x64) closeStats();
+  }
+
+  // Language-server view (Issue #202): open a read-only overlay computed from a
+  // workspace-trust-gated discovery report plus any live servers. Isolation is
+  // structural — it reads the snapshot the supplier returns, never installs a
+  // binary, appends to the transcript, or performs an edit.
+  function openLsp(): void {
+    state.lsp = opts.loadLsp
+      ? opts.loadLsp()
+      : emptyLspView(opts.workspace.root, opts.mutatingAllowed !== false);
+    scheduleRender();
+  }
+
+  function closeLsp(): void {
+    if (!state.lsp) return;
+    state.lsp = undefined;
+    scheduleRender();
+  }
+
+  // Route a key while the language-server overlay is open. Modal like the stats
+  // overlay: only the dismiss gestures act, and nothing is typed behind it.
+  function handleLspKey(buf: Buffer): void {
+    if (buf.length !== 1) return;
+    const b = buf[0];
+    // Esc, Ctrl+C, q, ?, d
+    if (b === 0x1b || b === 0x03 || b === 0x71 || b === 0x3f || b === 0x64) closeLsp();
   }
 
   // Prompt-history recall (criterion 2). This slice keeps the caret at
@@ -3252,6 +3339,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       openStats();
       return;
     }
+    if (cmd.name === "/lsp") {
+      // Open the in-place read-only language-server overlay (Issue #202) instead
+      // of the plain-REPL fallback action.
+      openLsp();
+      return;
+    }
     const runtimeOutput = formatRuntimeSlashCommand(cmd.name, {
       model: opts.config.model,
       workspace: opts.workspace.root,
@@ -3346,6 +3439,13 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // gestures act, and nothing is typed behind it.
     if (state.stats) {
       handleStatsKey(buf);
+      return;
+    }
+
+    // While the language-server overlay is open it is modal (Issue #202): only
+    // the dismiss gestures act, and nothing is typed behind it.
+    if (state.lsp) {
+      handleLspKey(buf);
       return;
     }
 

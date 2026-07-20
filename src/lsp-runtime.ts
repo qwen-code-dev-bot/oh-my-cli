@@ -587,6 +587,68 @@ export function formatLspSummary(
   return lines;
 }
 
+// The configured-server discovery section of the view.
+export function formatLspDiscovery(report: LspDiscoveryReport): string[] {
+  const lines: string[] = [];
+  lines.push(`Configured servers (${report.plans.length})`);
+  if (report.plans.length === 0) {
+    lines.push("  none registered");
+    return lines;
+  }
+  for (const plan of report.plans) {
+    const tail = plan.command ? plan.command : plan.detail;
+    lines.push(`  ${plan.language}  ${plan.availability}  ${tail}`);
+  }
+  return lines;
+}
+
+// A combined view: a discovery report plus any live servers, rendered together.
+export interface LspView {
+  report: LspDiscoveryReport;
+  servers: readonly LspServer[];
+}
+
+// An empty view (no configured servers, no live servers) for callers without LSP
+// discovery wired in. Honest and quiet: it states no servers are configured.
+export function emptyLspView(workspaceRoot: string, trusted: boolean): LspView {
+  return {
+    report: {
+      schema: LSP_RUNTIME_SCHEMA,
+      v: LSP_RUNTIME_VERSION,
+      workspaceKey: "",
+      workspaceRoot: redactHomePath(workspaceRoot),
+      trusted,
+      plans: [],
+    },
+    servers: [],
+  };
+}
+
+// The full inspectable view: a compact summary, the configured-server
+// discovery, and the per-server detail of any live servers. Backs both the
+// interactive overlay and the headless `--lsp-status` text form (parity).
+export function formatLspView(view: LspView): string[] {
+  const summary = summarizeLspRuntime(view.servers);
+  const lines = formatLspSummary(summary, {
+    workspaceRoot: view.report.workspaceRoot,
+    trusted: view.report.trusted,
+  });
+  lines.push("");
+  lines.push(...formatLspDiscovery(view.report));
+  if (view.servers.length > 0) {
+    lines.push("");
+    lines.push("Active servers");
+    for (const server of view.servers) {
+      lines.push("");
+      lines.push(...formatLspServerDetail(server));
+    }
+  } else {
+    lines.push("");
+    lines.push("Active servers: none running");
+  }
+  return lines;
+}
+
 // Inspectable per-server detail lines, including its current diagnostics.
 export function formatLspServerDetail(server: LspServer): string[] {
   const lines: string[] = [];
