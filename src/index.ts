@@ -3,7 +3,10 @@
 import { Command } from "commander";
 import { resolveModelConfig, resolveSettingsPath, describeResolvedConfig } from "./settings.js";
 import {
-  FOUNDATIONAL_SLASH_COMMANDS,
+  INTERACTIVE_SLASH_COMMANDS,
+  RUNTIME_SLASH_COMMANDS,
+  RUNTIME_SLASH_COMMAND_DESCRIPTORS,
+  formatRuntimeSlashCommand,
   formatSlashCommandHelp,
   resolveSlashCommand,
 } from "./slash-command.js";
@@ -101,6 +104,7 @@ import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary } from "./run-summary.js";
 import { loadImageAttachments, imageRef } from "./image-input.js";
 import type { LoadedImage } from "./image-input.js";
+import { createTools } from "./tools.js";
 import { parseBudgetUsd } from "./cost.js";
 import {
   readRunSummaryFile,
@@ -1190,8 +1194,9 @@ program
         process.exit(result.ok ? 0 : 1);
       }
 
+      const settingsPath = resolveSettingsPath(opts.settings);
       const config = resolveModelConfig({
-        settingsPath: resolveSettingsPath(opts.settings),
+        settingsPath,
         env: process.env,
       }).config;
       const workspace = new Workspace(opts.workspace);
@@ -1473,10 +1478,32 @@ program
           isTTY: Boolean(process.stdout.isTTY),
         });
 
+        const toolNames = createTools().map((tool) => tool.name);
+        const runtimeSlashContext = {
+          model: config.model,
+          workspace: workspace.root,
+          approvalMode,
+          sessionId,
+          settingsPath,
+          tools: toolNames,
+        };
+
         // Build palette commands with live context
         const paletteCommands: PaletteCommand[] = [
-          ...defaultCommands(),
-          { name: "/tools", description: "List available agent tools (read, write, edit, shell)", action: () => { process.stderr.write("Tools: read, write, edit, shell\n"); } },
+          ...defaultCommands().filter(
+            (command) => !RUNTIME_SLASH_COMMANDS.some(
+              (name) => name === command.name,
+            ),
+          ),
+          ...RUNTIME_SLASH_COMMAND_DESCRIPTORS.map(({ name, description }) => ({
+            name,
+            description,
+            action: () => {
+              process.stderr.write(
+                `${formatRuntimeSlashCommand(name, runtimeSlashContext)}\n`,
+              );
+            },
+          })),
         ];
 
         // Prefer the stable full-screen conversation shell (regions + fixed
@@ -1504,6 +1531,8 @@ program
             color: useColor,
             colorDepth,
             paletteCommands,
+            settingsPath,
+            tools: toolNames,
           });
           return;
         }
@@ -1569,7 +1598,7 @@ program
             }
             const slash = answer.trim().startsWith("/attach")
               ? { kind: "prompt" as const }
-              : resolveSlashCommand(answer, FOUNDATIONAL_SLASH_COMMANDS);
+              : resolveSlashCommand(answer, INTERACTIVE_SLASH_COMMANDS);
             if (slash.kind === "unknown") {
               process.stderr.write(`${slash.message}\n`);
               prompt();
@@ -1587,10 +1616,21 @@ program
             }
             if (slash.kind === "command" && slash.name === "/help") {
               process.stderr.write(
-                `${formatSlashCommandHelp(FOUNDATIONAL_SLASH_COMMANDS)}\n`,
+                `${formatSlashCommandHelp(INTERACTIVE_SLASH_COMMANDS)}\n`,
               );
               prompt();
               return;
+            }
+            if (slash.kind === "command") {
+              const output = formatRuntimeSlashCommand(
+                slash.name,
+                runtimeSlashContext,
+              );
+              if (output !== null) {
+                process.stderr.write(`${output}\n`);
+                prompt();
+                return;
+              }
             }
             if (answer.trim().startsWith("/attach")) {
               const paths = answer.trim().slice("/attach".length).split(/\s+/).filter(Boolean);

@@ -25,7 +25,8 @@ import { redactHomePath, redactSecrets } from "./permission-impact.js";
 import { MEDIUM_MARK, VERSION, WIDE_WORDMARK } from "./product-banner.js";
 import type { ColorDepth } from "./product-banner.js";
 import {
-  FOUNDATIONAL_SLASH_COMMANDS,
+  INTERACTIVE_SLASH_COMMANDS,
+  formatRuntimeSlashCommand,
   resolveSlashCommand,
 } from "./slash-command.js";
 
@@ -1114,7 +1115,7 @@ export function renderIdentity(
       `${style.accent}┌${"─".repeat(panelWidth - 2)}┐${style.reset}`,
       panelLine(`${style.bold}>_ OH MY CLI${style.reset}  ${style.dim}(v${version})${style.reset}`, panelWidth, style),
       panelLine("", panelWidth, style),
-      panelLine(`${status.model}  (/model to change)`, panelWidth, style),
+      panelLine(`${status.model}  (/model for details)`, panelWidth, style),
       panelLine(status.workspace, panelWidth, style),
       `${style.accent}└${"─".repeat(panelWidth - 2)}┘${style.reset}`,
     ];
@@ -1661,6 +1662,8 @@ export interface ConversationShellOptions {
   // Optional; when omitted the shell derives depth from `color` (true → "256").
   colorDepth?: ColorDepth;
   paletteCommands: PaletteCommand[];
+  settingsPath: string;
+  tools: readonly string[];
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
   env?: Record<string, string | undefined>;
@@ -2146,7 +2149,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     const text = state.composer.text.trim();
     const slash = text.startsWith("/attach")
       ? { kind: "prompt" as const }
-      : resolveSlashCommand(text, FOUNDATIONAL_SLASH_COMMANDS);
+      : resolveSlashCommand(text, INTERACTIVE_SLASH_COMMANDS);
     if (slash.kind === "unknown") {
       state.composer.text = "";
       history = commitDraft(history, "");
@@ -2319,6 +2322,19 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     if (cmd.name === "/help") {
       // Show the same in-place shortcut panel the `?` key toggles (Issue #169).
       openHelp();
+      return;
+    }
+    const runtimeOutput = formatRuntimeSlashCommand(cmd.name, {
+      model: opts.config.model,
+      workspace: opts.workspace.root,
+      approvalMode: opts.approvalMode,
+      sessionId: opts.sessionId,
+      settingsPath: opts.settingsPath,
+      tools: opts.tools,
+    });
+    if (runtimeOutput !== null) {
+      state.transcript.push({ kind: "notice", text: runtimeOutput });
+      scheduleRender();
       return;
     }
     state.transcript.push({ kind: "notice", text: `${cmd.name} — ${cmd.description}` });
