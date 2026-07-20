@@ -2,6 +2,11 @@
 
 import { Command } from "commander";
 import { resolveModelConfig, resolveSettingsPath, describeResolvedConfig } from "./settings.js";
+import {
+  FOUNDATIONAL_SLASH_COMMANDS,
+  formatSlashCommandHelp,
+  resolveSlashCommand,
+} from "./slash-command.js";
 import { resolveEffectiveSettings, formatEffectiveSettings } from "./effective-settings.js";
 import { collectWorkflowList, formatWorkflowList } from "./workflow-contract.js";
 import { runWorkflow, formatWorkflowStepLine } from "./workflow-runner.js";
@@ -1562,10 +1567,30 @@ program
               prompt();
               return;
             }
-            if (answer.trim() === "/exit" || answer.trim() === "/quit") {
+            const slash = answer.trim().startsWith("/attach")
+              ? { kind: "prompt" as const }
+              : resolveSlashCommand(answer, FOUNDATIONAL_SLASH_COMMANDS);
+            if (slash.kind === "unknown") {
+              process.stderr.write(`${slash.message}\n`);
+              prompt();
+              return;
+            }
+            if (slash.kind === "command" && slash.name === "/exit") {
               process.stdin.removeListener("data", ctrlKHandler);
               rl.close();
               process.exit(0);
+            }
+            if (slash.kind === "command" && slash.name === "/clear") {
+              process.stderr.write("\x1b[2J\x1b[H");
+              prompt();
+              return;
+            }
+            if (slash.kind === "command" && slash.name === "/help") {
+              process.stderr.write(
+                `${formatSlashCommandHelp(FOUNDATIONAL_SLASH_COMMANDS)}\n`,
+              );
+              prompt();
+              return;
             }
             if (answer.trim().startsWith("/attach")) {
               const paths = answer.trim().slice("/attach".length).split(/\s+/).filter(Boolean);
