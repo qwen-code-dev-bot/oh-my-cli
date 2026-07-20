@@ -98,6 +98,14 @@ import {
   formatSessionStats,
 } from "./session-stats.js";
 import {
+  DEFAULT_LSP_SERVERS,
+  detectLanguagesFromPaths,
+  discoverLanguageServers,
+  formatLspView,
+  summarizeLspRuntime,
+} from "./lsp-runtime.js";
+import type { LspView } from "./lsp-runtime.js";
+import {
   TurnImageCollector,
   buildTurnCheckpoint,
   loadTurnLog,
@@ -142,12 +150,72 @@ import { colorEnabled, createColorPalette } from "./color.js";
 import { detectColorDepth, formatProductBanner, VERSION } from "./product-banner.js";
 import { runConversationShell, isFullScreenCapable } from "./tui-shell.js";
 import path from "node:path";
+import fs from "node:fs";
 
 // Handle Ctrl-C gracefully — session is already persisted incrementally
 process.on("SIGINT", () => {
   process.stderr.write("\nInterrupted. Session saved.\n");
   process.exit(130);
 });
+
+// Whether a command is present on PATH (or, on Windows, with a PATHEXT suffix).
+// Read-only: it never installs anything — the Issue #202 discovery invariant.
+function commandOnPath(
+  command: string,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const dirs = (env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const exts = process.platform === "win32" ? (env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      try {
+        if (fs.statSync(path.join(dir, command + ext)).isFile()) return true;
+      } catch {
+        /* not in this directory */
+      }
+    }
+  }
+  return false;
+}
+
+// A bounded, non-recursive scan of a workspace's top-level files, used only to
+// detect which registered languages are present so an unsupported language can
+// be surfaced explicitly. Bounded so a large tree never blocks a read.
+const LSP_SCAN_MAX_FILES = 512;
+function scanWorkspaceLanguages(root: string): string[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const paths: string[] = [];
+  for (const entry of entries) {
+    if (entry.isFile()) paths.push(entry.name);
+    if (paths.length >= LSP_SCAN_MAX_FILES) break;
+  }
+  return detectLanguagesFromPaths(paths);
+}
+
+// Build the read-only language-server view for a workspace: a trust-gated
+// discovery report (no implicit install) plus any live servers. The CLI does not
+// itself spawn language servers, so the live list is empty in normal use; the
+// engine that produces live, workspace-bound state is exercised by the tests and
+// the E2E receipt. Discovery is read-only and never performs an edit.
+function buildLspView(workspaceRoot: string): LspView {
+  const trust = resolveFolderTrust({ workspacePath: workspaceRoot });
+  const trusted = trust.decision.mutatingAllowed;
+  const presentLanguages = trusted ? scanWorkspaceLanguages(workspaceRoot) : [];
+  const report = discoverLanguageServers({
+    workspaceKey: workspaceTrustKey(workspaceRoot),
+    workspaceRoot,
+    trusted,
+    specs: DEFAULT_LSP_SERVERS,
+    presentLanguages,
+    binaryAvailable: (command) => commandOnPath(command),
+  });
+  return { report, servers: [] };
+}
 
 const program = new Command();
 
@@ -181,6 +249,7 @@ program
   .option("--run-workflow <name>", "Run a named workflow from user settings non-interactively (sequential headless steps) and exit")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
   .option("--session-stats <session-id>", "Show a read-only, deterministic activity/efficiency stats view for a session (add --output json for automation) and exit")
+  .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
   .option("--export-session <session-id>", "Export a session locally as redacted Markdown + a deterministic JSON manifest and exit")
   .option("--out <dir>", "Output directory for --export-session (default: current directory)")
@@ -341,6 +410,36 @@ program
           process.stdout.write(JSON.stringify(stats) + "\n");
         } else {
           process.stdout.write(formatSessionStats(stats).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Language-server status mode (Issue #202): render a read-only,
+      // workspace-bound discovery + readiness view for the current workspace.
+      // Discovery never installs a binary; an untrusted workspace surfaces no
+      // running servers; unsupported languages and missing binaries are explicit
+      // and quiet. No provider call, no mutation, no edits. Exits 0 on success,
+      // 2 on a bad output format.
+      if (opts.lspStatus) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const view = buildLspView(process.cwd());
+        if (format === "json") {
+          // The workspace key is the canonical trust identity (an absolute path);
+          // redact the home prefix so a shared dump never leaks the host home.
+          const report = { ...view.report, workspaceKey: redactHomePath(view.report.workspaceKey) };
+          process.stdout.write(
+            JSON.stringify({
+              report,
+              summary: summarizeLspRuntime(view.servers),
+              servers: view.servers,
+            }) + "\n",
+          );
+        } else {
+          process.stdout.write(formatLspView(view).join("\n") + "\n");
         }
         process.exit(0);
       }
@@ -1816,6 +1915,17 @@ program
               return formatSessionStats(stats).join("\n");
             },
           },
+          {
+            // Language-server discovery + readiness (Issue #202) for the plain
+            // readline REPL. The full-screen shell opens a dedicated overlay for
+            // `/lsp`; this action covers the non-full-screen fallback and a
+            // palette selection. It is read-only: it discovers configured servers
+            // for the trusted workspace without installing anything and performs
+            // no edits.
+            name: "/lsp",
+            description: "Show language-server discovery and readiness (read-only)",
+            action: () => formatLspView(buildLspView(workspace.root)).join("\n"),
+          },
         ];
 
         // Prefer the stable full-screen conversation shell (regions + fixed
@@ -1844,6 +1954,7 @@ program
             colorDepth,
             paletteCommands,
             loadGoal: () => store.readGoal(sessionId),
+            loadLsp: () => buildLspView(workspace.root),
             settingsPath,
             tools: toolNames,
           });

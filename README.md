@@ -270,6 +270,40 @@ session recomputes the same totals without double-counting restored events. A
 headless read (or a freshly resumed session) has no live runtime, so model
 activity, tool failures, and timing report `n/a` rather than an invented value.
 
+### Language-server readiness and diagnostics (workspace-bound, read-only)
+
+Hidden language-server startup or stale diagnostics can mislead both users and
+agents. The read-only *language-server view* surfaces, for the active **trusted**
+workspace, which configured servers are available, which binaries are missing,
+and which present languages have no registered server — without ever installing
+software. When servers are running it shows their readiness (starting, ready,
+indexing, degraded, stopped, error) and their diagnostics, each bound to the
+exact workspace, file, document version, and server instance that produced it. A
+diagnostic from another workspace, a superseded document version, or a previous
+server instance is rejected rather than presented as current. Unsupported
+languages and missing binaries are explicit and quiet, and never block normal
+CLI use; all server-supplied text is secret-safe and length-bounded.
+
+In the interactive shell, type `/lsp` to open the overlay above the composer (the
+transcript underneath is untouched, and no edits are performed); **Esc**/**q**/**d**
+dismiss it. The same engine backs the headless form, so the view reads identically
+in both.
+
+```bash
+# Headless: the read-only language-server view for the current workspace
+# (discovery only — no install, no mutation, no edits).
+oh-my-cli --lsp-status
+
+# Stable JSON for automation (no ANSI); add --output json.
+oh-my-cli --lsp-status --output json
+```
+
+Discovery is read-only and trust-gated: an untrusted workspace surfaces no
+running servers. The CLI does not itself spawn language servers, so the live
+list is empty in normal use; the deterministic runtime engine that produces
+live, workspace-bound state (and rejects stale events) is covered by focused
+tests and the end-to-end receipt.
+
 ### Options
 
 | Option | Description |
@@ -280,6 +314,7 @@ activity, tool failures, and timing report `n/a` rather than an invented value.
 | `--browse-sessions` | Interactively browse, search, and resume a previous session (requires a terminal) |
 | `--list-sessions` | List resumable sessions with a redacted usage summary and exit |
 | `--session-stats <session-id>` | Show a read-only, deterministic activity/efficiency stats view for a session (add `--output json` for automation) and exit; also `/stats` in interactive mode |
+| `--lsp-status` | Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add `--output json` for automation) and exit; also `/lsp` in interactive mode |
 | `--export-session <session-id>` | Export a session locally as redacted Markdown + a deterministic JSON manifest and exit |
 | `--out <dir>` | Output directory for `--export-session` (default: current directory) |
 | `--force` | Overwrite existing `--export-session` output files |
@@ -1791,6 +1826,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/turn-checkpoint.ts` — content-based, fail-closed undo/redo of one completed agent turn (`--undo-turn`/`--redo-turn`/`--dry-run`)
 - `src/side-question.ts` — structurally-isolated side question against a bounded, read-only session snapshot, no tools/mutation/persistence (`--side-question`/`--session`, `/ask`)
 - `src/session-stats.ts` — deterministic, no-fabrication session activity/efficiency stats engine shared by the `/stats` overlay and the headless `--session-stats` form
+- `src/lsp-runtime.ts` — deterministic, secret-safe language-server runtime engine: trust-gated discovery (no implicit install) plus workspace/version/instance-bound diagnostics with stale-event rejection, shared by the `/lsp` overlay and the headless `--lsp-status` form
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
 - `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`)
 - `src/run-scorecard.ts` — deterministic, privacy-safe comparison of two summaries (`--baseline`/`--candidate`)

@@ -15,6 +15,16 @@ import type {
 import { buildSessionStats } from "../../src/session-stats.js";
 import type { SessionStats } from "../../src/session-stats.js";
 import type { SessionMessage } from "../../src/session.js";
+import os from "node:os";
+import {
+  DEFAULT_LSP_SERVERS,
+  applyLspEvent,
+  discoverLanguageServers,
+  formatLspView,
+  startLspServer,
+  stopLspServer,
+} from "../../src/lsp-runtime.js";
+import type { LspView } from "../../src/lsp-runtime.js";
 
 // Renders the full-screen shell at the three target terminal dimensions and a
 // reduced-color (basic 16-color) mode plus NO_COLOR, asserting each capture is
@@ -540,5 +550,203 @@ describe("smoke: session stats overlay renders coherently (Issue #201)", () => {
     expect(json.schema).toBe("oh-my-cli.stats");
     expect(json.tools.calls.byName).toEqual(stats.tools.calls.byName);
     expect(json.activity.messages).toBe(stats.activity.messages);
+  });
+});
+
+// The language-server runtime + overlay (Issue #202). The E2E harness captures
+// these renders and the printed runtime receipt inside a real tmux pane, so they
+// publish the readable terminal evidence the issue asks for: a readiness
+// transition, a real diagnostic, a stale-diagnostic rejection, and a clean
+// shutdown — all from the same engine that backs the headless `--lsp-status`
+// output and the interactive `/lsp` overlay (composeScreen, the exact pure path
+// the live driver paints).
+describe("smoke: language-server runtime receipt + overlay (Issue #202)", () => {
+  const WS = "ws-202";
+  const ROOT = `${os.homedir()}/project`;
+  const FILE = `file://${ROOT}/src/a.ts`;
+
+  function publishLine(line: string): void {
+    process.stdout.write(`LSP E2E: ${line}\n`);
+  }
+
+  // A trusted workspace with one available server, one missing binary, and one
+  // present-but-unsupported language — the explicit, quiet discovery surface.
+  function trustedReport(): LspView["report"] {
+    return discoverLanguageServers({
+      workspaceKey: WS,
+      workspaceRoot: ROOT,
+      trusted: true,
+      specs: DEFAULT_LSP_SERVERS,
+      presentLanguages: ["cobol"],
+      binaryAvailable: (cmd) => cmd === "typescript-language-server",
+    });
+  }
+
+  function readyServer() {
+    let server = startLspServer({
+      workspaceKey: WS,
+      workspaceRoot: ROOT,
+      sessionId: "session-202",
+      language: "typescript",
+      command: "typescript-language-server --stdio",
+      now: 0,
+    });
+    server = applyLspEvent(server, { type: "ready", at: 10 }).server;
+    return server;
+  }
+
+  it("drives a readiness transition, a real diagnostic, stale rejection, and clean shutdown", () => {
+    let server = startLspServer({
+      workspaceKey: WS,
+      workspaceRoot: ROOT,
+      sessionId: "session-202",
+      language: "typescript",
+      command: "typescript-language-server --stdio",
+      now: 0,
+    });
+    publishLine(`startup -> ${server.status} (instance ${server.instanceId})`);
+    expect(server.status).toBe("starting");
+
+    server = applyLspEvent(server, { type: "ready", at: 10 }).server;
+    publishLine(`readiness transition starting -> ${server.status}`);
+    expect(server.status).toBe("ready");
+
+    const real = applyLspEvent(server, {
+      type: "diagnostics",
+      at: 20,
+      workspaceKey: WS,
+      instanceId: 1,
+      fileUri: FILE,
+      version: 1,
+      items: [
+        { severity: "error", message: "Cannot find name 'foo'", range: { startLine: 11, startChar: 4, endLine: 11, endChar: 7 } },
+      ],
+    });
+    server = real.server;
+    publishLine(
+      `real diagnostic accepted v1: ${server.diagnostics[0].severity} ${server.diagnostics[0].displayUri} "${server.diagnostics[0].message}"`,
+    );
+    expect(real.accepted).toBe(true);
+    expect(server.diagnostics).toHaveLength(1);
+
+    const stale = applyLspEvent(server, {
+      type: "diagnostics",
+      at: 30,
+      workspaceKey: WS,
+      instanceId: 1,
+      fileUri: FILE,
+      version: 0,
+      items: [{ severity: "warning", message: "superseded" }],
+    });
+    publishLine(
+      `stale diagnostic v0 REJECTED (${stale.reason}); current stays v${server.diagnostics[0].version}`,
+    );
+    expect(stale.accepted).toBe(false);
+    expect(server.diagnostics[0].version).toBe(1);
+
+    const foreign = applyLspEvent(server, {
+      type: "diagnostics",
+      at: 35,
+      workspaceKey: "another-workspace",
+      instanceId: 1,
+      fileUri: FILE,
+      version: 2,
+      items: [{ severity: "error", message: "foreign" }],
+    });
+    publishLine(`foreign-workspace diagnostic REJECTED (${foreign.reason})`);
+    expect(foreign.accepted).toBe(false);
+
+    server = stopLspServer(server, 40);
+    publishLine(`clean shutdown -> ${server.status}; diagnostics cleared (${server.diagnostics.length} remain)`);
+    expect(server.status).toBe("stopped");
+    expect(server.diagnostics).toHaveLength(0);
+  });
+
+  function lspView(): LspView {
+    return { report: trustedReport(), servers: [applyLspEvent(readyServer(), {
+      type: "diagnostics",
+      at: 20,
+      workspaceKey: WS,
+      instanceId: 1,
+      fileUri: FILE,
+      version: 1,
+      items: [
+        { severity: "error", message: "Cannot find name 'foo'", range: { startLine: 11, startChar: 4, endLine: 11, endChar: 7 } },
+        { severity: "warning", message: "'bar' is declared but its value is never read", range: { startLine: 3, startChar: 6, endLine: 3, endChar: 9 } },
+      ],
+    }).server] };
+  }
+
+  function lspState(rows: number, cols: number, view: LspView, opts: { color: boolean; colorDepth?: "none" | "basic" | "256" } = { color: true, colorDepth: "256" }): ShellState {
+    return { ...stateFor(rows, cols, opts), lsp: view };
+  }
+
+  function assertLspCoherent(screen: { lines: string[] }, rows: number, cols: number): void {
+    expect(screen.lines).toHaveLength(rows);
+    for (const line of screen.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(cols);
+    const joined = screen.lines.join("\n");
+    // The header is always present; deeper body rows (the configured-server list
+    // and active-server detail) truncate at the smallest terminal, so they are
+    // asserted only at a full height below.
+    expect(joined).toContain("Language servers");
+    expect(joined).toContain("read-only");
+    // The status footer stays anchored below the overlay.
+    expect(joined).toContain("approval default");
+    // The main transcript is not rendered while the overlay is open.
+    expect(joined).not.toContain("src/layout.ts");
+  }
+
+  for (const { rows, cols } of SIZES) {
+    it(`renders the language-server overlay unclipped at ${rows}x${cols}`, () => {
+      const screen = composeScreen(lspState(rows, cols, lspView()));
+      assertLspCoherent(screen, rows, cols);
+      publish(`language servers ${rows}x${cols}`, screen.lines);
+    });
+  }
+
+  it("surfaces discovery, readiness, and a workspace-bound diagnostic at a full height", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const screen = composeScreen(lspState(rows, cols, lspView()));
+    assertLspCoherent(screen, rows, cols);
+    const joined = screen.lines.join("\n");
+    // Both sections of the inspectable view are present at a full height.
+    expect(joined).toContain("Configured servers");
+    expect(joined).toContain("Active servers");
+    // Discovery: available, missing-binary, and unsupported are all explicit.
+    expect(joined).toContain("typescript  available");
+    expect(joined).toContain("python  missing-binary");
+    expect(joined).toContain("cobol  unsupported");
+    // Readiness + a workspace-bound diagnostic with its version.
+    expect(joined).toContain("typescript  ready  (instance 1)");
+    expect(joined).toContain("Cannot find name 'foo'");
+    expect(joined).toContain("v1");
+    publish(`language servers detail ${rows}x${cols}`, screen.lines);
+    // Publish the full inspectable view too, as the readable receipt.
+    publish("language servers view (formatLspView)", formatLspView(lspView()));
+  });
+
+  it("renders an untrusted workspace with no running servers (quiet, explicit)", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const report = discoverLanguageServers({
+      workspaceKey: WS,
+      workspaceRoot: ROOT,
+      trusted: false,
+      specs: DEFAULT_LSP_SERVERS,
+      binaryAvailable: () => true,
+    });
+    const screen = composeScreen(lspState(rows, cols, { report, servers: [] }));
+    assertLspCoherent(screen, rows, cols);
+    const joined = screen.lines.join("\n");
+    expect(joined).toContain("untrusted (servers not started)");
+    expect(joined).toContain("none running");
+    publish(`language servers untrusted ${rows}x${cols}`, screen.lines);
+  });
+
+  it("renders the language-server overlay with no color (text + structure only)", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const screen = composeScreen(lspState(rows, cols, lspView(), { color: false, colorDepth: "none" }));
+    assertLspCoherent(screen, rows, cols);
+    expect(screen.lines.join("")).not.toMatch(/\x1b\[/);
+    publish(`language servers ${rows}x${cols} (NO_COLOR)`, screen.lines);
   });
 });
