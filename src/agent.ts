@@ -12,6 +12,7 @@ import { estimateCostUsd, lookupModelPrice, formatCostUsd } from "./cost.js";
 import { buildEffectiveSystemPrompt } from "./instruction-context.js";
 import { compactMessages, buildCompactedTranscript } from "./compaction.js";
 import type { LoadedImage } from "./image-input.js";
+import type { TurnImageCollector } from "./turn-checkpoint.js";
 
 const MAX_ROUNDS = 30;
 
@@ -39,6 +40,10 @@ export interface AgentOptions {
   // as multimodal content parts; only a non-secret reference is persisted (the
   // data URL never reaches the session log).
   images?: LoadedImage[];
+  // Optional collector for safe turn undo/redo. When present, the pre-image of
+  // each file a mutating-file tool touches is captured before the tool runs, so
+  // the turn's workspace mutations can later be reversed without a Git reset.
+  turnImages?: TurnImageCollector;
 }
 
 // Cumulative usage and cost reported after each round. `estimatedCostUsd` is an
@@ -398,6 +403,7 @@ export async function runAgent(
         opts.workspace,
         opts.mutatingAllowed ?? true,
         requestApproval,
+        opts.turnImages,
       );
       sink.toolResult({ id: tc.id, name: tc.name, result, round });
       bump(toolCalls, tc.name);
@@ -436,6 +442,7 @@ async function executeToolCall(
   workspace: Workspace,
   mutatingAllowed: boolean,
   requestApproval: (name: string, args: Record<string, unknown>) => Promise<boolean>,
+  turnImages?: TurnImageCollector,
 ): Promise<ToolResult> {
   const tool = toolMap.get(tc.name);
   if (!tool) {
@@ -480,6 +487,17 @@ async function executeToolCall(
 
   try {
     const parsed = JSON.parse(tc.arguments);
+    // Capture the file's pre-image before a mutating-file tool overwrites it, so
+    // the turn's workspace change can later be undone without a Git reset. Only
+    // the first touch per path is recorded (the state before the turn); an
+    // unresolvable path is left for the tool itself to reject.
+    if (turnImages && tool.category === "mutate-file" && typeof parsed.path === "string") {
+      try {
+        turnImages.capture(workspace.resolveSafe(parsed.path));
+      } catch {
+        /* path escape is the tool's own error to surface */
+      }
+    }
     return await tool.execute(parsed, workspace);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

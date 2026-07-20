@@ -87,6 +87,17 @@ import {
 import type { EvidenceInput } from "./evidence-archive.js";
 import { exportSession, formatSessionExport } from "./session-export.js";
 import {
+  TurnImageCollector,
+  buildTurnCheckpoint,
+  loadTurnLog,
+  appendCheckpoint,
+  planUndo,
+  planRedo,
+  applyUndo,
+  applyRedo,
+  formatTurnPlan,
+} from "./turn-checkpoint.js";
+import {
   createWorktreeLease,
   cleanWorktreeLease,
   formatWorktreeLeaseResult,
@@ -164,6 +175,9 @@ program
   .option("--force", "Overwrite existing --export-session output files")
   .option("--compact <session-id>", "Compact a session into a bounded summary sidecar (original preserved) and exit")
   .option("--compact-threshold <tokens>", "Auto-compact the in-memory transcript when the latest prompt size reaches this (env: OMC_COMPACT_THRESHOLD)")
+  .option("--undo-turn <session-id>", "Safely undo the most recent completed agent turn of a session (restores its files + transcript) and exit")
+  .option("--redo-turn <session-id>", "Redo the most recent undone agent turn of a session and exit")
+  .option("--dry-run", "Preview an --undo-turn/--redo-turn plan without changing the workspace or transcript")
   .option("--doctor", "Run read-only installation and platform readiness checks and exit")
   .option("--readiness", "Inspect repository readiness for a blocked task (read-only) and exit")
   .option("--expected-branch <name>", "Expected branch for the --readiness branch check")
@@ -339,6 +353,77 @@ program
           const msg = err instanceof Error ? err.message : String(err);
           process.stderr.write(`${msg}\n`);
           process.exit(2);
+        }
+        process.exit(0);
+      }
+
+      // Turn undo/redo mode: safely reverse (or re-apply) the most recent
+      // completed agent turn of a session by restoring exactly the files its
+      // mutating tools touched and trimming/re-adding its transcript entries.
+      // No Git force/reset/stash is ever used; a diverged, conflicted, or
+      // already-applied turn fails closed with nothing changed. --dry-run
+      // previews the plan without touching the workspace or transcript. Exits 0
+      // on success (or a clean preview), 2 when the operation fails closed or on
+      // a usage error.
+      if (opts.undoTurn !== undefined || opts.redoTurn !== undefined) {
+        const store = new SessionStore();
+        const op: "undo" | "redo" = opts.undoTurn !== undefined ? "undo" : "redo";
+        const id = String(opts.undoTurn ?? opts.redoTurn);
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const meta = store.readMeta(id);
+        // Existence is the session file, not a non-empty transcript: undoing the
+        // first turn legitimately leaves a valid session with zero messages.
+        if (store.integrity(id).status === "missing") {
+          process.stderr.write(`Error: no such session "${id}"\n`);
+          process.exit(2);
+        }
+        // Restore against the workspace the turn ran in (recorded in the session
+        // meta) so undo is correct regardless of the current directory; fall
+        // back to the current directory for sessions without a recorded one.
+        const ws = new Workspace(meta?.workspace ?? process.cwd());
+        const log = loadTurnLog(store, id);
+        const plan = op === "undo" ? planUndo(log, store, ws) : planRedo(log, store, ws);
+        const preview = {
+          turnIndex: plan.checkpoint?.turnIndex ?? null,
+          digest: plan.checkpoint?.digest ?? null,
+          files: plan.fileOps.map((o) => ({ path: o.path, action: o.action })),
+          messageDelta: plan.messageDelta,
+        };
+        if (!plan.ok) {
+          if (format === "json") {
+            process.stdout.write(JSON.stringify({ op, ok: false, reason: plan.reason }) + "\n");
+          } else {
+            process.stderr.write(formatTurnPlan(plan) + "\n");
+          }
+          process.exit(2);
+        }
+        if (opts.dryRun) {
+          if (format === "json") {
+            process.stdout.write(JSON.stringify({ op, ok: true, dryRun: true, preview }) + "\n");
+          } else {
+            process.stdout.write(formatTurnPlan(plan) + "\n");
+          }
+          process.exit(0);
+        }
+        const result = op === "undo" ? applyUndo(log, store, ws, id) : applyRedo(log, store, ws, id);
+        if (!result.ok) {
+          if (format === "json") {
+            process.stdout.write(JSON.stringify({ op, ok: false, reason: result.reason }) + "\n");
+          } else {
+            process.stderr.write(`${formatTurnPlan(plan)}\nFailed: ${result.reason}\n`);
+          }
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify({ op, ok: true, receipt: result.receipt, preview }) + "\n");
+        } else {
+          process.stdout.write(
+            `${formatTurnPlan(plan)}\nApplied ${op} (receipt ${result.receipt?.digest.slice(0, 12)}…).\n`,
+          );
         }
         process.exit(0);
       }
@@ -1382,6 +1467,27 @@ program
           process.exit(1);
         }
 
+        // Capture a content-based checkpoint around this turn so a completed
+        // turn can later be undone (and redone) without a Git reset. The
+        // collector records each mutated file's pre-image before its tool runs;
+        // here we only need the raw transcript length before the turn's messages
+        // are appended. It is read from the store, not existingMessages, because
+        // a compaction sidecar can make the resume view shorter than the raw log.
+        const messageCountBefore = store.load(sessionId).length;
+        const recordTurnCheckpoint = (collector: TurnImageCollector) => {
+          const turnMessages = store.load(sessionId).slice(messageCountBefore);
+          const log = loadTurnLog(store, sessionId);
+          const checkpoint = buildTurnCheckpoint(collector, {
+            workspace,
+            sessionId,
+            turnIndex: log.checkpoints.length,
+            messageCountBefore,
+            messages: turnMessages,
+            head: currentRepoHead(workspace.root) || null,
+          });
+          if (checkpoint) appendCheckpoint(store, sessionId, checkpoint);
+        };
+
         // Load image attachments (if any) up front so a missing/oversized/
         // unsupported file fails with a clear message and a non-zero exit before
         // any provider call. The data URL stays in memory; only the non-secret
@@ -1409,6 +1515,7 @@ program
           writer.emit(startEvent({ sessionId, model: config.model, prompt: opts.prompt }));
           const sink = createHeadlessSink(writer);
           const startedAt = Date.now();
+          const turnImages = new TurnImageCollector();
           let result: AgentResult;
           try {
             result = await runAgent(opts.prompt, existingMessages, {
@@ -1422,6 +1529,7 @@ program
               compactThreshold,
               mutatingAllowed,
               images,
+              turnImages,
             });
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -1448,6 +1556,7 @@ program
             process.exit(1);
           }
           sealSession();
+          recordTurnCheckpoint(turnImages);
           const exitCode = result.ok ? 0 : 1;
           if (opts.summary) {
             writer.emit({
@@ -1480,6 +1589,7 @@ program
         }
 
         const startedAt = Date.now();
+        const turnImages = new TurnImageCollector();
         const result = await runAgent(opts.prompt, existingMessages, {
           config,
           workspace,
@@ -1490,8 +1600,10 @@ program
           compactThreshold,
           mutatingAllowed,
           images,
+          turnImages,
         });
         sealSession();
+        recordTurnCheckpoint(turnImages);
         // Exit with the run outcome so unattended/CI callers can detect failure;
         // the plain-text path previously fell through and always exited 0.
         const exitCode = result.ok ? 0 : 1;

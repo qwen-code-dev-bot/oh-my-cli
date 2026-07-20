@@ -175,6 +175,40 @@ it performs no network or external-state action. A missing session exits non-zer
 a corrupt or partial session still exports the recoverable content with its
 integrity flagged.
 
+### Undo and redo a completed turn
+
+An agent turn changes both the conversation and the workspace, so a wrong turn
+needs a fast recovery path — but a generic `git reset` would destroy unrelated,
+pre-existing work. Every non-interactive (`-p`) turn captures an explicit,
+content-based checkpoint around exactly the files its mutating tools touched
+(their pre-image is recorded before the tool runs) plus the turn's transcript
+entries. Undo reverses only that turn — restoring each owned file to its
+pre-image (or deleting a file the turn created) and trimming its messages —
+while leaving user-owned and pre-existing changes in place. Redo re-applies the
+turn when the undo checkpoint is still valid.
+
+```bash
+# Preview what undoing the latest turn would change (no writes).
+oh-my-cli --undo-turn <session-id> --dry-run
+
+# Undo the latest turn, then redo it.
+oh-my-cli --undo-turn <session-id>
+oh-my-cli --redo-turn <session-id>
+
+# JSON output prints the structured plan/receipt.
+oh-my-cli --undo-turn <session-id> --dry-run --output json
+```
+
+Undo and redo are safe by construction: no force, hard reset, branch rewrite, or
+implicit stash is ever used. The operation fails closed (exit 2, nothing changed)
+when a turn-owned file has diverged since the checkpoint, is in a conflicted
+state, or the turn is already applied — so a failed undo/redo leaves **both** the
+workspace and the transcript exactly as they were. Operations are idempotent
+(re-undoing an undone turn is a no-op) and record a durable receipt tied to the
+exact session and checkpoint digest. Checkpoints live in a `<session-id>.turn.json`
+sidecar, so they survive a restart. The mechanism needs no Git repository and
+never bypasses approval, lease, or evidence policies.
+
 ### Options
 
 | Option | Description |
@@ -189,6 +223,9 @@ integrity flagged.
 | `--force` | Overwrite existing `--export-session` output files |
 | `--compact <session-id>` | Compact a session into a bounded summary sidecar (original transcript preserved) and exit |
 | `--compact-threshold <tokens>` | Auto-compact the in-memory transcript when the latest prompt size reaches this (also honors `OMC_COMPACT_THRESHOLD`) |
+| `--undo-turn <session-id>` | Safely undo the most recent completed agent turn of a session (restores its files + transcript) and exit |
+| `--redo-turn <session-id>` | Redo the most recent undone agent turn of a session and exit |
+| `--dry-run` | Preview an `--undo-turn`/`--redo-turn` plan without changing the workspace or transcript |
 | `--approval-mode <mode>` | `default`, `auto-edit`, or `yolo` |
 | `--workspace <dir>` | Workspace directory (default: cwd) |
 | `--doctor` | Run read-only installation/platform readiness checks and exit |
@@ -1687,6 +1724,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/session.ts` — JSONL session persistence
 - `src/compaction.ts` — bounded, versioned, fail-closed session compaction (`--compact`/`--compact-threshold`)
 - `src/session-export.ts` — deterministic, redacted local session export to Markdown + JSON manifest (`--export-session`)
+- `src/turn-checkpoint.ts` — content-based, fail-closed undo/redo of one completed agent turn (`--undo-turn`/`--redo-turn`/`--dry-run`)
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
 - `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`)
 - `src/run-scorecard.ts` — deterministic, privacy-safe comparison of two summaries (`--baseline`/`--candidate`)
