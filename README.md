@@ -372,6 +372,8 @@ focused tests and the end-to-end receipt.
 | `--expected-branch <name>` | Expected branch for the `--readiness` branch check |
 | `--remote <name>` | Git remote to probe for `--readiness` (default `origin`) |
 | `--repo-context` | Inspect a bounded, redacted repository context snapshot (read-only) and exit |
+| `--repo-map` | Inspect a bounded, ranked repository map of key files and top-level symbols (read-only) and exit |
+| `--map-tokens <n>` | Token budget for `--repo-map` (default `1024`; ~4 chars per token) |
 | `--instruction-context` | Inspect the effective, redacted repository instruction context a fresh session is seeded with (read-only) and exit |
 | `--plan <task>` | Produce a bounded, deterministic execution plan for a task (read-only) and exit |
 | `--verify-task` | Run the repository's canonical verify commands and report a bounded, head-bound pass/fail verdict and exit |
@@ -999,6 +1001,46 @@ Add `--output json` for a versioned record (`schema` `oh-my-cli.repo-context`)
 that a downstream planning or verification step can parse independently. The
 probe is a snapshot, not a gate, so it always exits `0`; an unknown toolchain
 degrades gracefully (reports `unknown` rather than failing).
+
+### Repository map
+
+A fresh session otherwise starts with no automatic view of the workspace: to use
+existing code the model must be told which files to read or guess paths. To give
+it a concise, always-current overview, the CLI builds a bounded, ranked map of
+the workspace's key files and their top-level symbols (signatures only) and
+injects it into every fresh session's context, so the model can locate relevant
+code and reuse existing abstractions. Inspect the same map directly:
+
+```bash
+oh-my-cli --repo-map
+# point it at another checkout, and/or set the token budget (default 1024)
+oh-my-cli --repo-map --workspace path/to/repo --map-tokens 512
+```
+
+The map honors `.gitignore` and a built-in skip set, never follows symlinks (so
+it cannot escape the workspace), and excludes binary and likely-secret paths.
+Only declaration signatures are surfaced — never file bodies — and every
+signature is secret-redacted and length-capped. Files are ranked by relevance
+(symbol density, entry-point and source-dir bonuses, depth and test penalties),
+each file shows at most its first key declarations, and the rendered map is
+clipped to the token budget (≈4 chars per token), so a large repository stays
+responsive and cannot flood context.
+
+```text
+Repository map (oh-my-cli.repo-map v1)
+──────────────────────────────────────
+Files      : 10 of 179 symbol-bearing; budget 4096 chars, used 4073
+src/index.ts
+  export function main()
+  export class App
+…
+… truncated: 169 more symbol-bearing file(s) omitted
+```
+
+Add `--output json` for a versioned record (`schema` `oh-my-cli.repo-map`). The
+map is a snapshot, not a gate, so it always exits `0`; an empty, untrusted, or
+unreadable workspace yields an explicit, non-destructive result rather than a
+crash.
 
 ### Instruction context
 
@@ -1875,6 +1917,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/evidence-archive.ts` — portable, deterministic, signed evidence bundle export/verify (`--export-evidence`/`--verify-evidence`)
 - `src/repo-readiness.ts` — read-only repository-readiness inspection (`--readiness`)
 - `src/repo-context.ts` — read-only, bounded, redacted repository-context snapshot (`--repo-context`)
+- `src/repo-map.ts` — read-only, bounded, ranked repository map of key files and top-level symbols, seeded into every fresh session (`--repo-map`)
 - `src/instruction-context.ts` — effective, bounded, redacted repository instruction context seeded into every fresh session (`--instruction-context`)
 - `src/task-plan.ts` — deterministic, bounded, redacted task planner grounded in the repo context (`--plan`)
 - `src/task-verify.ts` — bounded, redacted, head-bound pass/fail verification of the repo's canonical commands (`--verify-task`)

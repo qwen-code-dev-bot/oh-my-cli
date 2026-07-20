@@ -35,6 +35,7 @@ import {
 import { collectDoctorReport, formatDoctorReport } from "./doctor.js";
 import { collectRepoReadiness, formatRepoReadiness } from "./repo-readiness.js";
 import { collectRepoContext, formatRepoContext } from "./repo-context.js";
+import { collectRepoMap, formatRepoMap, tokensToBudgetChars } from "./repo-map.js";
 import { collectInstructionContext, formatInstructionContext } from "./instruction-context.js";
 import { planTask, formatTaskPlan } from "./task-plan.js";
 import { verifyTask, formatVerifyReport } from "./task-verify.js";
@@ -302,6 +303,8 @@ program
   .option("--expected-branch <name>", "Expected branch for the --readiness branch check")
   .option("--remote <name>", "Git remote to probe for --readiness (default origin)", "origin")
   .option("--repo-context", "Inspect a bounded, redacted repository context snapshot (read-only) and exit")
+  .option("--repo-map", "Inspect a bounded, ranked repository map of key files and top-level symbols (read-only) and exit")
+  .option("--map-tokens <n>", "Token budget for --repo-map (default 1024; ~4 chars per token)")
   .option("--instruction-context", "Inspect the effective, redacted repository instruction context (read-only) and exit")
   .option("--plan <task>", "Produce a bounded, deterministic execution plan for a task (read-only) and exit")
   .option("--verify-task", "Run the repository's canonical verify commands and report a bounded, head-bound pass/fail verdict and exit")
@@ -723,6 +726,36 @@ program
           process.stdout.write(JSON.stringify(snapshot) + "\n");
         } else {
           process.stdout.write(formatRepoContext(snapshot) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Repo-map mode: emit a bounded, ranked, redacted map of the workspace's
+      // key files and their top-level symbols (the automatic context a fresh
+      // session is seeded with). Read-only and never a gate, so it always exits 0.
+      if (opts.repoMap) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(1);
+        }
+        let budgetChars: number | undefined;
+        if (opts.mapTokens !== undefined) {
+          const tokens = Number.parseInt(String(opts.mapTokens), 10);
+          if (!Number.isFinite(tokens) || tokens <= 0) {
+            process.stderr.write(`Error: invalid --map-tokens "${String(opts.mapTokens)}"\n`);
+            process.exit(1);
+          }
+          budgetChars = tokensToBudgetChars(tokens);
+        }
+        const snapshot = collectRepoMap(
+          new Workspace(opts.workspace),
+          budgetChars === undefined ? {} : { budgetChars },
+        );
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(snapshot) + "\n");
+        } else {
+          process.stdout.write(formatRepoMap(snapshot) + "\n");
         }
         process.exit(0);
       }
