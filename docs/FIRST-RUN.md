@@ -126,6 +126,17 @@ oh-my-cli -p "Summarize README.md" --output json
   bytes are written. The export is local-only (no upload), atomic, and never
   overwrites an existing file without `--force`.
 
+  Made a wrong turn? Each non-interactive turn records a content-based
+  checkpoint of exactly the files it changed, so you can reverse just that turn
+  without a `git reset` wiping out unrelated work. Preview first with
+  `oh-my-cli --undo-turn <session-id> --dry-run`, then apply it with
+  `oh-my-cli --undo-turn <session-id>` (and re-apply with
+  `oh-my-cli --redo-turn <session-id>`). Undo restores each file the turn owned
+  to its prior content (or deletes one it created) and trims its transcript
+  entries, leaving your pre-existing changes untouched. It never uses force,
+  hard reset, or stash, and it fails closed without changing anything if a
+  turn-owned file has since diverged or is conflicted.
+
 ## 6. Troubleshooting
 
 | Symptom | Likely cause | Fix |
