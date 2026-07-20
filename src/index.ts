@@ -3,7 +3,6 @@
 import { Command } from "commander";
 import { resolveModelConfig, resolveSettingsPath, describeResolvedConfig } from "./settings.js";
 import {
-  INTERACTIVE_SLASH_COMMANDS,
   RUNTIME_SLASH_COMMANDS,
   RUNTIME_SLASH_COMMAND_DESCRIPTORS,
   formatRuntimeSlashCommand,
@@ -15,6 +14,7 @@ import { collectWorkflowList, formatWorkflowList } from "./workflow-contract.js"
 import { runWorkflow, formatWorkflowStepLine } from "./workflow-runner.js";
 import { Workspace } from "./workspace.js";
 import { SessionStore } from "./session.js";
+import { runGoalCommand } from "./session-goal.js";
 import { runAgent } from "./agent.js";
 import type { AgentResult } from "./agent.js";
 import type { ApprovalMode } from "./approval.js";
@@ -1435,32 +1435,6 @@ program
           process.stdout.write("\n" + formatRunSummary(summary) + "\n");
         }
         process.exit(exitCode);
-      } else if (opts.resume) {
-        // Resume mode: need a new prompt from stdin
-        if (process.stdin.isTTY) {
-          const readline = await import("node:readline");
-          const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-          rl.question("> ", async (answer) => {
-            rl.close();
-            if (!answer.trim()) {
-              process.stderr.write("No prompt provided, exiting.\n");
-              process.exit(0);
-            }
-            await runAgent(answer, existingMessages, {
-              config,
-              workspace,
-              approvalMode,
-              sessionId,
-              onMessage,
-              budgetUsd,
-              compactThreshold,
-              mutatingAllowed,
-            });
-          });
-        } else {
-          process.stderr.write("Error: --resume requires a TTY for interactive input, or use -p\n");
-          process.exit(1);
-        }
       } else {
         // Interactive REPL
         if (!process.stdin.isTTY) {
@@ -1504,6 +1478,11 @@ program
               );
             },
           })),
+          {
+            name: "/goal",
+            description: "Set, inspect, pause, resume, or clear the session goal",
+            action: (args = "") => runGoalCommand(store, sessionId, args),
+          },
         ];
 
         // Prefer the stable full-screen conversation shell (regions + fixed
@@ -1598,7 +1577,7 @@ program
             }
             const slash = answer.trim().startsWith("/attach")
               ? { kind: "prompt" as const }
-              : resolveSlashCommand(answer, INTERACTIVE_SLASH_COMMANDS);
+              : resolveSlashCommand(answer, paletteCommands.map((command) => command.name));
             if (slash.kind === "unknown") {
               process.stderr.write(`${slash.message}\n`);
               prompt();
@@ -1616,7 +1595,7 @@ program
             }
             if (slash.kind === "command" && slash.name === "/help") {
               process.stderr.write(
-                `${formatSlashCommandHelp(INTERACTIVE_SLASH_COMMANDS)}\n`,
+                `${formatSlashCommandHelp(paletteCommands.map((command) => command.name))}\n`,
               );
               prompt();
               return;
@@ -1628,6 +1607,13 @@ program
               );
               if (output !== null) {
                 process.stderr.write(`${output}\n`);
+                prompt();
+                return;
+              }
+              const command = paletteCommands.find((candidate) => candidate.name === slash.name);
+              if (command) {
+                const result = await command.action(slash.args);
+                if (result) process.stderr.write(`${result}\n`);
                 prompt();
                 return;
               }

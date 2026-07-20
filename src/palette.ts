@@ -1,7 +1,7 @@
 export interface PaletteCommand {
   name: string;
   description: string;
-  action: () => Promise<void> | void;
+  action: (args?: string) => Promise<string | void> | string | void;
 }
 
 export function filterCommands(

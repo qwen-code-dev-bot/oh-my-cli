@@ -2,7 +2,7 @@ import { redactSecrets } from "./permission-impact.js";
 
 export type SlashCommandResolution =
   | { kind: "prompt" }
-  | { kind: "command"; name: string }
+  | { kind: "command"; name: string; args: string }
   | { kind: "unknown"; input: string; message: string };
 
 export const FOUNDATIONAL_SLASH_COMMANDS = [
@@ -49,8 +49,11 @@ export function resolveSlashCommand(
   const trimmed = input.trim();
   if (!trimmed.startsWith("/")) return { kind: "prompt" };
 
-  const name = ALIASES[trimmed] ?? trimmed;
-  if (commandNames.includes(name)) return { kind: "command", name };
+  const separator = trimmed.search(/\s/);
+  const token = separator === -1 ? trimmed : trimmed.slice(0, separator);
+  const name = ALIASES[token] ?? token;
+  const args = separator === -1 ? "" : trimmed.slice(separator).trim();
+  if (commandNames.includes(name)) return { kind: "command", name, args };
 
   return {
     kind: "unknown",

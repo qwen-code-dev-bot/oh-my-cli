@@ -16,6 +16,7 @@ describe("resolveSlashCommand", () => {
     expect(resolveSlashCommand("  /clear  ", commands)).toEqual({
       kind: "command",
       name: "/clear",
+      args: "",
     });
   });
 
@@ -23,10 +24,12 @@ describe("resolveSlashCommand", () => {
     expect(resolveSlashCommand("/?", commands)).toEqual({
       kind: "command",
       name: "/help",
+      args: "",
     });
     expect(resolveSlashCommand("/quit", commands)).toEqual({
       kind: "command",
       name: "/exit",
+      args: "",
     });
   });
 
@@ -47,10 +50,11 @@ describe("resolveSlashCommand", () => {
     });
   });
 
-  it("requires an exact command instead of accepting arguments implicitly", () => {
-    expect(resolveSlashCommand("/clear now", commands)).toMatchObject({
-      kind: "unknown",
-      input: "/clear now",
+  it("returns command arguments without treating them as part of the name", () => {
+    expect(resolveSlashCommand("/clear now please", commands)).toEqual({
+      kind: "command",
+      name: "/clear",
+      args: "now please",
     });
   });
 

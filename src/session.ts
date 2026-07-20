@@ -28,6 +28,18 @@ export interface SessionMeta {
   createdAt: number;
 }
 
+export interface SessionGoal {
+  objective: string;
+  status: "active" | "paused";
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SessionGoalCheckpoint {
+  revision: number;
+  goal: SessionGoal | null;
+}
+
 export interface SessionDiagnostics {
   messages: SessionMessage[];
   meta: SessionMeta | null;
@@ -65,6 +77,17 @@ function isMetaLine(value: unknown): value is SessionMeta {
   );
 }
 
+function isSessionGoal(value: unknown): value is SessionGoal {
+  if (typeof value !== "object" || value === null) return false;
+  const goal = value as Partial<SessionGoal>;
+  return (
+    typeof goal.objective === "string" &&
+    (goal.status === "active" || goal.status === "paused") &&
+    typeof goal.createdAt === "number" &&
+    typeof goal.updatedAt === "number"
+  );
+}
+
 export class SessionStore {
   private dir: string;
 
@@ -92,6 +115,33 @@ export class SessionStore {
   // enumerated exactly once.
   compactPath(id: string): string {
     return path.join(this.dir, `${id}.compact.json`);
+  }
+
+  goalPath(id: string): string {
+    return path.join(this.dir, `${id}.goal.json`);
+  }
+
+  readGoal(id: string): SessionGoalCheckpoint {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.goalPath(id), "utf-8")) as Partial<SessionGoalCheckpoint>;
+      if (
+        typeof parsed.revision !== "number" ||
+        parsed.revision < 0 ||
+        (parsed.goal !== null && !isSessionGoal(parsed.goal))
+      ) {
+        return { revision: 0, goal: null };
+      }
+      return { revision: parsed.revision, goal: parsed.goal ?? null };
+    } catch {
+      return { revision: 0, goal: null };
+    }
+  }
+
+  writeGoal(id: string, checkpoint: SessionGoalCheckpoint): void {
+    const target = this.goalPath(id);
+    const temp = `${target}.tmp`;
+    fs.writeFileSync(temp, `${JSON.stringify(checkpoint)}\n`, "utf-8");
+    fs.renameSync(temp, target);
   }
 
   append(id: string, message: SessionMessage): void {
