@@ -22,6 +22,7 @@ import type { LoadedImage } from "./image-input.js";
 import { runPalette } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
+import { GoalStore, parseGoalCommand, runGoalCommand } from "./goal.js";
 import { MEDIUM_MARK, VERSION, WIDE_WORDMARK } from "./product-banner.js";
 import type { ColorDepth } from "./product-banner.js";
 
@@ -1657,6 +1658,9 @@ export interface ConversationShellOptions {
   // Optional; when omitted the shell derives depth from `color` (true → "256").
   colorDepth?: ColorDepth;
   paletteCommands: PaletteCommand[];
+  // Per-session goal store. Optional so callers that share a SessionStore's
+  // directory can inject one; defaults to the standard sessions directory.
+  goalStore?: GoalStore;
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
   env?: Record<string, string | undefined>;
@@ -1668,6 +1672,10 @@ export interface ConversationShellOptions {
 export function runConversationShell(opts: ConversationShellOptions): Promise<void> {
   const stdin = opts.stdin ?? process.stdin;
   const stdout = opts.stdout ?? process.stdout;
+
+  // Durable per-session goal (Issue #189). Co-located with the session store so
+  // it is restored on resume and isolated per session id.
+  const goalStore = opts.goalStore ?? new GoalStore();
 
   // Transcript blocks the user has expanded to full height (Tab toggles the
   // latest long block). Held outside state so the driver can mutate it; state
@@ -2162,6 +2170,14 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
           state.transcript.push({ kind: "error", text: redactSecrets(msg).text });
         }
       }
+      scheduleRender();
+      return;
+    }
+    if (text === "/goal" || text.startsWith("/goal ")) {
+      state.composer.text = "";
+      const cmd = parseGoalCommand(text.slice("/goal".length));
+      const result = runGoalCommand(goalStore, opts.sessionId, cmd);
+      state.transcript.push({ kind: "notice", text: result.feedback });
       scheduleRender();
       return;
     }

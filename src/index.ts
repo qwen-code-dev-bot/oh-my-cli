@@ -7,6 +7,7 @@ import { collectWorkflowList, formatWorkflowList } from "./workflow-contract.js"
 import { runWorkflow, formatWorkflowStepLine } from "./workflow-runner.js";
 import { Workspace } from "./workspace.js";
 import { SessionStore } from "./session.js";
+import { GoalStore, parseGoalCommand, runGoalCommand } from "./goal.js";
 import { runAgent } from "./agent.js";
 import type { AgentResult } from "./agent.js";
 import type { ApprovalMode } from "./approval.js";
@@ -1191,6 +1192,8 @@ program
       }).config;
       const workspace = new Workspace(opts.workspace);
       const store = new SessionStore();
+      // Durable per-session goal lives beside the session checkpoint (Issue #189).
+      const goalStore = new GoalStore();
       const approvalMode = opts.approvalMode as ApprovalMode;
 
       if (!["default", "auto-edit", "yolo"].includes(approvalMode)) {
@@ -1472,6 +1475,7 @@ program
         const paletteCommands: PaletteCommand[] = [
           ...defaultCommands(),
           { name: "/tools", description: "List available agent tools (read, write, edit, shell)", action: () => { process.stderr.write("Tools: read, write, edit, shell\n"); } },
+          { name: "/goal", description: "Pin a durable session goal — type /goal <objective> (or status|pause|resume|clear)", action: () => {} },
         ];
 
         // Prefer the stable full-screen conversation shell (regions + fixed
@@ -1499,6 +1503,7 @@ program
             color: useColor,
             colorDepth,
             paletteCommands,
+            goalStore,
           });
           return;
         }
@@ -1584,6 +1589,14 @@ program
                   process.stderr.write(`Error: ${msg}\n`);
                 }
               }
+              prompt();
+              return;
+            }
+            const goalText = answer.trim();
+            if (goalText === "/goal" || goalText.startsWith("/goal ")) {
+              const cmd = parseGoalCommand(goalText.slice("/goal".length));
+              const result = runGoalCommand(goalStore, sessionId, cmd);
+              process.stderr.write(`${result.feedback}\n`);
               prompt();
               return;
             }
