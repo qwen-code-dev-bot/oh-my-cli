@@ -55,7 +55,7 @@ export function resolveSlashCommand(
   return {
     kind: "unknown",
     input: trimmed,
-    message: `Unknown command ${trimmed}. Use /help or Ctrl+K to browse commands.`,
+    message: `Unknown command ${trimmed}. Type / to browse commands.`,
   };
 }
 

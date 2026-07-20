@@ -4,12 +4,19 @@ export interface PaletteCommand {
   action: () => Promise<void> | void;
 }
 
-export function filterCommands(commands: PaletteCommand[], query: string): PaletteCommand[] {
-  if (!query) return commands;
+export function filterCommands(
+  commands: readonly PaletteCommand[],
+  query: string,
+): PaletteCommand[] {
+  if (!query) return [...commands];
   const lower = query.toLowerCase();
   return commands.filter(
     (c) => c.name.toLowerCase().includes(lower) || c.description.toLowerCase().includes(lower),
   );
+}
+
+export function slashPreviewQuery(text: string): string | null {
+  return /^\/[^\s/]*$/.test(text) ? text.slice(1) : null;
 }
 
 const ESC = "\x1b[";
