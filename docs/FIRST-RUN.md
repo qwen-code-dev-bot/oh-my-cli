@@ -137,6 +137,17 @@ oh-my-cli -p "Summarize README.md" --output json
   hard reset, or stash, and it fails closed without changing anything if a
   turn-owned file has since diverged or is conflicted.
 
+  Need a quick clarification without disturbing the task in progress? Ask a
+  *side question*. In the interactive shell, type `/ask <question>` to open a
+  distinct overlay: it answers from a bounded, read-only snapshot of the active
+  session with tools and workspace changes disabled, and the answer is never
+  appended to your main transcript, goal, or workflow. From a settled answer,
+  **Enter** promotes it into the composer, **c** copies it, and **Esc** dismisses
+  (or cancels while it streams). Headless, use
+  `oh-my-cli --side-question "<question>" --session <session-id>` (add
+  `--output json` for a versioned result); the source session is read only and
+  left byte-identical.
+
 ## 6. Troubleshooting
 
 | Symptom | Likely cause | Fix |

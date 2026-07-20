@@ -209,6 +209,38 @@ exact session and checkpoint digest. Checkpoints live in a `<session-id>.turn.js
 sidecar, so they survive a restart. The mechanism needs no Git repository and
 never bypasses approval, lease, or evidence policies.
 
+### Side questions (ask without disturbing the main task)
+
+While a longer task is in flight, sending a quick clarification through the main
+conversation can alter task state, trigger context compaction, change tool plans,
+or shift the active goal. A *side question* answers that clarification against a
+bounded, read-only snapshot of the active session — with tool execution and
+workspace mutation disabled — and returns the answer inline **without** appending
+to the main transcript, goal, workflow, or retry chain.
+
+In the interactive shell, type `/ask <question>` to open a distinct overlay. The
+pane states the context boundary and whether a provider request is active; while
+it is open the main task is untouched underneath. From a settled answer you can
+**Enter** to promote it into the composer (to edit or send deliberately), **c** to
+copy it to the terminal clipboard, or **Esc**/**d** to dismiss. While the answer
+streams, **Esc** cancels. The same command works in the plain readline fallback
+(streaming the answer inline).
+
+```bash
+# Headless: ask against a session's read-only context (nothing is persisted).
+oh-my-cli --side-question "which test runner does this project use?" --session <session-id>
+
+# JSON output prints a versioned result and the context scope.
+oh-my-cli --side-question "why is the build failing?" --session <session-id> --output json
+```
+
+Isolation is structural, not best-effort: the side-question runner is handed only
+a provider config, a bounded context snapshot, and the question — never a session
+store, goal, approval, or workspace handle — so it cannot mutate any of them. The
+provider call carries no tool schemas and any tool-call event is ignored, so a
+side turn can never run a tool or touch the workspace. A headless side question
+leaves the source session byte-identical (transcript and every sidecar).
+
 ### Options
 
 | Option | Description |
@@ -226,6 +258,8 @@ never bypasses approval, lease, or evidence policies.
 | `--undo-turn <session-id>` | Safely undo the most recent completed agent turn of a session (restores its files + transcript) and exit |
 | `--redo-turn <session-id>` | Redo the most recent undone agent turn of a session and exit |
 | `--dry-run` | Preview an `--undo-turn`/`--redo-turn` plan without changing the workspace or transcript |
+| `--side-question <text>` | Ask a side question against a session's bounded, read-only context (no tools, no mutation, nothing persisted) and exit; also `/ask` in interactive mode |
+| `--session <session-id>` | Source session whose read-only context seeds `--side-question` |
 | `--approval-mode <mode>` | `default`, `auto-edit`, or `yolo` |
 | `--workspace <dir>` | Workspace directory (default: cwd) |
 | `--doctor` | Run read-only installation/platform readiness checks and exit |
@@ -1725,6 +1759,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/compaction.ts` — bounded, versioned, fail-closed session compaction (`--compact`/`--compact-threshold`)
 - `src/session-export.ts` — deterministic, redacted local session export to Markdown + JSON manifest (`--export-session`)
 - `src/turn-checkpoint.ts` — content-based, fail-closed undo/redo of one completed agent turn (`--undo-turn`/`--redo-turn`/`--dry-run`)
+- `src/side-question.ts` — structurally-isolated side question against a bounded, read-only session snapshot, no tools/mutation/persistence (`--side-question`/`--session`, `/ask`)
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
 - `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`)
 - `src/run-scorecard.ts` — deterministic, privacy-safe comparison of two summaries (`--baseline`/`--candidate`)
