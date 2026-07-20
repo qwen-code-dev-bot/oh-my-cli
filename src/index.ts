@@ -1435,32 +1435,6 @@ program
           process.stdout.write("\n" + formatRunSummary(summary) + "\n");
         }
         process.exit(exitCode);
-      } else if (opts.resume) {
-        // Resume mode: need a new prompt from stdin
-        if (process.stdin.isTTY) {
-          const readline = await import("node:readline");
-          const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-          rl.question("> ", async (answer) => {
-            rl.close();
-            if (!answer.trim()) {
-              process.stderr.write("No prompt provided, exiting.\n");
-              process.exit(0);
-            }
-            await runAgent(answer, existingMessages, {
-              config,
-              workspace,
-              approvalMode,
-              sessionId,
-              onMessage,
-              budgetUsd,
-              compactThreshold,
-              mutatingAllowed,
-            });
-          });
-        } else {
-          process.stderr.write("Error: --resume requires a TTY for interactive input, or use -p\n");
-          process.exit(1);
-        }
       } else {
         // Interactive REPL
         if (!process.stdin.isTTY) {
