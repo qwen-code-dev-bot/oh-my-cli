@@ -121,7 +121,7 @@ function formatSessionLines(s: SessionSummary): string[] {
   const usage =
     `${s.messageCount} msgs, ${s.userTurns + s.assistantTurns} turns, ` +
     `${s.toolCalls} tool calls, ~${s.approxTokens} tokens (est.)`;
-  const age = `last active ${formatAge(s.ageMs)}`;
+  const age = `last active ${formatSessionAge(s.ageMs)}`;
   return [head, `      ${provenance}`, `      ${usage}  ·  ${age}`];
 }
 
@@ -138,7 +138,9 @@ function redactPath(p: string | undefined): string {
   return redactSecrets(out).text;
 }
 
-function formatAge(ms: number): string {
+// Human-friendly "last active" bucket. Exported so the interactive session
+// picker (session-picker.ts) renders the same age labels as the static list.
+export function formatSessionAge(ms: number): string {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s ago`;
   const m = Math.floor(s / 60);
