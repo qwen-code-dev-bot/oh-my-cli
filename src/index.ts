@@ -87,6 +87,13 @@ import {
 import type { EvidenceInput } from "./evidence-archive.js";
 import { exportSession, formatSessionExport } from "./session-export.js";
 import {
+  SIDE_QUESTION_SCHEMA,
+  SIDE_QUESTION_VERSION,
+  buildSideContext,
+  formatSideContextSummary,
+  runSideQuestion,
+} from "./side-question.js";
+import {
   TurnImageCollector,
   buildTurnCheckpoint,
   loadTurnLog,
@@ -178,6 +185,8 @@ program
   .option("--undo-turn <session-id>", "Safely undo the most recent completed agent turn of a session (restores its files + transcript) and exit")
   .option("--redo-turn <session-id>", "Redo the most recent undone agent turn of a session and exit")
   .option("--dry-run", "Preview an --undo-turn/--redo-turn plan without changing the workspace or transcript")
+  .option("--side-question <text>", "Ask a side question against a session's bounded, read-only context (no tools, no mutation, nothing persisted) and exit")
+  .option("--session <session-id>", "Source session whose read-only context seeds --side-question")
   .option("--doctor", "Run read-only installation and platform readiness checks and exit")
   .option("--readiness", "Inspect repository readiness for a blocked task (read-only) and exit")
   .option("--expected-branch <name>", "Expected branch for the --readiness branch check")
@@ -1333,6 +1342,58 @@ program
       }).config;
       const store = new SessionStore();
 
+      // Side question (Issue #200): ask a bounded, read-only question against a
+      // session's context without disturbing the main task. The provider call
+      // carries no tool schemas, no workspace/session/goal handle is passed, and
+      // the source session is only read — so nothing is mutated and nothing is
+      // persisted. Answers stream to stdout; the boundary summary goes to stderr.
+      if (opts.sideQuestion !== undefined) {
+        const question = String(opts.sideQuestion);
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(1);
+        }
+        let contextMessages: SessionMessage[] = [];
+        if (opts.session !== undefined) {
+          const sourceId = String(opts.session);
+          if (store.integrity(sourceId).status === "missing") {
+            process.stderr.write(`Error: session "${sourceId}" not found\n`);
+            process.exit(2);
+          }
+          contextMessages = loadSessionMessages(store, sourceId);
+        }
+        const context = buildSideContext(contextMessages);
+        process.stderr.write(`${formatSideContextSummary(context)}\n`);
+        const result = await runSideQuestion({
+          config,
+          context,
+          question,
+          onDelta: (delta) => {
+            if (format === "text") process.stdout.write(delta);
+          },
+        });
+        if (format === "json") {
+          process.stdout.write(
+            JSON.stringify({
+              schema: SIDE_QUESTION_SCHEMA,
+              v: SIDE_QUESTION_VERSION,
+              ok: result.ok,
+              reason: result.reason,
+              answer: result.text,
+              context: {
+                sourceMessageCount: context.sourceMessageCount,
+                included: context.included,
+                truncated: context.truncated,
+              },
+            }) + "\n",
+          );
+        } else {
+          process.stdout.write("\n");
+        }
+        process.exit(result.ok ? 0 : 1);
+      }
+
       // Interactive session browser (Issue #197): pick an exact session to
       // resume before the conversation starts. Runs only with a terminal; a
       // cancel exits cleanly. The chosen session's declared workspace is
@@ -1673,6 +1734,31 @@ program
             name: "/goal",
             description: "Set, inspect, pause, resume, or clear the session goal",
             action: (args = "") => runGoalCommand(store, sessionId, args),
+          },
+          {
+            // Side question (Issue #200) for the plain readline REPL. The
+            // full-screen shell opens a dedicated overlay for typed `/ask`; this
+            // action covers the non-full-screen fallback and a palette selection.
+            // It reads the session's context only — no tools, no mutation, and
+            // nothing appended to the transcript, goal, or workflow.
+            name: "/ask",
+            description: "Ask a side question without disturbing the main task",
+            action: async (args = "") => {
+              const question = args.trim();
+              if (!question) {
+                return "usage: /ask <question> — ask a side question without disturbing the main task";
+              }
+              const context = buildSideContext(loadSessionMessages(store, sessionId));
+              process.stderr.write(`${formatSideContextSummary(context)}\n`);
+              const result = await runSideQuestion({
+                config,
+                context,
+                question,
+                onDelta: (delta) => process.stderr.write(delta),
+              });
+              process.stderr.write("\n");
+              return result.ok ? undefined : `side question failed: ${result.reason}`;
+            },
           },
         ];
 

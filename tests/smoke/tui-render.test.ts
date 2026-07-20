@@ -10,6 +10,7 @@ import type {
   ShellState,
   TranscriptEntry,
   ReferencePreviewState,
+  SideQuestionState,
 } from "../../src/tui-shell.js";
 
 // Renders the full-screen shell at the three target terminal dimensions and a
@@ -279,5 +280,108 @@ describe("smoke: workspace reference picker renders coherently (Issue #196)", ()
     expect(flat).not.toMatch(/\x1b\[/);
     expect(screen.lines.join("\n")).toContain("src/tui-shell.ts");
     publish(`reference picker ${rows}x${cols} (NO_COLOR)`, screen.lines);
+  });
+});
+
+// The side-question overlay (Issue #200, criterion 6): the E2E harness captures
+// these renders inside a real tmux pane, publishing readable terminal evidence
+// for opening, streaming, cancellation, dismissal, and main-task continuity —
+// all from composeScreen, the exact pure path the live driver paints.
+describe("smoke: side-question overlay renders coherently (Issue #200)", () => {
+  const SUMMARY =
+    "Context (read-only): last 4 of 12 messages. Tools and workspace changes are disabled; the main task is unaffected.";
+
+  function sideState(
+    rows: number,
+    cols: number,
+    sq: SideQuestionState,
+    opts: { color: boolean; colorDepth?: "none" | "basic" | "256" } = {
+      color: true,
+      colorDepth: "256",
+    },
+  ): ShellState {
+    return { ...stateFor(rows, cols, opts), sideQuestion: sq };
+  }
+
+  function assertSideCoherent(
+    screen: { lines: string[] },
+    rows: number,
+    cols: number,
+  ): void {
+    expect(screen.lines).toHaveLength(rows);
+    for (const line of screen.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(cols);
+    const joined = screen.lines.join("\n");
+    // The overlay states the boundary and that the main task is unaffected.
+    expect(joined).toContain("Side question");
+    expect(joined).toContain("read-only");
+    expect(joined).toContain("main task unaffected");
+    // The main transcript is not rendered while the overlay is open.
+    expect(joined).not.toContain("src/layout.ts");
+    // The status footer stays anchored below the overlay.
+    expect(joined).toContain("approval default");
+  }
+
+  const answered: SideQuestionState = {
+    question: "Which test runner does this project use?",
+    phase: "answered",
+    contextSummary: SUMMARY,
+    providerActive: false,
+    answer: "This project uses vitest for unit and integration tests, run via npm test.",
+  };
+
+  for (const { rows, cols } of SIZES) {
+    it(`renders an answered side question unclipped at ${rows}x${cols}`, () => {
+      const screen = composeScreen(sideState(rows, cols, answered));
+      assertSideCoherent(screen, rows, cols);
+      const joined = screen.lines.join("\n");
+      expect(joined).toContain("Which test runner does this project use?");
+      expect(joined).toContain("vitest");
+      expect(joined).toContain("Provider request: none · answered");
+      expect(joined).toContain("Enter promote to composer");
+      publish(`side question ${rows}x${cols}`, screen.lines);
+    });
+  }
+
+  it("renders a streaming side question with an active provider request", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const streaming: SideQuestionState = {
+      question: "why is the build failing?",
+      phase: "streaming",
+      contextSummary: SUMMARY,
+      providerActive: true,
+      answer: "The build is failing because",
+    };
+    const screen = composeScreen(sideState(rows, cols, streaming));
+    assertSideCoherent(screen, rows, cols);
+    const joined = screen.lines.join("\n");
+    expect(joined).toContain("Provider request: active · streaming");
+    expect(joined).toContain("Esc cancel");
+    publish(`side question streaming ${rows}x${cols}`, screen.lines);
+  });
+
+  it("renders a cancelled side question recoverably", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const cancelled: SideQuestionState = {
+      question: "long-running clarification?",
+      phase: "cancelled",
+      contextSummary: SUMMARY,
+      providerActive: false,
+      answer: "partial ans",
+    };
+    const screen = composeScreen(sideState(rows, cols, cancelled));
+    assertSideCoherent(screen, rows, cols);
+    expect(screen.lines.join("\n")).toContain("cancelled");
+    expect(screen.lines.join("\n")).toContain("Esc dismiss");
+    publish(`side question cancelled ${rows}x${cols}`, screen.lines);
+  });
+
+  it("renders the side question with no color (text + structure only)", () => {
+    const { rows, cols } = { rows: 36, cols: 120 };
+    const screen = composeScreen(
+      sideState(rows, cols, answered, { color: false, colorDepth: "none" }),
+    );
+    assertSideCoherent(screen, rows, cols);
+    expect(screen.lines.join("")).not.toMatch(/\x1b\[/);
+    publish(`side question ${rows}x${cols} (NO_COLOR)`, screen.lines);
   });
 });

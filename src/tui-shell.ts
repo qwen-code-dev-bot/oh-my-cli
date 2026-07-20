@@ -29,6 +29,11 @@ import {
   resolveSlashCommand,
 } from "./slash-command.js";
 import {
+  buildSideContext,
+  formatSideContextSummary,
+  runSideQuestion,
+} from "./side-question.js";
+import {
   collectWorkspaceReferences,
   filterReferences,
   referenceQuery,
@@ -296,6 +301,28 @@ export type TurnEvent =
   | { type: "settle" }
   | { type: "engage" };
 
+// Lifecycle of a side question (Issue #200). A side question runs against a
+// bounded, read-only snapshot of the active session with tools and workspace
+// mutation disabled, and its answer never appends to the main transcript, goal,
+// or workflow. The pane is a distinct overlay so the main task stays untouched.
+export type SideQuestionPhase = "streaming" | "answered" | "cancelled" | "error";
+
+export interface SideQuestionState {
+  // The user's side question, shown verbatim at the top of the pane.
+  question: string;
+  phase: SideQuestionPhase;
+  // The context-boundary summary (read-only scope, tools disabled, main task
+  // unaffected) so the UI states exactly what the side turn can touch.
+  contextSummary: string;
+  // Whether a provider request is currently active, so the UI states whether a
+  // request is in flight (Issue #200, criterion 2).
+  providerActive: boolean;
+  // The answer streamed in so far.
+  answer: string;
+  // Provider error detail (phase === "error").
+  error?: string;
+}
+
 export interface ShellState {
   viewport: Viewport;
   version: string;
@@ -335,6 +362,10 @@ export interface ShellState {
   // so pure render callers and tests can omit it (treated as closed).
   referencePreview?: ReferencePreviewState;
   goal?: GoalRailState;
+  // An in-flight or settled side question (Issue #200). When present it renders
+  // as a distinct overlay over the main area; the composer and status stay
+  // anchored. Optional so pure render callers and tests can omit it.
+  sideQuestion?: SideQuestionState;
   now?: number;
   reducedMotion?: boolean;
 }
@@ -374,6 +405,43 @@ export function goalVisualState(
   if (turn.phase === "failed" || turn.phase === "cancelled") return "failed";
   if (turn.phase === "completed") return "completed";
   return "running";
+}
+
+// Pure side-question transitions (Issue #200). Kept free of any session, goal,
+// or workspace handle so the pane's lifecycle is unit-testable and the isolation
+// guarantee is structural: nothing here can mutate the main task.
+export function openSideQuestion(question: string, contextSummary: string): SideQuestionState {
+  return { question, phase: "streaming", contextSummary, providerActive: true, answer: "" };
+}
+
+// Append a streamed delta. A no-op once the turn has settled (e.g. a late delta
+// arriving after a cancel) so a cancelled/error pane never keeps growing.
+export function appendSideAnswer(sq: SideQuestionState, delta: string): SideQuestionState {
+  if (sq.phase !== "streaming") return sq;
+  return { ...sq, answer: sq.answer + delta };
+}
+
+export function finishSideQuestion(
+  sq: SideQuestionState,
+  outcome: { phase: Exclude<SideQuestionPhase, "streaming">; error?: string },
+): SideQuestionState {
+  return { ...sq, phase: outcome.phase, providerActive: false, error: outcome.error };
+}
+
+// The text to seed into the composer when the user promotes a side answer into
+// the main task (Issue #200, criterion 4). Returns null when there is nothing
+// worth promoting (an empty/whitespace answer).
+export function promoteSideAnswer(sq: SideQuestionState): string | null {
+  const text = sq.answer.trim();
+  return text.length > 0 ? text : null;
+}
+
+// OSC 52 clipboard write so a side answer can be copied without leaving the
+// terminal (Issue #200, criterion 4). Best-effort: terminals without clipboard
+// support ignore it. The text is base64-encoded per the escape's contract.
+export function sideAnswerClipboardEscape(text: string): string {
+  const b64 = Buffer.from(text, "utf8").toString("base64");
+  return `\x1b]52;c;${b64}\x07`;
 }
 
 // Options controlling how transcript blocks are flattened/rendered.
@@ -1387,6 +1455,76 @@ function renderShortcutHelpPanel(height: number, cols: number, style: ShellStyle
   return out;
 }
 
+// Render the side-question overlay (Issue #200) into the main area above the
+// composer, mirroring the help panel's fill pattern. It is visually distinct
+// (its own title, boundary summary, and provider-status line) and states the
+// context boundary plus whether a provider request is active (criterion 2). The
+// header and the action footer are kept visible when the region is short; the
+// answer body fills the space between.
+export function renderSideQuestionPanel(
+  height: number,
+  cols: number,
+  style: ShellStyle,
+  sq: SideQuestionState,
+): string[] {
+  const h = Math.max(0, Math.floor(height));
+  if (h === 0) return [];
+  const w = Math.max(0, Math.floor(cols));
+
+  const statusLabel =
+    sq.phase === "streaming"
+      ? "streaming…"
+      : sq.phase === "answered"
+        ? "answered"
+        : sq.phase === "cancelled"
+          ? "cancelled"
+          : "provider error";
+  const providerLine = `Provider request: ${sq.providerActive ? "active" : "none"} · ${statusLabel}`;
+
+  const head: string[] = [
+    clipVisible(
+      `${style.bold}${style.accent}◐ Side question${style.reset}  ${style.dim}(read-only · main task unaffected)${style.reset}`,
+      w,
+    ),
+    clipVisible(`${style.dim}${sq.contextSummary}${style.reset}`, w),
+    clipVisible(`${style.dim}${providerLine}${style.reset}`, w),
+    "",
+    clipVisible(`${style.accent}? ${sq.question}${style.reset}`, w),
+    renderRule("answer", w, style),
+  ];
+
+  const answerText =
+    sq.phase === "error" ? sq.error ?? "The side question could not be answered." : sq.answer;
+  const bodyLines =
+    answerText.trim() === ""
+      ? [
+          clipVisible(
+            `${style.dim}${sq.phase === "streaming" ? "waiting for the answer…" : "(no content)"}${style.reset}`,
+            w,
+          ),
+        ]
+      : wrapText(answerText, Math.max(1, w)).map((line) => clipVisible(line, w));
+
+  const hints =
+    sq.phase === "streaming"
+      ? "Esc cancel"
+      : sq.phase === "answered"
+        ? "Enter promote to composer · c copy · Esc dismiss"
+        : "Esc dismiss";
+  const foot: string[] = ["", clipVisible(`${style.dim}${hints}${style.reset}`, w)];
+
+  const out: string[] = [];
+  const bodyBudget = h - head.length - foot.length;
+  if (bodyBudget <= 0) {
+    out.push(...head.slice(0, h));
+  } else {
+    out.push(...head, ...bodyLines.slice(0, bodyBudget), ...foot);
+  }
+  const clipped = out.slice(0, h);
+  while (clipped.length < h) clipped.push("");
+  return clipped;
+}
+
 function renderEmptyTranscript(region: Region, _cols: number, _style: ShellStyle): string[] {
   const height = Math.max(0, region.end - region.start);
   if (height === 0) return [];
@@ -1877,7 +2015,15 @@ export function composeScreen(state: ShellState): ComposedScreen {
   });
 
   const lines: string[] = [];
-  if (state.helpOpen) {
+  if (state.sideQuestion) {
+    // The side-question overlay takes over the main area above the composer,
+    // exactly like the help panel, so the main transcript stays untouched
+    // underneath and dismissing the pane returns to the same conversation
+    // (Issue #200). The composer and status stay anchored.
+    lines.push(
+      ...renderSideQuestionPanel(layout.composer.start, layout.viewport.cols, style, state.sideQuestion),
+    );
+  } else if (state.helpOpen) {
     // The help panel takes over the main area above the composer (identity +
     // transcript) so the full shortcut list is visible in place; the composer
     // and status stay anchored, so dismissing it returns to the same
@@ -2063,6 +2209,10 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   // Generation guard: a cancelled run stops contributing to the UI even though
   // the underlying provider call cannot be aborted (no new provider capability).
   let runGeneration = 0;
+  // The active side question's cancellation handle (Issue #200). A new side
+  // question or a dismiss supersedes the prior one so a stale stream cannot
+  // resurface a dismissed pane.
+  let sideAbort: AbortController | null = null;
   let slashPreviewDismissedFor: string | null = null;
   // The `@` reference picker (Issue #196): the text for which an open picker was
   // dismissed (so it does not immediately reopen), and the cached candidate
@@ -2305,6 +2455,121 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   function toggleHelp(): void {
     state.helpOpen = !state.helpOpen;
     scheduleRender();
+  }
+
+  // Side question (Issue #200): open a distinct overlay, stream the answer with
+  // tools and workspace mutation disabled, and never append to the main
+  // transcript, goal, or workflow. Isolation is structural — this path touches
+  // only the provider config and a read-only snapshot of the conversation.
+  async function startSideQuestion(question: string): Promise<void> {
+    let context;
+    try {
+      context = buildSideContext(opts.loadHistory());
+    } catch {
+      context = buildSideContext([]);
+    }
+    const controller = new AbortController();
+    // Supersede any prior side question so a stale stream cannot resurface.
+    if (sideAbort) sideAbort.abort();
+    sideAbort = controller;
+    state.sideQuestion = openSideQuestion(question, formatSideContextSummary(context));
+    state.scroll = 0;
+    scheduleRender();
+    const result = await runSideQuestion({
+      config: opts.config,
+      context,
+      question,
+      signal: controller.signal,
+      onDelta: (delta) => {
+        if (sideAbort !== controller || !state.sideQuestion) return;
+        state.sideQuestion = appendSideAnswer(state.sideQuestion, delta);
+        scheduleRender();
+      },
+    });
+    // A newer side question or a dismiss superseded this one: drop its result.
+    if (sideAbort !== controller || !state.sideQuestion) return;
+    sideAbort = null;
+    const phase =
+      result.reason === "completed"
+        ? "answered"
+        : result.reason === "cancelled"
+          ? "cancelled"
+          : "error";
+    state.sideQuestion = finishSideQuestion(state.sideQuestion, {
+      phase,
+      error:
+        phase === "error"
+          ? "The side question could not be answered (provider error)."
+          : undefined,
+    });
+    scheduleRender();
+  }
+
+  // Cancel a streaming side question. The provider call cannot be aborted
+  // directly (no new provider capability), so cancellation stops its UI
+  // contribution and settles the pane to "cancelled" in place.
+  function cancelSideQuestion(): void {
+    if (!state.sideQuestion) return;
+    if (sideAbort) sideAbort.abort();
+    state.sideQuestion = finishSideQuestion(state.sideQuestion, { phase: "cancelled" });
+    scheduleRender();
+  }
+
+  // Dismiss the pane and return to the main transcript, unchanged.
+  function dismissSideQuestion(): void {
+    if (sideAbort) {
+      sideAbort.abort();
+      sideAbort = null;
+    }
+    state.sideQuestion = undefined;
+    scheduleRender();
+  }
+
+  // Promote the side answer into the composer so the user can edit or send it as
+  // a deliberate main-task prompt (criterion 4). Closing the pane first keeps
+  // the promoted text in the normal composer flow.
+  function promoteSideToComposer(): void {
+    const sq = state.sideQuestion;
+    if (!sq) return;
+    const text = promoteSideAnswer(sq);
+    if (sideAbort) {
+      sideAbort.abort();
+      sideAbort = null;
+    }
+    state.sideQuestion = undefined;
+    if (text === null) {
+      scheduleRender();
+      return;
+    }
+    state.composer.text = text;
+    state.turn = advanceTurn(state.turn, { type: "engage" });
+    refreshMode();
+    refreshSlashPreview(true);
+    scheduleRender();
+  }
+
+  // Copy the side answer to the terminal clipboard via OSC 52 (criterion 4).
+  function copySideAnswer(): void {
+    const sq = state.sideQuestion;
+    if (!sq || sq.answer.trim() === "") return;
+    write(sideAnswerClipboardEscape(sq.answer));
+  }
+
+  // Route a key while the side-question overlay is open. The overlay is modal
+  // (like the help panel): while streaming only cancellation acts; once settled
+  // the answer can be promoted, copied, or dismissed.
+  function handleSideQuestionKey(buf: Buffer): void {
+    const sq = state.sideQuestion;
+    if (!sq) return;
+    if (buf.length !== 1) return;
+    const b = buf[0];
+    if (sq.phase === "streaming") {
+      if (b === 0x1b || b === 0x03) cancelSideQuestion(); // Esc or Ctrl+C
+      return;
+    }
+    if (b === 0x1b || b === 0x03 || b === 0x64) return dismissSideQuestion(); // Esc, Ctrl+C, d
+    if (b === 0x0d || b === 0x0a || b === 0x70) return promoteSideToComposer(); // Enter, p
+    if (b === 0x63 || b === 0x79) return copySideAnswer(); // c, y
   }
 
   // Prompt-history recall (criterion 2). This slice keeps the caret at
@@ -2629,12 +2894,13 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     referenceUniverse = null;
     referencePreviewDismissedFor = null;
     const text = state.composer.text.trim();
-    const slash = text.startsWith("/attach")
-      ? { kind: "prompt" as const }
-      : resolveSlashCommand(
-          text,
-          opts.paletteCommands.map((command) => command.name),
-        );
+    const slash =
+      text.startsWith("/attach") || text.startsWith("/ask")
+        ? { kind: "prompt" as const }
+        : resolveSlashCommand(
+            text,
+            opts.paletteCommands.map((command) => command.name),
+          );
     if (slash.kind === "unknown") {
       state.composer.text = "";
       state.slashPreview = undefined;
@@ -2685,6 +2951,26 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         }
       }
       scheduleRender();
+      return;
+    }
+    if (text.startsWith("/ask")) {
+      // A side question (Issue #200): clear the composer and open the overlay.
+      // It never enters the main transcript, goal, or workflow.
+      state.composer.text = "";
+      state.slashPreview = undefined;
+      slashPreviewDismissedFor = null;
+      history = commitDraft(history, "");
+      refreshMode();
+      const question = text.slice("/ask".length).trim();
+      if (question.length === 0) {
+        state.transcript.push({
+          kind: "notice",
+          text: "usage: /ask <question> — ask a side question without disturbing the main task",
+        });
+        scheduleRender();
+      } else {
+        void startSideQuestion(question);
+      }
       return;
     }
     state.composer.text = "";
@@ -2904,6 +3190,13 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   function handleData(buf: Buffer): void {
     if (paletteOpen) return;
     const s = buf.toString("utf-8");
+
+    // While the side-question overlay is open it is modal (Issue #200): keys
+    // route to cancel/promote/copy/dismiss and nothing is typed behind it.
+    if (state.sideQuestion) {
+      handleSideQuestionKey(buf);
+      return;
+    }
 
     // While the help panel is open it is modal: only the dismiss gestures act
     // (`?` again, Esc, or Ctrl+C); every other key is ignored so nothing is
