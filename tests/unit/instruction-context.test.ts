@@ -272,4 +272,19 @@ describe("buildEffectiveSystemPrompt", () => {
     expect(a.text).toBe(b.text);
     expect(a.fingerprint).toBe(collectInstructionContext({ workspace: dir }).fingerprint);
   });
+
+  it("injects the bounded repository map when symbol-bearing files exist", () => {
+    const dir = tmp();
+    write(dir, "src/index.ts", "export function main() {\nexport class App {\n");
+    const { text } = buildEffectiveSystemPrompt({ workspace: dir });
+    expect(text).toContain("<repository-map>");
+    expect(text).toContain("src/index.ts");
+    expect(text).toContain("export function main()");
+  });
+
+  it("omits the repository map when there are no symbol-bearing files", () => {
+    const dir = tmp();
+    write(dir, "README.md", "# just docs, no code symbols\n");
+    expect(buildEffectiveSystemPrompt({ workspace: dir }).text).not.toContain("<repository-map>");
+  });
 });
