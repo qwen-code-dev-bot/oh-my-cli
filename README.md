@@ -80,6 +80,51 @@ variable through `apiKeyEnv` instead. `oh-my-cli --preflight` prints a redacted
 summary of the resolved model, endpoint host, settings source, and credential
 variable name (never the credential value).
 
+### Model profiles
+
+To keep several named configurations (for example a hosted Qwen endpoint and a
+local model) and switch between them, declare a `profiles` map in the same
+user-owned settings file. Each profile has the same shape as the `model` section
+(plus an optional `description` and a `disabled` flag); no raw credential is ever
+stored — only the environment-variable name that holds it:
+
+```json
+{
+  "defaultProfile": "qwen",
+  "profiles": {
+    "qwen": {
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "name": "qwen-latest-series-invite-beta-v77",
+      "apiKeyEnv": "DASHSCOPE_API_KEY",
+      "description": "Hosted Qwen"
+    },
+    "local": { "name": "llama3", "baseUrl": "http://127.0.0.1:11434/v1" }
+  }
+}
+```
+
+Selection precedence (highest first): an explicit `--profile <name>`, then
+`settings.defaultProfile`, then the legacy single `model` section. The chosen
+profile reuses the exact resolution above, so `OPENAI_*` still override it and
+the same credential rules apply.
+
+```bash
+oh-my-cli --list-profiles                       # inventory (read-only, redacted)
+oh-my-cli --list-profiles --output json          # machine-readable
+oh-my-cli --profile qwen -p "Summarize README"   # select a profile for this run
+oh-my-cli --preflight --profile local           # verify a profile's endpoint/credential
+```
+
+Profiles are read only from the user-owned scope: a project-local settings file
+can never set `profiles` or `defaultProfile`, so an untrusted repository cannot
+silently replace your selected endpoint or credential. Unknown profile names,
+disabled profiles, and missing credentials all fail before any request, and the
+errors (like the listing) are redacted.
+
+The selected profile is recorded in the session's metadata, so resuming a session
+under a different profile (or model) prints a redacted warning that explains the
+change while the conversation, tool, and approval history are preserved.
+
 ## Usage
 
 ### Non-interactive
@@ -400,6 +445,8 @@ focused tests and the end-to-end receipt.
 | `--no-probe` | Skip the bounded lifecycle probe for `--mcp-contract` / `--tool-contract` / `--discover-extensions` / `--trust-posture` and report the declared state |
 | `--list-workflows` | List the reusable workflows declared in user settings (read-only, redacted) and exit |
 | `--run-workflow <name>` | Run a named workflow from user settings non-interactively (sequential headless steps; a failing step halts) and exit |
+| `--list-profiles` | List the named model profiles declared in user settings (read-only, redacted) and exit |
+| `--profile <name>` | Select a named model profile from user settings (overrides `settings.defaultProfile`) |
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
@@ -1934,6 +1981,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/extension-compat.ts` — read-only compatibility view publishing the supported provider, tool, MCP, and workflow contract-version matrix (from the `SUPPORTED_*_CONTRACT_VERSIONS` constants) and a proactive, redacted per-surface verdict (compatible/incompatible/absent) for the user settings file, without re-validating, probing, or executing any extension (`--extension-compat`)
 - `src/workflow-contract.ts` — versioned, redacted workflow contract: declare reusable named workflows (ordered steps) in user settings, negotiate the contract version, select one by name, and list them (`--list-workflows`)
 - `src/workflow-runner.ts` — run a named workflow non-interactively, each step a bounded prompt through the headless `-p` path in its own process; steps run in declared order, a failing step halts the run, and output is redacted in human and machine modes (`--run-workflow`)
+- `src/model-profiles.ts` — named model profiles in user settings: declare, list, validate, select, and disable profiles that reuse the `model` section's shape (endpoint, model name, credential env-var name), selected via `--profile` or `settings.defaultProfile` and resolved through the same secure, redacted path as the `model` section (`--list-profiles`)
 - `src/trust-posture.ts` — read-only posture view composing folder trust, sandbox isolation, approval mode, and extension readiness into one redacted audit of what a run will be allowed to do, without core changes (`--trust-posture`)
 - `src/worktree-lease.ts` — collision-safe leased git worktrees per mutating agent (`--create-worktree`/`--clean-worktree`)
 - `src/index.ts` — CLI entry point (commander)

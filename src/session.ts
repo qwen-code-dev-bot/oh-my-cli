@@ -22,10 +22,14 @@ export interface SessionMessage {
 
 // Lightweight provenance recorded as the first line of a session so a lister
 // can show which model and repository a session belongs to without replaying
-// it. It is not a conversation message and is never fed to the model.
+// it. It is not a conversation message and is never fed to the model. The
+// optional `profile` records the named model profile (settings.profiles key) the
+// session was created under, so a resumed run can detect and explain a profile or
+// model change. Like `model`, it is a non-secret identifier, never a credential.
 export interface SessionMeta {
   meta: true;
   model?: string;
+  profile?: string;
   workspace?: string;
   createdAt: number;
 }

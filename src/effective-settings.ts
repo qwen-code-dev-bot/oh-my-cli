@@ -36,6 +36,8 @@ export const REGISTERED_SETTINGS_KEYS: readonly string[] = [
   "schema",
   "version",
   "model",
+  "profiles",
+  "defaultProfile",
   "providers",
   "mcp",
   "mcpServers",
@@ -53,9 +55,11 @@ const REGISTERED = new Set(REGISTERED_SETTINGS_KEYS);
 // Top-level sections that must be JSON objects when present. Deep validation of
 // the contract-backed sections (providers/mcp/tools/...) is deferred to their
 // owning contract parser; `model` is validated strictly here because it carries
-// the credential-bearing endpoint.
+// the credential-bearing endpoint, and `profiles` deep validation is deferred to
+// model-profiles.ts. (`defaultProfile` is a string, not an object.)
 const OBJECT_SECTIONS = new Set([
   "model",
+  "profiles",
   "providers",
   "mcp",
   "mcpServers",
@@ -68,8 +72,11 @@ const OBJECT_SECTIONS = new Set([
   "diagnostics",
 ]);
 
-// Security-policy sections a trusted project scope may never set at all.
-const PROTECTED_PROJECT_SECTIONS = new Set(["sandbox", "approval"]);
+// Security-policy and credential-bearing sections a trusted project scope may
+// never set at all. sandbox/approval are security policy; profiles/defaultProfile
+// select the model endpoint and credential source, so a repository can never
+// silently replace the selected endpoint or credential (only the user scope may).
+const PROTECTED_PROJECT_SECTIONS = new Set(["sandbox", "approval", "profiles", "defaultProfile"]);
 
 // Fields within a section a trusted project scope may never set. The model
 // endpoint and the credential-source variable name are credential-bearing, so a
@@ -177,6 +184,13 @@ export function loadSettingsScope(settingsPath: string): SettingsScope {
     throw new Error("Settings error: settings.probeTimeoutMs must be a number");
   }
 
+  if (
+    "defaultProfile" in root &&
+    (typeof root.defaultProfile !== "string" || (root.defaultProfile as string).trim() === "")
+  ) {
+    throw new Error("Settings error: settings.defaultProfile must be a non-empty string");
+  }
+
   if ("model" in root) {
     const model = root.model as Record<string, unknown>;
     for (const forbidden of FORBIDDEN_MODEL_KEYS) {
@@ -204,13 +218,15 @@ export function defaultProjectSettingsPath(workspacePath: string): string {
 
 // Throw a redacted error if a trusted project scope contains any field the
 // project may never set. Fail closed: presence is rejected outright, so a
-// repository cannot smuggle a credential endpoint or weaken sandbox/approval.
+// repository cannot smuggle a credential endpoint, replace the selected profile,
+// or weaken sandbox/approval.
 function assertProjectScopeAllowed(project: SettingsScope): void {
   for (const section of PROTECTED_PROJECT_SECTIONS) {
     if (section in project.data) {
       throw new Error(
         `Settings error: trusted project settings may not set "${section}" ` +
-          "(sandbox and approval policy are user-controlled, not project-controlled)",
+          "(security policy and the model endpoint / profile selection are user-controlled, " +
+          "not project-controlled)",
       );
     }
   }
