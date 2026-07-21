@@ -311,26 +311,20 @@ export interface WorkflowListReport {
 }
 
 // Read the user settings file, negotiate the workflow contract, and build the
-// redacted list report. Throws a redacted error when no `workflows` section
-// exists or the contract is invalid.
+// redacted list report. Unlike resolution, listing never throws when no
+// `workflows` section exists — it reports an empty inventory — but a
+// present-but-malformed section still fails closed, mirroring collectProfileList.
 export function collectWorkflowList(opts: { settingsPath?: string } = {}): WorkflowListReport {
   const settingsPath = resolveSettingsPath(opts.settingsPath);
   const { found, section } = readWorkflowsSection(settingsPath);
-  if (section === undefined) {
-    throw new Error(
-      found
-        ? "Workflow error: settings file has no settings.workflows section"
-        : `Workflow error: settings file not found at ${redactHomePath(settingsPath)}`,
-    );
-  }
-  const contract = parseWorkflowContract(section);
-  const workflows: WorkflowListEntry[] = contract.definitions
+  const contract = section === undefined ? undefined : parseWorkflowContract(section);
+  const workflows: WorkflowListEntry[] = (contract?.definitions ?? [])
     .map((d) => ({ name: d.name, description: d.description, steps: d.steps.length }))
     .sort((a, b) => a.name.localeCompare(b.name));
   return {
     schema: WORKFLOW_CONTRACT_SCHEMA,
     version: WORKFLOW_CONTRACT_VERSION,
-    contractVersion: contract.contractVersion,
+    contractVersion: contract?.contractVersion ?? WORKFLOW_CONTRACT_VERSION,
     workflows,
     settings: found
       ? redactHomePath(settingsPath)

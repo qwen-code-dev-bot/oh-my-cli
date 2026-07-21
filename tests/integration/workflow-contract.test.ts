@@ -99,11 +99,12 @@ describe("Integration: workflow contract", () => {
     expect(r.stdout).toContain("2 steps");
   });
 
-  it("exits 2 when the user settings have no workflows section", async () => {
+  it("reports an empty inventory and exits 0 when the user settings have no workflows section", async () => {
     const home = homeWith({ model: { name: "m", apiKeyEnv: "K" } });
-    const r = await runCli(["--list-workflows"], { ...cleanEnv, HOME: home });
-    expect(r.code).toBe(2);
-    expect(r.stderr).toContain("no settings.workflows section");
+    const r = await runCli(["--list-workflows", "--output", "json"], { ...cleanEnv, HOME: home });
+    expect(r.code).toBe(0);
+    const report = JSON.parse(r.stdout);
+    expect(report.workflows).toEqual([]);
   });
 
   it("exits 2 (fail closed) on an unsupported contract version", async () => {
@@ -146,8 +147,11 @@ describe("Integration: workflow contract", () => {
       ...cleanEnv,
       HOME: home,
     });
-    expect(r.code).toBe(2);
-    expect(r.stderr).toContain("no settings.workflows section");
+    // The user scope has no workflows, so the inventory is empty (exit 0); the
+    // project-scope workflow must never leak into the user-scope listing.
+    expect(r.code).toBe(0);
+    const report = JSON.parse(r.stdout);
+    expect(report.workflows).toEqual([]);
     expect(r.stdout + r.stderr).not.toContain("evil");
   });
 

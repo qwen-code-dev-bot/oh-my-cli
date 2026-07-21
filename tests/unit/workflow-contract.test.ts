@@ -203,17 +203,24 @@ describe("collectWorkflowList: real settings file", () => {
     expect(report.workflows[1].steps).toBe(2);
   });
 
-  it("throws when the settings file has no workflows section", () => {
+  it("reports an empty inventory (no throw) when no workflows section exists", () => {
     const settings = writeSettings({ model: { name: "m", apiKeyEnv: "K" } });
-    expect(() => collectWorkflowList({ settingsPath: settings })).toThrow(
-      /no settings.workflows section/,
-    );
+    const report = collectWorkflowList({ settingsPath: settings });
+    expect(report.workflows).toEqual([]);
+    expect(report.contractVersion).toBe(WORKFLOW_CONTRACT_VERSION);
+    expect(formatWorkflowList(report)).toContain("Workflows: (none)");
   });
 
-  it("throws when the settings file is missing", () => {
-    expect(() => collectWorkflowList({ settingsPath: missingPath() })).toThrow(
-      /settings file not found/,
-    );
+  it("reports an empty inventory (no throw) when the settings file is missing", () => {
+    const report = collectWorkflowList({ settingsPath: missingPath() });
+    expect(report.workflows).toEqual([]);
+    expect(report.contractVersion).toBe(WORKFLOW_CONTRACT_VERSION);
+    expect(report.settings).toContain("(not found)");
+  });
+
+  it("still fails closed on a present-but-malformed workflows section", () => {
+    const settings = writeSettings({ workflows: { contractVersion: 99, definitions: {} } });
+    expect(() => collectWorkflowList({ settingsPath: settings })).toThrow(/not supported/);
   });
 });
 
