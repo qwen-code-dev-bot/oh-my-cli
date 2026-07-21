@@ -84,6 +84,10 @@ export interface ResolvedConfig {
   modelSource: "env" | "settings";
   credentialVariable: string;
   credentialFromSettings: boolean;
+  // The named model profile that produced this configuration, when one was
+  // selected (via --profile or settings.defaultProfile). Absent for the legacy
+  // single `model` section. Never carries a credential value.
+  profile?: string;
 }
 
 interface ModelSection {
@@ -147,18 +151,26 @@ function readModelSection(settingsPath: string): ModelSection {
   return { found: true, model: result.data };
 }
 
-// Resolve the validated model configuration from the user settings file layered
-// under environment variables. Precedence, highest first:
-//   baseUrl:    OPENAI_BASE_URL > settings.model.baseUrl > built-in default
-//   model name: OPENAI_MODEL    > settings.model.name    > (required)
-//   credential: OPENAI_API_KEY  > env[settings.model.apiKeyEnv] > (required)
-// Every failure raises a redacted error before any network request.
-export function resolveModelConfig(
-  opts: { settingsPath?: string; env?: Record<string, string | undefined> } = {},
+// Resolve a validated model configuration from a settings-provided model section
+// (or a selected model profile, which has the same shape) layered under
+// environment variables. Precedence, highest first:
+//   baseUrl:    OPENAI_BASE_URL > model.baseUrl > built-in default
+//   model name: OPENAI_MODEL    > model.name    > (required)
+//   credential: OPENAI_API_KEY  > env[model.apiKeyEnv] > (required)
+// Every failure raises a redacted error before any network request. `model` may
+// be undefined (no settings model section): resolution then falls back to the
+// environment and built-in defaults. `profile`, when given, is recorded as
+// non-secret provenance so headless runs can report the selected profile.
+export function resolveModelFromSettings(
+  model: ModelSettings | undefined,
+  opts: {
+    env: Record<string, string | undefined>;
+    settingsPath: string;
+    settingsFound: boolean;
+    profile?: string;
+  },
 ): ResolvedConfig {
-  const env = opts.env ?? process.env;
-  const settingsPath = resolveSettingsPath(opts.settingsPath);
-  const { found, model } = readModelSection(settingsPath);
+  const env = opts.env;
 
   let baseUrl: string;
   let baseUrlSource: ConfigSource;
@@ -220,13 +232,27 @@ export function resolveModelConfig(
 
   return {
     config: { apiKey, baseUrl, model: modelName },
-    settingsPath,
-    settingsFound: found,
+    settingsPath: opts.settingsPath,
+    settingsFound: opts.settingsFound,
     baseUrlSource,
     modelSource,
     credentialVariable,
     credentialFromSettings,
+    ...(opts.profile ? { profile: opts.profile } : {}),
   };
+}
+
+// Resolve the validated model configuration from the user settings file layered
+// under environment variables (see resolveModelFromSettings for precedence).
+// This is the legacy single-`model`-section path; model-profiles.ts layers named
+// profile selection on top of the same resolver.
+export function resolveModelConfig(
+  opts: { settingsPath?: string; env?: Record<string, string | undefined> } = {},
+): ResolvedConfig {
+  const env = opts.env ?? process.env;
+  const settingsPath = resolveSettingsPath(opts.settingsPath);
+  const { found, model } = readModelSection(settingsPath);
+  return resolveModelFromSettings(model, { env, settingsPath, settingsFound: found });
 }
 
 function isValidUrl(u: string): boolean {
@@ -246,10 +272,15 @@ export function describeResolvedConfig(resolved: ResolvedConfig): string {
   const settings = resolved.settingsFound
     ? redactHomePath(resolved.settingsPath)
     : `${redactHomePath(resolved.settingsPath)} (not found)`;
-  return [
+  const lines = [
     `Model:      ${resolved.config.model} (${resolved.modelSource})`,
     `Endpoint:   ${redactEndpointHost(resolved.config.baseUrl)} (${resolved.baseUrlSource})`,
     `Settings:   ${settings}`,
     `Credential: ${resolved.credentialVariable}`,
-  ].join("\n");
+  ];
+  // The profile name is a settings map key (non-secret), so it is safe to show.
+  if (resolved.profile) {
+    lines.unshift(`Profile:    ${resolved.profile}`);
+  }
+  return lines.join("\n");
 }

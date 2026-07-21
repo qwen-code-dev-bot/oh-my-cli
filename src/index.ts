@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import { resolveModelConfig, resolveSettingsPath, describeResolvedConfig } from "./settings.js";
+import { resolveSettingsPath, describeResolvedConfig } from "./settings.js";
 import {
   RUNTIME_SLASH_COMMANDS,
   RUNTIME_SLASH_COMMAND_DESCRIPTORS,
@@ -12,6 +12,11 @@ import {
 import { resolveEffectiveSettings, formatEffectiveSettings } from "./effective-settings.js";
 import { collectWorkflowList, formatWorkflowList } from "./workflow-contract.js";
 import { runWorkflow, formatWorkflowStepLine } from "./workflow-runner.js";
+import {
+  collectProfileList,
+  formatProfileList,
+  resolveModelProfileConfig,
+} from "./model-profiles.js";
 import { Workspace } from "./workspace.js";
 import { SessionStore } from "./session.js";
 import { runGoalCommand } from "./session-goal.js";
@@ -283,6 +288,8 @@ program
   .option("--effective-settings", "Show the effective, redacted, hierarchical settings snapshot (user + trusted project, validated; read-only) and exit")
   .option("--list-workflows", "List declared workflows from user settings (read-only, redacted) and exit")
   .option("--run-workflow <name>", "Run a named workflow from user settings non-interactively (sequential headless steps) and exit")
+  .option("--list-profiles", "List declared model profiles from user settings (read-only, redacted) and exit")
+  .option("--profile <name>", "Select a named model profile from user settings (overrides settings.defaultProfile)")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
   .option("--session-stats <session-id>", "Show a read-only, deterministic activity/efficiency stats view for a session (add --output json for automation) and exit")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
@@ -1509,6 +1516,33 @@ program
         process.exit(0);
       }
 
+      // List-profiles mode: a read-only, redacted inventory of the model profiles
+      // declared in the user-owned settings scope (model-profiles.ts). The project
+      // scope is never read, so an untrusted repository cannot surface a profile.
+      // Exits 0 on success; a malformed section or an invalid output format exits 2
+      // as a usage/input error.
+      if (opts.listProfiles) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let report;
+        try {
+          report = collectProfileList({ settingsPath: resolveSettingsPath(opts.settings) });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatProfileList(report) + "\n");
+        }
+        process.exit(0);
+      }
+
       // Run-workflow mode: run a named workflow from the user-owned settings scope
       // non-interactively (workflow-runner.ts). Each step is a bounded prompt run
       // through the existing headless `-p` path in its own process; steps run in
@@ -1577,9 +1611,10 @@ program
       }
 
       if (opts.preflight) {
-        const resolved = resolveModelConfig({
+        const resolved = resolveModelProfileConfig({
           settingsPath: resolveSettingsPath(opts.settings),
           env: process.env,
+          profile: opts.profile,
         });
         process.stderr.write(describeResolvedConfig(resolved) + "\n");
         const result = await runPreflight(resolved.config);
@@ -1588,9 +1623,10 @@ program
       }
 
       const settingsPath = resolveSettingsPath(opts.settings);
-      const config = resolveModelConfig({
+      const config = resolveModelProfileConfig({
         settingsPath,
         env: process.env,
+        profile: opts.profile,
       }).config;
       const store = new SessionStore();
 
