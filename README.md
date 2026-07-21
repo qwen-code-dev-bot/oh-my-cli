@@ -121,6 +121,10 @@ silently replace your selected endpoint or credential. Unknown profile names,
 disabled profiles, and missing credentials all fail before any request, and the
 errors (like the listing) are redacted.
 
+The selected profile is recorded in the session's metadata, so resuming a session
+under a different profile (or model) prints a redacted warning that explains the
+change while the conversation, tool, and approval history are preserved.
+
 ## Usage
 
 ### Non-interactive

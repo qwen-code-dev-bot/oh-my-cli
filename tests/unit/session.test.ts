@@ -78,6 +78,14 @@ describe("SessionStore", () => {
     expect(messages[0].role).toBe("user");
   });
 
+  it("round-trips the optional model profile in metadata", () => {
+    const id = store.newId();
+    store.writeMeta(id, { model: "qwen-model", profile: "qwen", workspace: "/srv/proj", createdAt: 123 });
+    const meta = store.readMeta(id);
+    expect(meta!.profile).toBe("qwen");
+    expect(meta!.model).toBe("qwen-model");
+  });
+
   it("returns null metadata for a session created before metadata existed", () => {
     const id = store.newId();
     store.append(id, { role: "user", content: "legacy" });

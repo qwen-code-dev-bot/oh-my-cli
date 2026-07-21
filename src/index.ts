@@ -1623,11 +1623,12 @@ program
       }
 
       const settingsPath = resolveSettingsPath(opts.settings);
-      const config = resolveModelProfileConfig({
+      const resolved = resolveModelProfileConfig({
         settingsPath,
         env: process.env,
         profile: opts.profile,
-      }).config;
+      });
+      const config = resolved.config;
       const store = new SessionStore();
 
       // Side question (Issue #200): ask a bounded, read-only question against a
@@ -1789,10 +1790,31 @@ program
         if (existingMessages.length === 0) {
           process.stderr.write(`Warning: session ${sessionId} is empty or not found\n`);
         }
+        // A resumed run may select a different profile (or model) than the session
+        // was created under. Explain the change visibly before continuing; the
+        // conversation, tool, usage, and approval history loaded above is left
+        // intact. Model and profile names are non-secret identifiers.
+        const meta = store.readMeta(sessionId);
+        if (meta) {
+          const parts: string[] = [];
+          if (meta.model !== undefined && meta.model !== config.model) {
+            parts.push(`model ${meta.model} → ${config.model}`);
+          }
+          if ((meta.profile ?? undefined) !== (resolved.profile ?? undefined)) {
+            parts.push(`profile ${meta.profile ?? "(none)"} → ${resolved.profile ?? "(none)"}`);
+          }
+          if (parts.length > 0) {
+            process.stderr.write(
+              `Warning: resuming session ${sessionId} with a changed model configuration ` +
+                `(${parts.join("; ")}); conversation, tool, and approval history are preserved.\n`,
+            );
+          }
+        }
       } else {
         sessionId = store.newId();
         store.writeMeta(sessionId, {
           model: config.model,
+          ...(resolved.profile ? { profile: resolved.profile } : {}),
           workspace: workspace.root,
           createdAt: Date.now(),
         });

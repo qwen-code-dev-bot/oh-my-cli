@@ -235,6 +235,80 @@ describe("Integration: model profiles", () => {
     expect(r.stdout).toContain("good-model");
     expect(r.stdout + r.stderr).not.toContain("evil-model");
   });
+
+  // --- Profile recorded in session history + resume explanation ---
+
+  function sessionIdIn(home: string): string {
+    const dir = path.join(home, ".oh-my-cli", "sessions");
+    const file = fs.readdirSync(dir).find((f) => f.endsWith(".jsonl"))!;
+    return file.replace(".jsonl", "");
+  }
+
+  const twoProfiles = () => ({
+    profiles: {
+      qwen: { name: "qwen-model", baseUrl: server.url, apiKeyEnv: "TEST_CRED" },
+      local: { name: "local-model", baseUrl: server.url, apiKeyEnv: "TEST_CRED" },
+    },
+  });
+
+  it("records the selected profile in the new session's metadata", async () => {
+    const home = homeWith(twoProfiles());
+    const r = await runCli(["--profile", "qwen", "-p", "hello"], {
+      ...noOpenaiEnv,
+      HOME: home,
+      TEST_CRED: "fake-key",
+    });
+    expect(r.code).toBe(0);
+    const metaLine = fs
+      .readFileSync(path.join(home, ".oh-my-cli", "sessions", `${sessionIdIn(home)}.jsonl`), "utf-8")
+      .split("\n")
+      .find((l) => l.includes('"meta":true'));
+    expect(metaLine).toBeDefined();
+    const meta = JSON.parse(metaLine!);
+    expect(meta.profile).toBe("qwen");
+    expect(meta.model).toBe("qwen-model");
+  });
+
+  it("explains a profile and model change when resuming, preserving history", async () => {
+    const home = homeWith(twoProfiles());
+    const first = await runCli(["--profile", "qwen", "-p", "first turn"], {
+      ...noOpenaiEnv,
+      HOME: home,
+      TEST_CRED: "fake-key",
+    });
+    expect(first.code).toBe(0);
+    const id = sessionIdIn(home);
+
+    const resumed = await runCli(["--resume", id, "--profile", "local", "-p", "second turn"], {
+      ...noOpenaiEnv,
+      HOME: home,
+      TEST_CRED: "fake-key",
+    });
+    expect(resumed.code).toBe(0);
+    expect(resumed.stderr).toContain("changed model configuration");
+    expect(resumed.stderr).toContain("model qwen-model → local-model");
+    expect(resumed.stderr).toContain("profile qwen → local");
+    expect(resumed.stderr).toContain("history are preserved");
+  });
+
+  it("does not warn when resuming under the same profile", async () => {
+    const home = homeWith(twoProfiles());
+    const first = await runCli(["--profile", "qwen", "-p", "first turn"], {
+      ...noOpenaiEnv,
+      HOME: home,
+      TEST_CRED: "fake-key",
+    });
+    expect(first.code).toBe(0);
+    const id = sessionIdIn(home);
+
+    const resumed = await runCli(["--resume", id, "--profile", "qwen", "-p", "second turn"], {
+      ...noOpenaiEnv,
+      HOME: home,
+      TEST_CRED: "fake-key",
+    });
+    expect(resumed.code).toBe(0);
+    expect(resumed.stderr).not.toContain("changed model configuration");
+  });
 });
 
 describe("Integration: profiles are protected in the effective-settings hierarchy", () => {
