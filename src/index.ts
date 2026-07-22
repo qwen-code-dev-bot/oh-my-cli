@@ -154,6 +154,7 @@ import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-proto
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary } from "./run-summary.js";
 import { createBottleneckCollector, formatBottleneckReport } from "./run-bottleneck.js";
+import { createFailureTaxonomyCollector, formatFailureTaxonomyReport } from "./run-failure-taxonomy.js";
 import { loadImageAttachments, imageRef } from "./image-input.js";
 import type { LoadedImage } from "./image-input.js";
 import { createTools } from "./tools.js";
@@ -377,6 +378,10 @@ program
   .option(
     "--bottleneck",
     "Print a privacy-safe tool/approval wall-time bottleneck report for the run (unattended use)",
+  )
+  .option(
+    "--failure-taxonomy",
+    "Print a privacy-safe failure-cause taxonomy report for the run (unattended use)",
   )
   .option(
     "--budget <usd>",
@@ -1942,6 +1947,7 @@ program
           const startedAt = Date.now();
           const turnImages = new TurnImageCollector();
           const bottleneck = opts.bottleneck ? createBottleneckCollector() : null;
+          const failureTaxonomy = opts.failureTaxonomy ? createFailureTaxonomyCollector() : null;
           let result: AgentResult;
           try {
             result = await runAgent(opts.prompt, existingMessages, {
@@ -1958,12 +1964,19 @@ program
               turnImages,
               preToolUseHooks,
               bottleneck: bottleneck?.collector,
+              failureTaxonomy: failureTaxonomy?.collector,
             });
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
             writer.emit({ type: "error", stage: "internal", message: redactSecrets(msg).text });
             if (bottleneck) {
               writer.emit({ type: "bottleneck", bottleneck: bottleneck.build(Date.now() - startedAt) });
+            }
+            if (failureTaxonomy) {
+              writer.emit({
+                type: "failure_taxonomy",
+                failureTaxonomy: failureTaxonomy.build(Date.now() - startedAt, "error"),
+              });
             }
             if (opts.summary) {
               writer.emit({
@@ -2012,6 +2025,12 @@ program
           if (bottleneck) {
             writer.emit({ type: "bottleneck", bottleneck: bottleneck.build(Date.now() - startedAt) });
           }
+          if (failureTaxonomy) {
+            writer.emit({
+              type: "failure_taxonomy",
+              failureTaxonomy: failureTaxonomy.build(Date.now() - startedAt, result.reason),
+            });
+          }
           writer.emit({
             type: "complete",
             ok: result.ok,
@@ -2025,6 +2044,7 @@ program
         const startedAt = Date.now();
         const turnImages = new TurnImageCollector();
         const bottleneck = opts.bottleneck ? createBottleneckCollector() : null;
+        const failureTaxonomy = opts.failureTaxonomy ? createFailureTaxonomyCollector() : null;
         const result = await runAgent(opts.prompt, existingMessages, {
           config,
           workspace,
@@ -2038,6 +2058,7 @@ program
           turnImages,
           preToolUseHooks,
           bottleneck: bottleneck?.collector,
+          failureTaxonomy: failureTaxonomy?.collector,
         });
         sealSession();
         recordTurnCheckpoint(turnImages);
@@ -2064,6 +2085,11 @@ program
         }
         if (bottleneck) {
           process.stdout.write("\n" + formatBottleneckReport(bottleneck.build(Date.now() - startedAt)) + "\n");
+        }
+        if (failureTaxonomy) {
+          process.stdout.write(
+            "\n" + formatFailureTaxonomyReport(failureTaxonomy.build(Date.now() - startedAt, result.reason)) + "\n",
+          );
         }
         process.exit(exitCode);
       } else {

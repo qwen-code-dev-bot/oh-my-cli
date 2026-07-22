@@ -15,6 +15,7 @@ import { compactMessages, buildCompactedTranscript } from "./compaction.js";
 import type { LoadedImage } from "./image-input.js";
 import type { TurnImageCollector } from "./turn-checkpoint.js";
 import type { BottleneckCollector } from "./run-bottleneck.js";
+import type { FailureTaxonomyCollector } from "./run-failure-taxonomy.js";
 
 const MAX_ROUNDS = 30;
 
@@ -54,6 +55,11 @@ export interface AgentOptions {
   // tool's execution wall-time and each approval gate's wait wall-time so the
   // caller can build a privacy-safe bottleneck report. Undefined ⇒ no collection.
   bottleneck?: BottleneckCollector;
+  // Optional failure-taxonomy collector. When present, the loop records the cause
+  // of each failed tool call (policy/hook/approval denial, path escape, tool
+  // error, unknown tool, folder-trust denial) so the caller can build a
+  // privacy-safe failure-taxonomy report. Undefined ⇒ no collection.
+  failureTaxonomy?: FailureTaxonomyCollector;
 }
 
 // Cumulative usage and cost reported after each round. `estimatedCostUsd` is an
@@ -416,6 +422,7 @@ export async function runAgent(
         requestApproval,
         preToolUseHooks,
         opts.bottleneck,
+        opts.failureTaxonomy,
         opts.turnImages,
       );
       sink.toolResult({ id: tc.id, name: tc.name, result, round });
@@ -457,10 +464,12 @@ async function executeToolCall(
   requestApproval: (name: string, args: Record<string, unknown>) => Promise<boolean>,
   preToolUseHooks: readonly PreToolUseHook[],
   bottleneck: BottleneckCollector | undefined,
+  failureTaxonomy: FailureTaxonomyCollector | undefined,
   turnImages?: TurnImageCollector,
 ): Promise<ToolResult> {
   const tool = toolMap.get(tc.name);
   if (!tool) {
+    failureTaxonomy?.record("unknown_tool");
     return { content: `Error: unknown tool "${tc.name}"`, isError: true };
   }
 
@@ -468,6 +477,7 @@ async function executeToolCall(
   // untrusted workspace fails closed for every mutating tool — yolo cannot widen
   // the boundary. Read-only tools (list/glob/grep/read) are always permitted.
   if (!mutatingAllowed && tool.category !== "read") {
+    failureTaxonomy?.record("folder_trust_denied");
     return { content: folderTrustDenialMessage(), isError: true };
   }
 
@@ -485,6 +495,7 @@ async function executeToolCall(
       workspace: workspace.root,
     });
     if (!decision.allowed) {
+      failureTaxonomy?.record("policy_denied");
       return { content: policyDenialMessage(decision), isError: true };
     }
   }
@@ -507,6 +518,7 @@ async function executeToolCall(
       { cwd: workspace.root },
     );
     if (decision.denied) {
+      failureTaxonomy?.record("hook_denied");
       return {
         content: decision.reason
           ? `Tool call denied by a user PreToolUse hook: ${decision.reason}`
@@ -527,10 +539,14 @@ async function executeToolCall(
     const approved = await requestApproval(tc.name, parsed);
     bottleneck?.recordApproval(tc.name, Date.now() - approvalStartedAt);
     if (!approved) {
+      failureTaxonomy?.record("approval_denied");
       return { content: "Tool execution denied by user", isError: true };
     }
   }
 
+  // Detects a path escape so a thrown escape is categorized distinctly from a
+  // generic tool error in the failure taxonomy.
+  let pathEscape = false;
   try {
     const parsed = JSON.parse(tc.arguments);
     // Capture the file's pre-image before a mutating-file tool overwrites it, so
@@ -544,15 +560,34 @@ async function executeToolCall(
         /* path escape is the tool's own error to surface */
       }
     }
+    if (failureTaxonomy && tool.category === "mutate-file" && typeof parsed.path === "string") {
+      try {
+        workspace.resolveSafe(parsed.path);
+      } catch {
+        pathEscape = true;
+      }
+    }
     // Time only the tool's own execution (approval/policy/hook gates are measured
     // or rejected above); recorded even when the tool throws via the finally.
     const executeStartedAt = Date.now();
     try {
-      return await tool.execute(parsed, workspace);
+      const result = await tool.execute(parsed, workspace);
+      // A tool that reports an error result without throwing is still a failed
+      // call; categorize it (a detected path escape takes precedence).
+      if (result.isError) {
+        failureTaxonomy?.record(pathEscape ? "path_escape" : "tool_error");
+      }
+      return result;
+    } catch (err: unknown) {
+      failureTaxonomy?.record(pathEscape ? "path_escape" : "tool_error");
+      const msg = err instanceof Error ? err.message : String(err);
+      return { content: `Tool error: ${msg}`, isError: true };
     } finally {
       bottleneck?.recordTool(tc.name, Date.now() - executeStartedAt);
     }
   } catch (err: unknown) {
+    // A failure outside the tool's own execution (e.g. malformed arguments).
+    failureTaxonomy?.record("tool_error");
     const msg = err instanceof Error ? err.message : String(err);
     return { content: `Tool error: ${msg}`, isError: true };
   }
