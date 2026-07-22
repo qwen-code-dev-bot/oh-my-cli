@@ -2,6 +2,7 @@ import type { AgentSink } from "./agent.js";
 import type { ToolResult } from "./tools.js";
 import type { RunSummary } from "./run-summary.js";
 import type { BottleneckReport } from "./run-bottleneck.js";
+import type { FailureTaxonomyReport } from "./run-failure-taxonomy.js";
 import { redactSecrets } from "./permission-impact.js";
 
 // A stable, versioned newline-delimited JSON protocol for core run lifecycle
@@ -80,6 +81,10 @@ export type HeadlessEvent =
   // report, emitted just before the terminal `complete`. Metadata only: tool
   // names, wall-time, and counts — never prompt/tool/file content.
   | { type: "bottleneck"; bottleneck: BottleneckReport }
+  // Opt-in (`--failure-taxonomy`) privacy-safe failure-taxonomy report, emitted
+  // just before the terminal `complete`. Metadata only: failure-cause categories,
+  // counts, and the terminal reason — never error text or prompt/tool/file content.
+  | { type: "failure_taxonomy"; failureTaxonomy: FailureTaxonomyReport }
   | { type: "complete"; ok: boolean; exitCode: number; rounds: number; reason: string };
 
 export type HeadlessRecord = HeadlessEvent & {
