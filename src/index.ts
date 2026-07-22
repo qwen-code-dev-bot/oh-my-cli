@@ -11,6 +11,12 @@ import {
 } from "./slash-command.js";
 import { resolveEffectiveSettings, formatEffectiveSettings } from "./effective-settings.js";
 import { collectWorkflowList, formatWorkflowList } from "./workflow-contract.js";
+import {
+  collectHookList,
+  formatHookList,
+  resolvePreToolUseHooks,
+  type PreToolUseHook,
+} from "./hook-contract.js";
 import { runWorkflow, formatWorkflowStepLine } from "./workflow-runner.js";
 import {
   collectProfileList,
@@ -287,6 +293,7 @@ program
   .option("--settings <path>", "Unified settings file for model config and --health (default ~/.oh-my-cli/settings.json)")
   .option("--effective-settings", "Show the effective, redacted, hierarchical settings snapshot (user + trusted project, validated; read-only) and exit")
   .option("--list-workflows", "List declared workflows from user settings (read-only, redacted) and exit")
+  .option("--list-hooks", "List declared PreToolUse hooks from user settings (read-only, redacted) and exit")
   .option("--run-workflow <name>", "Run a named workflow from user settings non-interactively (sequential headless steps) and exit")
   .option("--list-profiles", "List declared model profiles from user settings (read-only, redacted) and exit")
   .option("--profile <name>", "Select a named model profile from user settings (overrides settings.defaultProfile)")
@@ -1516,6 +1523,34 @@ program
         process.exit(0);
       }
 
+      // List-hooks mode: a read-only, redacted inventory of the PreToolUse hooks
+      // declared in the user-owned settings scope (hook-contract.ts). The project
+      // scope is never read, so an untrusted repository cannot surface a hook.
+      // Exits 0 on success (an absent `hooks` section lists as an empty inventory);
+      // a malformed/unknown contract or an invalid output format exits 2 as a
+      // usage/input error.
+      if (opts.listHooks) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let report;
+        try {
+          report = collectHookList({ settingsPath: resolveSettingsPath(opts.settings) });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatHookList(report) + "\n");
+        }
+        process.exit(0);
+      }
+
       // List-profiles mode: a read-only, redacted inventory of the model profiles
       // declared in the user-owned settings scope (model-profiles.ts). The project
       // scope is never read, so an untrusted repository cannot surface a profile.
@@ -1830,6 +1865,20 @@ program
         store.checkpoint(sessionId, store.load(sessionId), store.readMeta(sessionId));
       };
 
+      // Resolve user-owned PreToolUse hooks once (user settings scope only) so a
+      // matching hook can gate tool calls in both the headless and interactive
+      // paths. A malformed/oversized hooks section fails closed before any tool
+      // runs (exit 2), consistent with the other settings listings; an absent
+      // `hooks` section yields no hooks.
+      let preToolUseHooks: PreToolUseHook[] = [];
+      try {
+        preToolUseHooks = resolvePreToolUseHooks({ settingsPath });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`${msg}\n`);
+        process.exit(2);
+      }
+
       if (opts.prompt) {
         // Non-interactive mode
         const format = String(opts.output ?? "text");
@@ -1901,6 +1950,7 @@ program
               mutatingAllowed,
               images,
               turnImages,
+              preToolUseHooks,
             });
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -1972,6 +2022,7 @@ program
           mutatingAllowed,
           images,
           turnImages,
+          preToolUseHooks,
         });
         sealSession();
         recordTurnCheckpoint(turnImages);
@@ -2280,6 +2331,7 @@ program
                 compactThreshold,
                 mutatingAllowed,
                 images,
+                preToolUseHooks,
               });
             } catch (err: unknown) {
               const msg = err instanceof Error ? err.message : String(err);
