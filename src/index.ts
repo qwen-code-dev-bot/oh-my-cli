@@ -78,6 +78,7 @@ import {
 import { collectExtensionDiscovery, formatExtensionDiscovery } from "./extension-discovery.js";
 import { collectExtensionCompat, formatExtensionCompat } from "./extension-compat.js";
 import { collectTrustPosture, formatTrustPosture } from "./trust-posture.js";
+import { predictMergeConflict, formatConflictPrediction } from "./conflict-prediction.js";
 import {
   readRecoveryCheckpoint,
   readEvidenceFile,
@@ -292,6 +293,11 @@ program
   .option("--trust-workspace", "Persist trust for this workspace in the user trust store and exit")
   .option("--enforce-folder-trust", "Deny mutating tools when the workspace is untrusted (env: OMC_ENFORCE_FOLDER_TRUST=1)")
   .option("--trust-posture", "Show the effective, redacted workspace trust, sandbox, approval, and extension posture (read-only) and exit")
+  .option(
+    "--predict-conflict <source>",
+    "Predict read-only whether merging <source> into the target would conflict (fail-closed) and exit",
+  )
+  .option("--conflict-target <target>", "Target revision for --predict-conflict (default HEAD)")
   .option("--health", "Show MCP server and extension health inventory and exit")
   .option("--settings <path>", "Unified settings file for model config and --health (default ~/.oh-my-cli/settings.json)")
   .option("--effective-settings", "Show the effective, redacted, hierarchical settings snapshot (user + trusted project, validated; read-only) and exit")
@@ -1473,6 +1479,35 @@ program
           process.stdout.write(JSON.stringify(report) + "\n");
         } else {
           process.stdout.write(formatTrustPosture(report) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Conflict-prediction mode: predict read-only whether merging a source
+      // revision into a target would conflict (conflict-prediction.ts). It runs
+      // `git merge-tree` (no working-tree mutation, no commit) and fails closed on
+      // a dirty tree, an unresolvable revision, or a merge-tree error. Exits 0 on a
+      // successful prediction (clean or conflict); exits 2 on a usage/state error.
+      if (opts.predictConflict) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const source = String(opts.predictConflict);
+        const target = opts.conflictTarget ? String(opts.conflictTarget) : "HEAD";
+        let prediction;
+        try {
+          prediction = predictMergeConflict(opts.workspace, source, target);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(prediction) + "\n");
+        } else {
+          process.stdout.write(formatConflictPrediction(prediction) + "\n");
         }
         process.exit(0);
       }
