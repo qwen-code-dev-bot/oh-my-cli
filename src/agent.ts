@@ -7,6 +7,7 @@ import type { Workspace } from "./workspace.js";
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
 import { evaluateCommandPolicy, policyDenialMessage } from "./command-policy.js";
+import { evaluatePreToolUseHooks, type PreToolUseHook } from "./hook-contract.js";
 import { folderTrustDenialMessage } from "./folder-trust.js";
 import { estimateCostUsd, lookupModelPrice, formatCostUsd } from "./cost.js";
 import { buildEffectiveSystemPrompt } from "./instruction-context.js";
@@ -44,6 +45,10 @@ export interface AgentOptions {
   // each file a mutating-file tool touches is captured before the tool runs, so
   // the turn's workspace mutations can later be reversed without a Git reset.
   turnImages?: TurnImageCollector;
+  // User-owned PreToolUse hooks (resolved from the user settings scope by the
+  // caller). Each matching hook runs as a deny-only gate before a tool executes;
+  // a hook can only block a call, never approve it. Empty/undefined ⇒ no hooks.
+  preToolUseHooks?: readonly PreToolUseHook[];
 }
 
 // Cumulative usage and cost reported after each round. `estimatedCostUsd` is an
@@ -187,6 +192,7 @@ export async function runAgent(
   const tools = createTools();
   const toolMap = new Map(tools.map((t) => [t.name, t]));
   const schemas = toolSchemasForOpenAI(tools);
+  const preToolUseHooks = opts.preToolUseHooks ?? [];
 
   const messages: SessionMessage[] = [...existingMessages];
 
@@ -403,6 +409,7 @@ export async function runAgent(
         opts.workspace,
         opts.mutatingAllowed ?? true,
         requestApproval,
+        preToolUseHooks,
         opts.turnImages,
       );
       sink.toolResult({ id: tc.id, name: tc.name, result, round });
@@ -442,6 +449,7 @@ async function executeToolCall(
   workspace: Workspace,
   mutatingAllowed: boolean,
   requestApproval: (name: string, args: Record<string, unknown>) => Promise<boolean>,
+  preToolUseHooks: readonly PreToolUseHook[],
   turnImages?: TurnImageCollector,
 ): Promise<ToolResult> {
   const tool = toolMap.get(tc.name);
@@ -471,6 +479,33 @@ async function executeToolCall(
     });
     if (!decision.allowed) {
       return { content: policyDenialMessage(decision), isError: true };
+    }
+  }
+
+  // PreToolUse hook gate (user-owned, deny-only): a matching hook may block the
+  // call before approval is considered; silence leaves the normal approval flow
+  // unchanged. A hook can only ever deny, never approve. A hook timeout or spawn
+  // failure fails closed (the call is blocked) before any tool side effect.
+  if (preToolUseHooks.length > 0) {
+    let hookArgs: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(tc.arguments);
+      if (parsed && typeof parsed === "object") hookArgs = parsed as Record<string, unknown>;
+    } catch {
+      /* leave hookArgs empty */
+    }
+    const decision = await evaluatePreToolUseHooks(
+      preToolUseHooks,
+      { toolName: tc.name, toolInput: hookArgs },
+      { cwd: workspace.root },
+    );
+    if (decision.denied) {
+      return {
+        content: decision.reason
+          ? `Tool call denied by a user PreToolUse hook: ${decision.reason}`
+          : "Tool call denied by a user PreToolUse hook",
+        isError: true,
+      };
     }
   }
 

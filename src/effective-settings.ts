@@ -47,6 +47,7 @@ export const REGISTERED_SETTINGS_KEYS: readonly string[] = [
   "approval",
   "ui",
   "workflows",
+  "hooks",
   "diagnostics",
   "probeTimeoutMs",
 ];
@@ -69,6 +70,7 @@ const OBJECT_SECTIONS = new Set([
   "approval",
   "ui",
   "workflows",
+  "hooks",
   "diagnostics",
 ]);
 
@@ -76,7 +78,15 @@ const OBJECT_SECTIONS = new Set([
 // never set at all. sandbox/approval are security policy; profiles/defaultProfile
 // select the model endpoint and credential source, so a repository can never
 // silently replace the selected endpoint or credential (only the user scope may).
-const PROTECTED_PROJECT_SECTIONS = new Set(["sandbox", "approval", "profiles", "defaultProfile"]);
+// hooks run arbitrary local shell commands before tool calls, so a repository can
+// never inject a hook either — only the user-owned scope may declare one.
+const PROTECTED_PROJECT_SECTIONS = new Set([
+  "sandbox",
+  "approval",
+  "profiles",
+  "defaultProfile",
+  "hooks",
+]);
 
 // Fields within a section a trusted project scope may never set. The model
 // endpoint and the credential-source variable name are credential-bearing, so a
