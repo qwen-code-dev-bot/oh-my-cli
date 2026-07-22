@@ -3,6 +3,7 @@ import type { SessionMessage } from "./session.js";
 import type { ToolDef, ToolResult } from "./tools.js";
 import { createTools, toolSchemasForOpenAI } from "./tools.js";
 import { streamChat } from "./provider.js";
+import type { StreamProvider } from "./provider.js";
 import type { Workspace } from "./workspace.js";
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
@@ -60,6 +61,10 @@ export interface AgentOptions {
   // error, unknown tool, folder-trust denial) so the caller can build a
   // privacy-safe failure-taxonomy report. Undefined ⇒ no collection.
   failureTaxonomy?: FailureTaxonomyCollector;
+  // Optional provider stream override. Defaults to the network `streamChat`;
+  // the deterministic task-fixture replay (#224) supplies a scripted provider so
+  // the same fixture always produces the same run. Undefined ⇒ network provider.
+  streamProvider?: StreamProvider;
 }
 
 // Cumulative usage and cost reported after each round. `estimatedCostUsd` is an
@@ -204,6 +209,9 @@ export async function runAgent(
   const toolMap = new Map(tools.map((t) => [t.name, t]));
   const schemas = toolSchemasForOpenAI(tools);
   const preToolUseHooks = opts.preToolUseHooks ?? [];
+  // Provider stream: the network `streamChat` by default, or a deterministic
+  // scripted provider for task-fixture replay (#224).
+  const stream = opts.streamProvider ?? streamChat;
 
   const messages: SessionMessage[] = [...existingMessages];
 
@@ -311,7 +319,7 @@ export async function runAgent(
     const assistantToolCalls: Array<{ id: string; name: string; arguments: string }> = [];
 
     try {
-      for await (const event of streamChat(opts.config, messages, { tools: schemas })) {
+      for await (const event of stream(opts.config, messages, { tools: schemas })) {
         if (event.type === "text") {
           assistantText += event.delta;
           sink.assistantDelta(event.delta);

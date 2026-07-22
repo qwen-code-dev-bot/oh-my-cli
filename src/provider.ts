@@ -41,6 +41,15 @@ export interface StreamedRetry {
 
 export type StreamEvent = StreamedText | StreamedToolCall | StreamedUsage | StreamedRetry;
 
+// A provider call as a stream of events. `streamChat` is the network
+// implementation; tests and the deterministic task-fixture replay (#224) supply
+// their own implementation with the same signature.
+export type StreamProvider = (
+  config: Config,
+  messages: SessionMessage[],
+  options?: ProviderOptions,
+) => AsyncGenerator<StreamEvent>;
+
 // Bounded retry policy. Fixed so an unattended run can never hang: at most
 // RETRY_MAX_ATTEMPTS total tries, each wait capped at RETRY_MAX_DELAY_MS, so the
 // worst-case cumulative wait is bounded by their product.

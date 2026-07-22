@@ -155,6 +155,7 @@ import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary } from "./run-summary.js";
 import { createBottleneckCollector, formatBottleneckReport } from "./run-bottleneck.js";
 import { createFailureTaxonomyCollector, formatFailureTaxonomyReport } from "./run-failure-taxonomy.js";
+import { readTaskFixtureFile, fixtureStreamProvider, type TaskFixture } from "./task-fixture.js";
 import { loadImageAttachments, imageRef } from "./image-input.js";
 import type { LoadedImage } from "./image-input.js";
 import { createTools } from "./tools.js";
@@ -382,6 +383,10 @@ program
   .option(
     "--failure-taxonomy",
     "Print a privacy-safe failure-cause taxonomy report for the run (unattended use)",
+  )
+  .option(
+    "--replay-fixture <file>",
+    "Replay a deterministic task fixture (bounded prompt + scripted responses) for a reproducible unattended run",
   )
   .option(
     "--budget <usd>",
@@ -1889,13 +1894,33 @@ program
         process.exit(2);
       }
 
-      if (opts.prompt) {
+      if (opts.prompt || opts.replayFixture) {
         // Non-interactive mode
         const format = String(opts.output ?? "text");
         if (format !== "text" && format !== "json") {
           process.stderr.write(`Error: invalid output format "${format}"\n`);
           process.exit(1);
         }
+
+        // Task-fixture replay (#224): load the fixture (fail closed) and drive the
+        // run from its bounded prompt and deterministic script instead of the
+        // network provider, so the same fixture reproduces the same run.
+        let replayFixture: TaskFixture | null = null;
+        if (opts.replayFixture) {
+          try {
+            replayFixture = readTaskFixtureFile(String(opts.replayFixture));
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            process.stderr.write(`${msg}\n`);
+            process.exit(2);
+          }
+        }
+        const runPrompt = replayFixture ? replayFixture.prompt : opts.prompt;
+        if (!runPrompt) {
+          process.stderr.write("Error: a prompt is required (use -p or --replay-fixture)\n");
+          process.exit(1);
+        }
+        const streamProvider = replayFixture ? fixtureStreamProvider(replayFixture) : undefined;
 
         // Capture a content-based checkpoint around this turn so a completed
         // turn can later be undone (and redone) without a Git reset. The
@@ -1942,7 +1967,7 @@ program
           // Headless protocol: a versioned NDJSON event stream on stdout. The
           // terminal `complete` record's exitCode matches the process exit code.
           const writer = new HeadlessWriter(process.stdout);
-          writer.emit(startEvent({ sessionId, model: config.model, prompt: opts.prompt }));
+          writer.emit(startEvent({ sessionId, model: config.model, prompt: runPrompt }));
           const sink = createHeadlessSink(writer);
           const startedAt = Date.now();
           const turnImages = new TurnImageCollector();
@@ -1950,7 +1975,7 @@ program
           const failureTaxonomy = opts.failureTaxonomy ? createFailureTaxonomyCollector() : null;
           let result: AgentResult;
           try {
-            result = await runAgent(opts.prompt, existingMessages, {
+            result = await runAgent(runPrompt, existingMessages, {
               config,
               workspace,
               approvalMode,
@@ -1965,6 +1990,7 @@ program
               preToolUseHooks,
               bottleneck: bottleneck?.collector,
               failureTaxonomy: failureTaxonomy?.collector,
+              streamProvider,
             });
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -2045,7 +2071,7 @@ program
         const turnImages = new TurnImageCollector();
         const bottleneck = opts.bottleneck ? createBottleneckCollector() : null;
         const failureTaxonomy = opts.failureTaxonomy ? createFailureTaxonomyCollector() : null;
-        const result = await runAgent(opts.prompt, existingMessages, {
+        const result = await runAgent(runPrompt, existingMessages, {
           config,
           workspace,
           approvalMode,
@@ -2059,6 +2085,7 @@ program
           preToolUseHooks,
           bottleneck: bottleneck?.collector,
           failureTaxonomy: failureTaxonomy?.collector,
+          streamProvider,
         });
         sealSession();
         recordTurnCheckpoint(turnImages);
