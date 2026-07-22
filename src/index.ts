@@ -153,6 +153,7 @@ import {
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary } from "./run-summary.js";
+import { createBottleneckCollector, formatBottleneckReport } from "./run-bottleneck.js";
 import { loadImageAttachments, imageRef } from "./image-input.js";
 import type { LoadedImage } from "./image-input.js";
 import { createTools } from "./tools.js";
@@ -373,6 +374,10 @@ program
   )
   .option("--no-color", "Disable ANSI color output (also honors the NO_COLOR env var)")
   .option("--summary", "Print a privacy-safe execution summary for the run (unattended use)")
+  .option(
+    "--bottleneck",
+    "Print a privacy-safe tool/approval wall-time bottleneck report for the run (unattended use)",
+  )
   .option(
     "--budget <usd>",
     "Spend budget in USD; stop before further provider calls once the estimated cost reaches it (also honors OMC_SPEND_BUDGET_USD)",
@@ -1936,6 +1941,7 @@ program
           const sink = createHeadlessSink(writer);
           const startedAt = Date.now();
           const turnImages = new TurnImageCollector();
+          const bottleneck = opts.bottleneck ? createBottleneckCollector() : null;
           let result: AgentResult;
           try {
             result = await runAgent(opts.prompt, existingMessages, {
@@ -1951,10 +1957,14 @@ program
               images,
               turnImages,
               preToolUseHooks,
+              bottleneck: bottleneck?.collector,
             });
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
             writer.emit({ type: "error", stage: "internal", message: redactSecrets(msg).text });
+            if (bottleneck) {
+              writer.emit({ type: "bottleneck", bottleneck: bottleneck.build(Date.now() - startedAt) });
+            }
             if (opts.summary) {
               writer.emit({
                 type: "summary",
@@ -1999,6 +2009,9 @@ program
               }),
             });
           }
+          if (bottleneck) {
+            writer.emit({ type: "bottleneck", bottleneck: bottleneck.build(Date.now() - startedAt) });
+          }
           writer.emit({
             type: "complete",
             ok: result.ok,
@@ -2011,6 +2024,7 @@ program
 
         const startedAt = Date.now();
         const turnImages = new TurnImageCollector();
+        const bottleneck = opts.bottleneck ? createBottleneckCollector() : null;
         const result = await runAgent(opts.prompt, existingMessages, {
           config,
           workspace,
@@ -2023,6 +2037,7 @@ program
           images,
           turnImages,
           preToolUseHooks,
+          bottleneck: bottleneck?.collector,
         });
         sealSession();
         recordTurnCheckpoint(turnImages);
@@ -2046,6 +2061,9 @@ program
             attachments: attachmentRefs,
           });
           process.stdout.write("\n" + formatRunSummary(summary) + "\n");
+        }
+        if (bottleneck) {
+          process.stdout.write("\n" + formatBottleneckReport(bottleneck.build(Date.now() - startedAt)) + "\n");
         }
         process.exit(exitCode);
       } else {

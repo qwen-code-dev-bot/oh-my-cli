@@ -1,6 +1,7 @@
 import type { AgentSink } from "./agent.js";
 import type { ToolResult } from "./tools.js";
 import type { RunSummary } from "./run-summary.js";
+import type { BottleneckReport } from "./run-bottleneck.js";
 import { redactSecrets } from "./permission-impact.js";
 
 // A stable, versioned newline-delimited JSON protocol for core run lifecycle
@@ -75,6 +76,10 @@ export type HeadlessEvent =
   // Opt-in (`--summary`) privacy-safe run summary, emitted just before the
   // terminal `complete`. Carries only metadata, never prompt/tool/file content.
   | { type: "summary"; summary: RunSummary }
+  // Opt-in (`--bottleneck`) privacy-safe tool/approval wall-time bottleneck
+  // report, emitted just before the terminal `complete`. Metadata only: tool
+  // names, wall-time, and counts — never prompt/tool/file content.
+  | { type: "bottleneck"; bottleneck: BottleneckReport }
   | { type: "complete"; ok: boolean; exitCode: number; rounds: number; reason: string };
 
 export type HeadlessRecord = HeadlessEvent & {

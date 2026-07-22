@@ -14,6 +14,7 @@ import { buildEffectiveSystemPrompt } from "./instruction-context.js";
 import { compactMessages, buildCompactedTranscript } from "./compaction.js";
 import type { LoadedImage } from "./image-input.js";
 import type { TurnImageCollector } from "./turn-checkpoint.js";
+import type { BottleneckCollector } from "./run-bottleneck.js";
 
 const MAX_ROUNDS = 30;
 
@@ -49,6 +50,10 @@ export interface AgentOptions {
   // caller). Each matching hook runs as a deny-only gate before a tool executes;
   // a hook can only block a call, never approve it. Empty/undefined ⇒ no hooks.
   preToolUseHooks?: readonly PreToolUseHook[];
+  // Optional wall-time bottleneck collector. When present, the loop records each
+  // tool's execution wall-time and each approval gate's wait wall-time so the
+  // caller can build a privacy-safe bottleneck report. Undefined ⇒ no collection.
+  bottleneck?: BottleneckCollector;
 }
 
 // Cumulative usage and cost reported after each round. `estimatedCostUsd` is an
@@ -410,6 +415,7 @@ export async function runAgent(
         opts.mutatingAllowed ?? true,
         requestApproval,
         preToolUseHooks,
+        opts.bottleneck,
         opts.turnImages,
       );
       sink.toolResult({ id: tc.id, name: tc.name, result, round });
@@ -450,6 +456,7 @@ async function executeToolCall(
   mutatingAllowed: boolean,
   requestApproval: (name: string, args: Record<string, unknown>) => Promise<boolean>,
   preToolUseHooks: readonly PreToolUseHook[],
+  bottleneck: BottleneckCollector | undefined,
   turnImages?: TurnImageCollector,
 ): Promise<ToolResult> {
   const tool = toolMap.get(tc.name);
@@ -514,7 +521,11 @@ async function executeToolCall(
     try {
       parsed = JSON.parse(tc.arguments);
     } catch { /* ignore */ }
+    // Time the approval gate separately from the tool's own execution so a long
+    // human-approval wait surfaces as an `approval` bottleneck, not a tool one.
+    const approvalStartedAt = Date.now();
     const approved = await requestApproval(tc.name, parsed);
+    bottleneck?.recordApproval(tc.name, Date.now() - approvalStartedAt);
     if (!approved) {
       return { content: "Tool execution denied by user", isError: true };
     }
@@ -533,7 +544,14 @@ async function executeToolCall(
         /* path escape is the tool's own error to surface */
       }
     }
-    return await tool.execute(parsed, workspace);
+    // Time only the tool's own execution (approval/policy/hook gates are measured
+    // or rejected above); recorded even when the tool throws via the finally.
+    const executeStartedAt = Date.now();
+    try {
+      return await tool.execute(parsed, workspace);
+    } finally {
+      bottleneck?.recordTool(tc.name, Date.now() - executeStartedAt);
+    }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { content: `Tool error: ${msg}`, isError: true };
