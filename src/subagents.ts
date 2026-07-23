@@ -60,6 +60,13 @@ export interface SubagentManagerOptions {
    * this ceiling, so a churn of short-lived children cannot evade it.
    */
   maxTotalSpawns?: number;
+  /**
+   * Shared budget cap on the cumulative cost (e.g. USD) that all delegated
+   * children may collectively consume. When the cumulative reported cost reaches
+   * this cap, further spawns are refused fail-closed (#238). Independent of and
+   * complementary to maxTotalSpawns. Undefined ⇒ no shared cost budget.
+   */
+  maxTotalCost?: number;
   /** Injectable clock for deterministic tests. Defaults to Date.now. */
   clock?: () => number;
   /**
@@ -153,14 +160,31 @@ export class SubagentSpawnCapError extends Error {
   }
 }
 
+/**
+ * Thrown by the subagent launcher once the shared cost budget (#238) is
+ * exhausted. The message is a static, deterministic bound notice — it never
+ * carries secrets, host paths, or untrusted content.
+ */
+export class SubagentBudgetError extends Error {
+  readonly reason = "shared_budget" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "SubagentBudgetError";
+  }
+}
+
 export class SubagentManager {
   private readonly entries = new Map<string, Entry>();
   private readonly maxConcurrent: number;
   private readonly maxTotalSpawns: number;
+  private readonly maxTotalCost?: number;
   private readonly clock: () => number;
   private readonly parentWorkspace?: string;
   private readonly parentIdentity?: WorkspaceIdentity;
   private seq = 0;
+  // Cumulative cost reported across all delegated children (#238 shared budget).
+  private cumulativeCost = 0;
 
   constructor(opts: SubagentManagerOptions = {}) {
     const max = opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
@@ -173,6 +197,12 @@ export class SubagentManager {
       throw new Error("maxTotalSpawns must be a positive integer");
     }
     this.maxTotalSpawns = total;
+    if (opts.maxTotalCost !== undefined) {
+      if (!Number.isFinite(opts.maxTotalCost) || opts.maxTotalCost <= 0) {
+        throw new Error("maxTotalCost must be a positive finite number");
+      }
+      this.maxTotalCost = opts.maxTotalCost;
+    }
     this.clock = opts.clock ?? (() => Date.now());
     if (opts.parentWorkspace !== undefined) {
       this.parentWorkspace = opts.parentWorkspace;
@@ -201,6 +231,11 @@ export class SubagentManager {
     if (this.seq >= this.maxTotalSpawns) {
       throw new SubagentSpawnCapError(
         `Refusing to spawn a delegated agent: session subagent cap of ${this.maxTotalSpawns} reached`,
+      );
+    }
+    if (this.maxTotalCost !== undefined && this.cumulativeCost >= this.maxTotalCost) {
+      throw new SubagentBudgetError(
+        `Refusing to spawn a delegated agent: shared cost budget of ${this.maxTotalCost} exhausted`,
       );
     }
     const mode: WorkspaceMode = opts.mode ?? "mutating";
@@ -265,6 +300,27 @@ export class SubagentManager {
 
   counts(): Record<SubagentState, number> {
     return countByState(this.list());
+  }
+
+  /**
+   * Report cost consumed by a delegated child, adding it to the cumulative shared
+   * budget total (#238). Non-finite or negative amounts are ignored so a bad
+   * report cannot corrupt the budget or open it back up.
+   */
+  addCost(amount: number): void {
+    if (Number.isFinite(amount) && amount > 0) {
+      this.cumulativeCost += amount;
+    }
+  }
+
+  /**
+   * The shared cost budget state (#238): cumulative reported cost, the cap (null
+   * when no budget is configured), and the remaining budget (null when uncapped).
+   */
+  costUsage(): { cumulativeCost: number; maxTotalCost: number | null; remaining: number | null } {
+    const maxTotalCost = this.maxTotalCost ?? null;
+    const remaining = maxTotalCost === null ? null : Math.max(0, maxTotalCost - this.cumulativeCost);
+    return { cumulativeCost: this.cumulativeCost, maxTotalCost, remaining };
   }
 
   private runningCount(): number {

@@ -3,6 +3,7 @@ import {
   SubagentManager,
   formatSubagentView,
   SubagentSpawnCapError,
+  SubagentBudgetError,
 } from "../../src/subagents.js";
 
 // End-to-end lifecycle scenarios that exercise the manager the way a parent
@@ -205,5 +206,45 @@ describe("Integration: subagent spawn cap dogfood", () => {
     expect(view).toContain("beta");
     expect(view).not.toContain("SECRET");
     expect(view).toMatch(/2 total/);
+  });
+
+  it("enforces a shared cost budget across delegated children, failing closed once exhausted", async () => {
+    // A parent delegates research children that each report a cost. The shared
+    // budget bounds their aggregate cost; once exhausted, further delegation is
+    // refused fail-closed even though the spawn-count ceiling is nowhere near.
+    const mgr = new SubagentManager({ maxConcurrent: 4, maxTotalSpawns: 100, maxTotalCost: 1.0 });
+
+    const a = deferred<string>();
+    const b = deferred<string>();
+    mgr.spawn(() => a.promise, { label: "researcher-1", mode: "read-only" });
+    mgr.spawn(() => b.promise, { label: "researcher-2", mode: "read-only" });
+
+    // Both children complete and report their cost (0.6 + 0.4 = 1.0).
+    a.resolve("found X");
+    b.resolve("found Y");
+    await flush();
+    mgr.addCost(0.6);
+    mgr.addCost(0.4);
+    expect(mgr.costUsage()).toEqual({ cumulativeCost: 1.0, maxTotalCost: 1.0, remaining: 0 });
+
+    // The next delegation is refused fail-closed by the shared budget — even
+    // though only 2 of 100 spawns are used.
+    let err: unknown;
+    try {
+      mgr.spawn(() => deferred<string>().promise, { label: "researcher-3", mode: "read-only" });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(SubagentBudgetError);
+    expect((err as SubagentBudgetError).reason).toBe("shared_budget");
+    const reason = (err as Error).message;
+    expect(reason).toContain("shared cost budget of 1 exhausted");
+    expect(reason).not.toContain("researcher-3");
+
+    // The parent and its completed children are unaffected; the refused spawn
+    // registered nothing.
+    expect(mgr.list()).toHaveLength(2);
+    expect(mgr.get("sub-001")?.state).toBe("completed");
+    expect(mgr.get("sub-002")?.state).toBe("completed");
   });
 });
