@@ -88,6 +88,39 @@ export type WorktreeCleanResult =
   | { ok: true; lease: WorktreeLease; cleaned: boolean }
   | { ok: false; reason: WorktreeCleanRefusalReason; message: string };
 
+/** Why a lease cancellation was refused (the lease is retained safely). */
+export type WorktreeCancelRefusalReason =
+  | "non_repository"
+  | "ambiguous"
+  | "uncommitted_changes"
+  | "git_error";
+
+/** A commit preserved on the lease branch by a cancellation (bounded, redacted). */
+export interface PreservedCommit {
+  sha: string;
+  subject: string;
+}
+
+/** The committed work a cancellation preserves on the (kept) lease branch. */
+export interface WorktreeCancelPreserved {
+  branch: string;
+  commits: PreservedCommit[];
+  truncatedCommits: number;
+}
+
+export type WorktreeCancelResult =
+  | {
+      ok: true;
+      lease: WorktreeLease;
+      /** False when the lease was already absent (idempotent no-op). */
+      cancelled: boolean;
+      worktreeRemoved: boolean;
+      /** True when uncommitted work was discarded via --cancel-force. */
+      forced: boolean;
+      preserved: WorktreeCancelPreserved;
+    }
+  | { ok: false; reason: WorktreeCancelRefusalReason; message: string };
+
 function redact(text: string): string {
   return redactSecrets(text).text;
 }
@@ -394,6 +427,102 @@ export function cleanWorktreeLease(opts: WorktreeLeaseOptions): WorktreeCleanRes
   return { ok: true, cleaned: true, lease };
 }
 
+// Bound the preserved-commit list so a long-lived lease cannot inflate the report.
+const MAX_PRESERVED_COMMITS = 50;
+
+// List the lease branch's commits not yet in the parent HEAD — the work a
+// cancellation preserves by keeping the branch. Bounded and redacted.
+function collectPreservedCommits(repo: string, branch: string): WorktreeCancelPreserved {
+  const parentHead = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
+  if (!parentHead || !branchRefExists(repo, branch)) {
+    return { branch, commits: [], truncatedCommits: 0 };
+  }
+  const log = git(repo, ["log", "--format=%H%x09%s", `${parentHead}..${branch}`]);
+  const lines = log.stdout.split("\n").filter((line) => line.trim() !== "");
+  const commits = lines.slice(0, MAX_PRESERVED_COMMITS).map((line) => {
+    const tab = line.indexOf("\t");
+    const sha = tab >= 0 ? line.slice(0, tab) : line;
+    const subject = tab >= 0 ? line.slice(tab + 1) : "";
+    return { sha: sha.slice(0, 12), subject: redact(subject) };
+  });
+  return { branch, commits, truncatedCommits: Math.max(0, lines.length - commits.length) };
+}
+
+/**
+ * Cancel a leased workspace: the safe teardown path for a cancelled agent. Unlike
+ * `cleanWorktreeLease` (which requires the work to be merged before deleting the
+ * branch), cancellation PRESERVES committed work by keeping the lease branch and
+ * only removing the worktree, so the agent's commits survive for later integration.
+ * It fails closed when the worktree holds uncommitted changes that would be lost,
+ * unless `force` acknowledges the discard. Idempotent: cancelling an absent lease
+ * is a no-op. The parent worktree is never touched.
+ */
+export function cancelWorktreeLease(
+  opts: WorktreeLeaseOptions,
+  cancelOpts: { force?: boolean } = {},
+): WorktreeCancelResult {
+  const force = Boolean(cancelOpts.force);
+  const repo = path.resolve(opts.repo);
+  const task = (opts.taskIdentity ?? "").trim();
+  const agent = (opts.agentIdentity ?? "").trim();
+  if (!task || !agent) {
+    return {
+      ok: false,
+      reason: "ambiguous",
+      message: "both --task-identity and --agent-identity are required to locate a lease",
+    };
+  }
+
+  const commonDir = repoCommonDir(repo);
+  if (commonDir === null) {
+    return { ok: false, reason: "non_repository", message: "target is not a git repository" };
+  }
+
+  const identity = deriveLeaseIdentity({ repoKey: commonDir, taskIdentity: task, agentIdentity: agent });
+  const worktreeRoot = path.resolve(opts.worktreeRoot ?? defaultWorktreeRoot(commonDir));
+  const worktreePath = path.join(worktreeRoot, identity.leaseId);
+
+  const wtListed = worktreeRegistered(repo, worktreePath);
+  const branchExists = branchRefExists(repo, identity.branch);
+  const baseSha = git(repo, ["rev-parse", "--verify", "--quiet", identity.branch]).stdout.trim();
+  const lease = buildLease({ identity, worktreePath, baseSha, taskIdentity: task, agentIdentity: agent });
+  const emptyPreserved: WorktreeCancelPreserved = { branch: identity.branch, commits: [], truncatedCommits: 0 };
+
+  if (!wtListed && !branchExists) {
+    // Already absent — idempotent no-op.
+    return { ok: true, cancelled: false, worktreeRemoved: false, forced: force, lease, preserved: emptyPreserved };
+  }
+
+  // Fail closed on uncommitted work unless --force acknowledges the loss.
+  const dirty = wtListed ? dirtyCount(worktreePath) : 0;
+  if (dirty > 0 && !force) {
+    return {
+      ok: false,
+      reason: "uncommitted_changes",
+      message: `lease worktree has ${dirty} uncommitted change(s) that would be lost; commit them or pass --cancel-force to discard`,
+    };
+  }
+
+  // Preserve committed work (the branch is kept), then remove the worktree.
+  const preserved = collectPreservedCommits(repo, identity.branch);
+  let worktreeRemoved = false;
+  if (wtListed) {
+    const rm = force
+      ? git(repo, ["worktree", "remove", "--force", worktreePath])
+      : git(repo, ["worktree", "remove", worktreePath]);
+    if (!rm.ok) {
+      return {
+        ok: false,
+        reason: "git_error",
+        message: redact(`git worktree remove failed: ${rm.stderr.trim() || "unknown error"}`),
+      };
+    }
+    worktreeRemoved = true;
+  }
+
+  return { ok: true, cancelled: true, worktreeRemoved, forced: force, lease, preserved };
+}
+
 // --- formatting -------------------------------------------------------------
 
 /** A concise, redacted, human-readable lease result. */
@@ -423,6 +552,38 @@ export function formatWorktreeLeaseResult(
     if (lease.baseSha) lines.push(`base:     ${lease.baseSha.slice(0, 12)}`);
     lines.push(`task:     ${lease.taskIdentity}`);
     lines.push(`agent:    ${lease.agentIdentity}`);
+  } else {
+    lines.push("result:   refused");
+    lines.push(`reason:   ${result.reason}`);
+    lines.push(`detail:   ${redact(result.message)}`);
+  }
+  return lines.join("\n");
+}
+
+/** A concise, redacted, human-readable cancellation result. */
+export function formatWorktreeCancelResult(result: WorktreeCancelResult): string {
+  const lines: string[] = [];
+  lines.push(`Worktree lease cancellation (${WORKTREE_LEASE_SCHEMA} v${WORKTREE_LEASE_VERSION})`);
+  lines.push("─".repeat(40));
+  lines.push("action:   cancel");
+  if (result.ok) {
+    const status = !result.cancelled
+      ? "already absent (idempotent)"
+      : result.forced
+        ? "cancelled (forced; uncommitted work discarded)"
+        : "cancelled";
+    lines.push("result:   ok");
+    lines.push(`status:   ${status}`);
+    lines.push(`lease:    ${result.lease.leaseId}`);
+    lines.push(`branch:   ${result.lease.branch} (preserved)`);
+    lines.push(`worktree: ${result.lease.worktreePath}${result.worktreeRemoved ? " (removed)" : ""}`);
+    lines.push(`preserved commits: ${result.preserved.commits.length}`);
+    for (const commit of result.preserved.commits) {
+      lines.push(`  ${commit.sha}  ${commit.subject}`);
+    }
+    if (result.preserved.truncatedCommits > 0) {
+      lines.push(`  … ${result.preserved.truncatedCommits} more commit(s) beyond the bound`);
+    }
   } else {
     lines.push("result:   refused");
     lines.push(`reason:   ${result.reason}`);

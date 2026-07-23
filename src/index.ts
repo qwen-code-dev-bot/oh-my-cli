@@ -140,7 +140,9 @@ import {
 import {
   createWorktreeLease,
   cleanWorktreeLease,
+  cancelWorktreeLease,
   formatWorktreeLeaseResult,
+  formatWorktreeCancelResult,
 } from "./worktree-lease.js";
 import { evaluateCommandPolicy, formatCommandPolicyDecision } from "./command-policy.js";
 import {
@@ -373,6 +375,8 @@ program
   .option("--outcomes-file <file>", "Command-outcomes file (JSON array) to include in --export-evidence")
   .option("--create-worktree", "Create a leased git worktree for a mutating delegated agent and exit")
   .option("--clean-worktree", "Clean a leased git worktree after verified completion and exit")
+  .option("--cancel-worktree", "Cancel a leased git worktree, preserving committed work and failing closed on uncommitted work, and exit")
+  .option("--cancel-force", "With --cancel-worktree, discard uncommitted work instead of refusing")
   .option("--agent-identity <id>", "Stable agent identity for a leased worktree (with --create-worktree/--clean-worktree)")
   .option("--worktree-root <dir>", "Directory where leased worktrees live (default <workspace>/.oh-my-cli/worktrees)")
   .option("--command-policy <command>", "Evaluate one shell command against the offline command policy and exit")
@@ -1378,14 +1382,15 @@ program
       // mutating delegated agent, offline (no provider config needed). Exits 0
       // on success (including idempotent no-ops), 1 on a safety refusal, and 2
       // on a usage error or unexpected git failure.
-      if (opts.createWorktree || opts.cleanWorktree) {
+      if (opts.createWorktree || opts.cleanWorktree || opts.cancelWorktree) {
         const format = String(opts.output ?? "text");
         if (format !== "text" && format !== "json") {
           process.stderr.write(`Error: invalid output format "${format}"\n`);
           process.exit(2);
         }
-        if (opts.createWorktree && opts.cleanWorktree) {
-          process.stderr.write("Error: choose one of --create-worktree or --clean-worktree\n");
+        const chosen = [opts.createWorktree, opts.cleanWorktree, opts.cancelWorktree].filter(Boolean).length;
+        if (chosen > 1) {
+          process.stderr.write("Error: choose one of --create-worktree, --clean-worktree, or --cancel-worktree\n");
           process.exit(2);
         }
         if (!opts.taskIdentity) {
@@ -1402,6 +1407,15 @@ program
           agentIdentity: String(opts.agentIdentity),
           worktreeRoot: opts.worktreeRoot,
         };
+        if (opts.cancelWorktree) {
+          const cancelResult = cancelWorktreeLease(leaseOpts, { force: Boolean(opts.cancelForce) });
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(cancelResult) + "\n");
+          } else {
+            process.stdout.write(formatWorktreeCancelResult(cancelResult) + "\n");
+          }
+          process.exit(cancelResult.ok ? 0 : cancelResult.reason === "git_error" ? 2 : 1);
+        }
         const result = opts.createWorktree
           ? createWorktreeLease(leaseOpts)
           : cleanWorktreeLease(leaseOpts);
