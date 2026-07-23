@@ -142,9 +142,11 @@ import {
   cleanWorktreeLease,
   cancelWorktreeLease,
   collectWorktreeGraph,
+  collectWorktreeHandoff,
   formatWorktreeLeaseResult,
   formatWorktreeCancelResult,
   formatWorktreeGraph,
+  formatWorktreeHandoff,
 } from "./worktree-lease.js";
 import { evaluateCommandPolicy, formatCommandPolicyDecision } from "./command-policy.js";
 import {
@@ -380,6 +382,7 @@ program
   .option("--cancel-worktree", "Cancel a leased git worktree, preserving committed work and failing closed on uncommitted work, and exit")
   .option("--cancel-force", "With --cancel-worktree, discard uncommitted work instead of refusing")
   .option("--list-workspaces", "List the leased parallel workspaces (worktrees) with branch and state (read-only, redacted) and exit")
+  .option("--handoff", "Emit a handoff brief for a leased workspace (by --task-identity/--agent-identity): branch, commits, changed paths, state (read-only, redacted) and exit")
   .option("--agent-identity <id>", "Stable agent identity for a leased worktree (with --create-worktree/--clean-worktree)")
   .option("--worktree-root <dir>", "Directory where leased worktrees live (default <workspace>/.oh-my-cli/worktrees)")
   .option("--command-policy <command>", "Evaluate one shell command against the offline command policy and exit")
@@ -1407,6 +1410,46 @@ program
           process.stdout.write(JSON.stringify(graph) + "\n");
         } else {
           process.stdout.write(formatWorktreeGraph(graph) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Handoff mode: a read-only, bounded, redacted handoff brief for one specific
+      // leased workspace (worktree-lease.ts collectWorktreeHandoff), identified by
+      // --task-identity/--agent-identity. Never mutates anything. Exits 0 (an
+      // absent lease is an absent handoff, not an error); exits 2 on a usage error
+      // (missing identity) or a non-repository target.
+      if (opts.handoff) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        if (!opts.taskIdentity) {
+          process.stderr.write("Error: --handoff requires --task-identity <id>\n");
+          process.exit(2);
+        }
+        if (!opts.agentIdentity) {
+          process.stderr.write("Error: --handoff requires --agent-identity <id>\n");
+          process.exit(2);
+        }
+        let handoff;
+        try {
+          handoff = collectWorktreeHandoff({
+            repo: opts.workspace,
+            taskIdentity: String(opts.taskIdentity),
+            agentIdentity: String(opts.agentIdentity),
+            worktreeRoot: opts.worktreeRoot,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(handoff) + "\n");
+        } else {
+          process.stdout.write(formatWorktreeHandoff(handoff) + "\n");
         }
         process.exit(0);
       }
