@@ -31,6 +31,9 @@ import { redactSecrets, redactHomePath } from "./permission-impact.js";
 export const WORKTREE_LEASE_SCHEMA = "oh-my-cli.worktree-lease";
 export const WORKTREE_LEASE_VERSION = 1;
 
+export const WORKTREE_GRAPH_SCHEMA = "oh-my-cli.worktree-graph";
+export const WORKTREE_GRAPH_VERSION = 1;
+
 /** Options shared by lease creation and cleanup. */
 export interface WorktreeLeaseOptions {
   /** The parent repository workspace the lease is carved from. */
@@ -120,6 +123,29 @@ export type WorktreeCancelResult =
       preserved: WorktreeCancelPreserved;
     }
   | { ok: false; reason: WorktreeCancelRefusalReason; message: string };
+
+/** One leased parallel workspace in the operator-visible graph (read-only). */
+export interface WorktreeGraphEntry {
+  /** Home-collapsed absolute path to the leased worktree. */
+  worktreePath: string;
+  /** Branch checked out in the worktree ("(detached)" when detached). */
+  branch: string;
+  /** Abbreviated HEAD commit of the worktree. */
+  head: string;
+  /** True when the worktree has uncommitted changes. */
+  dirty: boolean;
+}
+
+/** A bounded, redacted, read-only view of the repository's leased workspaces. */
+export interface WorktreeGraph {
+  schema: typeof WORKTREE_GRAPH_SCHEMA;
+  v: typeof WORKTREE_GRAPH_VERSION;
+  /** Home-collapsed lease worktree root that was enumerated. */
+  worktreeRoot: string;
+  entries: WorktreeGraphEntry[];
+  /** Count of workspaces beyond the bound (0 when none). */
+  truncated: number;
+}
 
 function redact(text: string): string {
   return redactSecrets(text).text;
@@ -523,6 +549,70 @@ export function cancelWorktreeLease(
   return { ok: true, cancelled: true, worktreeRemoved, forced: force, lease, preserved };
 }
 
+// Bound the workspace graph so a repository with many leases cannot inflate output.
+const MAX_GRAPH_ENTRIES = 100;
+
+/**
+ * Collect a read-only, bounded, redacted graph of the repository's leased parallel
+ * workspaces: the worktrees under the lease worktree root, each with its branch,
+ * abbreviated head, and clean/dirty state. Never mutates anything. Throws a
+ * redacted error when the target is not a repository.
+ */
+export function collectWorktreeGraph(opts: { repo: string; worktreeRoot?: string }): WorktreeGraph {
+  const repo = path.resolve(opts.repo);
+  const commonDir = repoCommonDir(repo);
+  if (commonDir === null) {
+    throw new Error("Worktree graph error: target is not a git repository");
+  }
+  const worktreeRoot = path.resolve(opts.worktreeRoot ?? defaultWorktreeRoot(commonDir));
+  const rootReal = safeRealpath(worktreeRoot);
+
+  const entries: WorktreeGraphEntry[] = [];
+  let current: { path?: string; head?: string; branch?: string; detached?: boolean } = {};
+  const flush = (): void => {
+    if (current.path) {
+      const pathReal = safeRealpath(current.path);
+      const underRoot =
+        pathReal === rootReal ||
+        pathReal.startsWith(rootReal + path.sep) ||
+        current.path.startsWith(worktreeRoot + path.sep);
+      if (underRoot && pathReal !== safeRealpath(repo)) {
+        entries.push({
+          worktreePath: redactHomePath(current.path),
+          branch: current.detached || !current.branch ? "(detached)" : current.branch.replace(/^refs\/heads\//, ""),
+          head: (current.head ?? "").slice(0, 12),
+          dirty: dirtyCount(current.path) > 0,
+        });
+      }
+    }
+    current = {};
+  };
+
+  const out = git(repo, ["worktree", "list", "--porcelain"]).stdout;
+  for (const line of out.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      flush();
+      current.path = line.slice("worktree ".length).trim();
+    } else if (line.startsWith("HEAD ")) {
+      current.head = line.slice("HEAD ".length).trim();
+    } else if (line.startsWith("branch ")) {
+      current.branch = line.slice("branch ".length).trim();
+    } else if (line.trim() === "detached") {
+      current.detached = true;
+    }
+  }
+  flush();
+
+  const bounded = entries.slice(0, MAX_GRAPH_ENTRIES);
+  return {
+    schema: WORKTREE_GRAPH_SCHEMA,
+    v: WORKTREE_GRAPH_VERSION,
+    worktreeRoot: redactHomePath(worktreeRoot),
+    entries: bounded,
+    truncated: Math.max(0, entries.length - bounded.length),
+  };
+}
+
 // --- formatting -------------------------------------------------------------
 
 /** A concise, redacted, human-readable lease result. */
@@ -556,6 +646,27 @@ export function formatWorktreeLeaseResult(
     lines.push("result:   refused");
     lines.push(`reason:   ${result.reason}`);
     lines.push(`detail:   ${redact(result.message)}`);
+  }
+  return lines.join("\n");
+}
+
+/** A concise, redacted, human-readable workspace graph. */
+export function formatWorktreeGraph(graph: WorktreeGraph): string {
+  const lines: string[] = [];
+  lines.push(`Worktree graph (${graph.schema} v${graph.v})`);
+  lines.push("─".repeat(40));
+  lines.push(`worktree root: ${graph.worktreeRoot}`);
+  if (graph.entries.length === 0) {
+    lines.push("workspaces: (none)");
+  } else {
+    lines.push(`workspaces: ${graph.entries.length}`);
+    for (const entry of graph.entries) {
+      lines.push(`  ${entry.worktreePath}`);
+      lines.push(`    branch: ${entry.branch}  head: ${entry.head}  state: ${entry.dirty ? "dirty" : "clean"}`);
+    }
+    if (graph.truncated > 0) {
+      lines.push(`  … ${graph.truncated} more workspace(s) beyond the bound`);
+    }
   }
   return lines.join("\n");
 }

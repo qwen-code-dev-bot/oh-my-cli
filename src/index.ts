@@ -141,8 +141,10 @@ import {
   createWorktreeLease,
   cleanWorktreeLease,
   cancelWorktreeLease,
+  collectWorktreeGraph,
   formatWorktreeLeaseResult,
   formatWorktreeCancelResult,
+  formatWorktreeGraph,
 } from "./worktree-lease.js";
 import { evaluateCommandPolicy, formatCommandPolicyDecision } from "./command-policy.js";
 import {
@@ -377,6 +379,7 @@ program
   .option("--clean-worktree", "Clean a leased git worktree after verified completion and exit")
   .option("--cancel-worktree", "Cancel a leased git worktree, preserving committed work and failing closed on uncommitted work, and exit")
   .option("--cancel-force", "With --cancel-worktree, discard uncommitted work instead of refusing")
+  .option("--list-workspaces", "List the leased parallel workspaces (worktrees) with branch and state (read-only, redacted) and exit")
   .option("--agent-identity <id>", "Stable agent identity for a leased worktree (with --create-worktree/--clean-worktree)")
   .option("--worktree-root <dir>", "Directory where leased worktrees live (default <workspace>/.oh-my-cli/worktrees)")
   .option("--command-policy <command>", "Evaluate one shell command against the offline command policy and exit")
@@ -1376,6 +1379,32 @@ program
           process.stdout.write(formatEvidenceVerification(result) + "\n");
         }
         process.exit(result.ok ? 0 : 1);
+      }
+
+      // List-workspaces mode: a read-only, bounded, redacted graph of the leased
+      // parallel workspaces (worktree-lease.ts collectWorktreeGraph). Never mutates
+      // anything. Exits 0 (an empty lease set is an empty graph, not an error);
+      // exits 2 on a usage error or a non-repository target.
+      if (opts.listWorkspaces) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let graph;
+        try {
+          graph = collectWorktreeGraph({ repo: opts.workspace, worktreeRoot: opts.worktreeRoot });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(graph) + "\n");
+        } else {
+          process.stdout.write(formatWorktreeGraph(graph) + "\n");
+        }
+        process.exit(0);
       }
 
       // Leased-worktree mode: create or clean one isolated git worktree per
