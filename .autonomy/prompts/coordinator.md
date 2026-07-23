@@ -60,18 +60,26 @@ After reconciliation, choose exactly one action in this order:
 5. triage and promote pending user Issues;
 6. run due post-merge targeted dogfood;
 7. run due daily global dogfood;
-8. run the due daily community scan;
-9. acquire the next trusted executable Issue using `issue-policy.yml`; or
-10. enter `idle` after a minimal inbox and recovery check.
+8. decompose the next dependency-ready roadmap parent;
+9. acquire the next trusted executable Issue using `issue-policy.yml`;
+10. run the due community scan; or
+11. enter `idle` after a minimal inbox and recovery check.
 
 Only that action owns product mutation during the tick. Never work on multiple
 Issues or product branches concurrently. A severe security Issue may pause
 ordinary work, but it does not create a second active product mutation.
 
-Community scanning and global dogfood are due every 24 hours. If either is more
-than six hours late while a normal Issue spans ticks, run the overdue
-non-mutating phase at the next commit boundary without releasing the Issue
-lease. Resume development on the following tick.
+Community scanning is due every 2 hours and may be at most one hour late.
+Select it only when there is no active lease; no resumable pull request, CI, or
+post-merge work; no pending user promotion or external intake; no normalized
+Issue awaiting activation; no agent-ready Issue; and no roadmap parent awaiting
+decomposition. Keep a blocked due scan pending until the next truly idle
+coordinator tick.
+
+Global dogfood is due every 24 hours. If it is more than six hours late while a
+normal Issue spans ticks, run the overdue non-mutating phase at the next commit
+boundary without releasing the Issue lease. Resume development on the following
+tick.
 
 ## States
 
