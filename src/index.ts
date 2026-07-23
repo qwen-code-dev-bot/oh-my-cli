@@ -79,6 +79,7 @@ import { collectExtensionDiscovery, formatExtensionDiscovery } from "./extension
 import { collectExtensionCompat, formatExtensionCompat } from "./extension-compat.js";
 import { collectTrustPosture, formatTrustPosture } from "./trust-posture.js";
 import { predictMergeConflict, formatConflictPrediction } from "./conflict-prediction.js";
+import { integrateBranch, formatIntegrationResult } from "./selective-integration.js";
 import {
   readRecoveryCheckpoint,
   readEvidenceFile,
@@ -298,6 +299,11 @@ program
     "Predict read-only whether merging <source> into the target would conflict (fail-closed) and exit",
   )
   .option("--conflict-target <target>", "Target revision for --predict-conflict (default HEAD)")
+  .option(
+    "--integrate <source>",
+    "Reviewably integrate <source> into the current branch (fail-closed, commit-identity-preserving merge) and exit",
+  )
+  .option("--integrate-dry-run", "With --integrate, show the preview without performing the merge")
   .option("--health", "Show MCP server and extension health inventory and exit")
   .option("--settings <path>", "Unified settings file for model config and --health (default ~/.oh-my-cli/settings.json)")
   .option("--effective-settings", "Show the effective, redacted, hierarchical settings snapshot (user + trusted project, validated; read-only) and exit")
@@ -1508,6 +1514,37 @@ program
           process.stdout.write(JSON.stringify(prediction) + "\n");
         } else {
           process.stdout.write(formatConflictPrediction(prediction) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Selective-integration mode: reviewably integrate a source branch into the
+      // current branch (selective-integration.ts). It reuses conflict prediction
+      // (#226) to refuse a conflicting merge, shows a bounded/redacted preview, and
+      // performs a non-fast-forward merge that preserves commit identity. Fails
+      // closed on a detached HEAD, dirty tree, unresolvable revision, predicted
+      // conflict, or failed merge. Exits 0 on success; exits 2 on a usage/state
+      // error.
+      if (opts.integrate) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let result;
+        try {
+          result = integrateBranch(opts.workspace, String(opts.integrate), {
+            dryRun: Boolean(opts.integrateDryRun),
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(result) + "\n");
+        } else {
+          process.stdout.write(formatIntegrationResult(result) + "\n");
         }
         process.exit(0);
       }
