@@ -19,6 +19,7 @@ export const FAILURE_CATEGORIES = [
   "hook_denied",
   "approval_denied",
   "folder_trust_denied",
+  "read_only_denied",
   "path_escape",
   "unknown_tool",
   "tool_error",
