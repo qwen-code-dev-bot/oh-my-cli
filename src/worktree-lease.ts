@@ -34,6 +34,9 @@ export const WORKTREE_LEASE_VERSION = 1;
 export const WORKTREE_GRAPH_SCHEMA = "oh-my-cli.worktree-graph";
 export const WORKTREE_GRAPH_VERSION = 1;
 
+export const WORKTREE_HANDOFF_SCHEMA = "oh-my-cli.worktree-handoff";
+export const WORKTREE_HANDOFF_VERSION = 1;
+
 /** Options shared by lease creation and cleanup. */
 export interface WorktreeLeaseOptions {
   /** The parent repository workspace the lease is carved from. */
@@ -145,6 +148,32 @@ export interface WorktreeGraph {
   entries: WorktreeGraphEntry[];
   /** Count of workspaces beyond the bound (0 when none). */
   truncated: number;
+}
+
+/**
+ * A bounded, redacted, read-only handoff brief for one specific leased workspace:
+ * the agent's branch, the commits it made, the paths it changed, and its
+ * clean/dirty state — for review before integration (#228) or cancellation (#230).
+ */
+export interface WorktreeHandoff {
+  schema: typeof WORKTREE_HANDOFF_SCHEMA;
+  v: typeof WORKTREE_HANDOFF_VERSION;
+  leaseId: string;
+  branch: string;
+  /** Home-collapsed absolute path to the leased worktree. */
+  worktreePath: string;
+  /** False when no lease exists for this identity (an absent handoff). */
+  present: boolean;
+  /** Abbreviated branch head ("" when absent). */
+  head: string;
+  /** True when the worktree has uncommitted changes. */
+  dirty: boolean;
+  /** Commits the agent made (branch commits not in the parent HEAD), bounded. */
+  commits: PreservedCommit[];
+  truncatedCommits: number;
+  /** Paths the agent changed (relative to the merge-base), bounded and redacted. */
+  changedPaths: string[];
+  truncatedPaths: number;
 }
 
 function redact(text: string): string {
@@ -613,6 +642,80 @@ export function collectWorktreeGraph(opts: { repo: string; worktreeRoot?: string
   };
 }
 
+// Bounds that keep a handoff brief bounded.
+const MAX_HANDOFF_COMMITS = 50;
+const MAX_HANDOFF_PATHS = 100;
+
+/**
+ * Collect a read-only, bounded, redacted handoff brief for one specific leased
+ * workspace (identified by task+agent identity, reusing the lease derivation).
+ * Reports the agent's branch, the commits it made (branch commits not in the
+ * parent HEAD), the paths it changed (relative to the merge-base), and its
+ * clean/dirty state. Never mutates anything. An absent lease yields present:false
+ * (not an error). Throws a redacted error on a missing identity or non-repository.
+ */
+export function collectWorktreeHandoff(opts: WorktreeLeaseOptions): WorktreeHandoff {
+  const repo = path.resolve(opts.repo);
+  const task = (opts.taskIdentity ?? "").trim();
+  const agent = (opts.agentIdentity ?? "").trim();
+  if (!task || !agent) {
+    throw new Error("Worktree handoff error: both --task-identity and --agent-identity are required");
+  }
+  const commonDir = repoCommonDir(repo);
+  if (commonDir === null) {
+    throw new Error("Worktree handoff error: target is not a git repository");
+  }
+  const identity = deriveLeaseIdentity({ repoKey: commonDir, taskIdentity: task, agentIdentity: agent });
+  const worktreeRoot = path.resolve(opts.worktreeRoot ?? defaultWorktreeRoot(commonDir));
+  const worktreePath = path.join(worktreeRoot, identity.leaseId);
+
+  const wtListed = worktreeRegistered(repo, worktreePath);
+  const branchExists = branchRefExists(repo, identity.branch);
+  const handoff: WorktreeHandoff = {
+    schema: WORKTREE_HANDOFF_SCHEMA,
+    v: WORKTREE_HANDOFF_VERSION,
+    leaseId: identity.leaseId,
+    branch: identity.branch,
+    worktreePath: redactHomePath(worktreePath),
+    present: wtListed || branchExists,
+    head: "",
+    dirty: false,
+    commits: [],
+    truncatedCommits: 0,
+    changedPaths: [],
+    truncatedPaths: 0,
+  };
+  if (!handoff.present) return handoff;
+
+  handoff.head = git(repo, ["rev-parse", "--verify", "--quiet", identity.branch]).stdout.trim().slice(0, 12);
+  if (wtListed) {
+    handoff.dirty = dirtyCount(worktreePath) > 0;
+  }
+
+  const parentHead = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
+  if (parentHead && branchExists) {
+    const log = git(repo, ["log", "--format=%H%x09%s", `${parentHead}..${identity.branch}`]);
+    const commitLines = log.stdout.split("\n").filter((line) => line.trim() !== "");
+    handoff.commits = commitLines.slice(0, MAX_HANDOFF_COMMITS).map((line) => {
+      const tab = line.indexOf("\t");
+      const sha = tab >= 0 ? line.slice(0, tab) : line;
+      const subject = tab >= 0 ? line.slice(tab + 1) : "";
+      return { sha: sha.slice(0, 12), subject: redact(subject) };
+    });
+    handoff.truncatedCommits = Math.max(0, commitLines.length - handoff.commits.length);
+
+    const diff = git(repo, ["diff", "--name-only", `${parentHead}...${identity.branch}`]);
+    const paths = diff.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
+    handoff.changedPaths = paths.slice(0, MAX_HANDOFF_PATHS).map((p) => redactHomePath(p));
+    handoff.truncatedPaths = Math.max(0, paths.length - handoff.changedPaths.length);
+  }
+
+  return handoff;
+}
+
 // --- formatting -------------------------------------------------------------
 
 /** A concise, redacted, human-readable lease result. */
@@ -667,6 +770,37 @@ export function formatWorktreeGraph(graph: WorktreeGraph): string {
     if (graph.truncated > 0) {
       lines.push(`  … ${graph.truncated} more workspace(s) beyond the bound`);
     }
+  }
+  return lines.join("\n");
+}
+
+/** A concise, redacted, human-readable handoff brief. */
+export function formatWorktreeHandoff(handoff: WorktreeHandoff): string {
+  const lines: string[] = [];
+  lines.push(`Worktree handoff (${handoff.schema} v${handoff.v})`);
+  lines.push("─".repeat(40));
+  lines.push(`lease:    ${handoff.leaseId}`);
+  lines.push(`branch:   ${handoff.branch}`);
+  lines.push(`worktree: ${handoff.worktreePath}`);
+  if (!handoff.present) {
+    lines.push("status:   absent (no such lease)");
+    return lines.join("\n");
+  }
+  lines.push(`head:     ${handoff.head}`);
+  lines.push(`state:    ${handoff.dirty ? "dirty" : "clean"}`);
+  lines.push(`commits:  ${handoff.commits.length}`);
+  for (const commit of handoff.commits) {
+    lines.push(`  ${commit.sha}  ${commit.subject}`);
+  }
+  if (handoff.truncatedCommits > 0) {
+    lines.push(`  … ${handoff.truncatedCommits} more commit(s) beyond the bound`);
+  }
+  lines.push(`changed paths: ${handoff.changedPaths.length}`);
+  for (const path of handoff.changedPaths) {
+    lines.push(`  ${path}`);
+  }
+  if (handoff.truncatedPaths > 0) {
+    lines.push(`  … ${handoff.truncatedPaths} more path(s) beyond the bound`);
   }
   return lines.join("\n");
 }
