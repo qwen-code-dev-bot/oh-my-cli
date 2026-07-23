@@ -9,6 +9,7 @@ import {
   TERMINAL_SUBAGENT_STATES,
   SharedWorkspaceLaunchError,
   SubagentSpawnCapError,
+  SubagentBudgetError,
 } from "../../src/subagents.js";
 import type { SubagentRecord } from "../../src/subagents.js";
 
@@ -487,6 +488,84 @@ describe("SubagentManager: spawn cap", () => {
     expect((err as SubagentSpawnCapError).reason).toBe("spawn_cap");
     const msg = (err as Error).message;
     expect(msg).toContain("session subagent cap of 1 reached");
+    expect(msg).not.toContain("leak this label");
+    expect(msg).not.toContain("SECRET");
+    expect(msg).not.toContain("/home/user");
+  });
+});
+
+describe("SubagentManager: shared cost budget", () => {
+  it("spawns while under budget and refuses once the budget is exhausted", () => {
+    const mgr = new SubagentManager({ maxTotalCost: 1.0 });
+    mgr.spawn(() => deferred<string>().promise);
+    mgr.addCost(0.6);
+    // Still under budget (0.6 < 1.0): allowed.
+    mgr.spawn(() => deferred<string>().promise);
+    mgr.addCost(0.4);
+    // Now at the cap (1.0 >= 1.0): refused.
+    expect(() => mgr.spawn(() => deferred<string>().promise)).toThrow(SubagentBudgetError);
+  });
+
+  it("is independent of the spawn-count cap (budget refuses even under the count ceiling)", () => {
+    const mgr = new SubagentManager({ maxTotalSpawns: 100, maxTotalCost: 0.5 });
+    mgr.spawn(() => deferred<string>().promise);
+    mgr.addCost(0.5);
+    // Well under the spawn cap (1 of 100) but at the cost budget: refused by budget.
+    let err: unknown;
+    try {
+      mgr.spawn(() => deferred<string>().promise);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(SubagentBudgetError);
+    expect((err as SubagentBudgetError).reason).toBe("shared_budget");
+  });
+
+  it("imposes no budget when maxTotalCost is not configured", () => {
+    const mgr = new SubagentManager({ maxTotalSpawns: 100 });
+    mgr.addCost(1000);
+    // No budget configured: cost is tracked but never refuses.
+    expect(() => mgr.spawn(() => deferred<string>().promise)).not.toThrow();
+    expect(mgr.costUsage()).toEqual({ cumulativeCost: 1000, maxTotalCost: null, remaining: null });
+  });
+
+  it("reports cumulative cost, cap, and remaining via costUsage", () => {
+    const mgr = new SubagentManager({ maxTotalCost: 2.0 });
+    expect(mgr.costUsage()).toEqual({ cumulativeCost: 0, maxTotalCost: 2.0, remaining: 2.0 });
+    mgr.addCost(0.5);
+    expect(mgr.costUsage()).toEqual({ cumulativeCost: 0.5, maxTotalCost: 2.0, remaining: 1.5 });
+    mgr.addCost(3.0);
+    // Remaining floors at 0 once over budget.
+    expect(mgr.costUsage()).toEqual({ cumulativeCost: 3.5, maxTotalCost: 2.0, remaining: 0 });
+  });
+
+  it("ignores non-finite or negative cost reports", () => {
+    const mgr = new SubagentManager({ maxTotalCost: 1.0 });
+    mgr.addCost(Number.NaN);
+    mgr.addCost(-5);
+    mgr.addCost(Number.POSITIVE_INFINITY);
+    expect(mgr.costUsage().cumulativeCost).toBe(0);
+  });
+
+  it("throws on a non-positive or non-finite maxTotalCost", () => {
+    expect(() => new SubagentManager({ maxTotalCost: 0 })).toThrow(/positive finite number/);
+    expect(() => new SubagentManager({ maxTotalCost: -1 })).toThrow(/positive finite number/);
+    expect(() => new SubagentManager({ maxTotalCost: Number.NaN })).toThrow(/positive finite number/);
+  });
+
+  it("refuses with a deterministic, content-free reason (no secret/host/label leak)", () => {
+    const mgr = new SubagentManager({ maxTotalCost: 0.1 });
+    mgr.spawn(() => deferred<string>().promise, { label: "SECRET=abc123 /home/user/keys" });
+    mgr.addCost(0.1);
+    let err: unknown;
+    try {
+      mgr.spawn(() => deferred<string>().promise, { label: "leak this label" });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(SubagentBudgetError);
+    const msg = (err as Error).message;
+    expect(msg).toContain("shared cost budget of 0.1 exhausted");
     expect(msg).not.toContain("leak this label");
     expect(msg).not.toContain("SECRET");
     expect(msg).not.toContain("/home/user");
