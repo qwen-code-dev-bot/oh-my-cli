@@ -1,6 +1,6 @@
 schema: autonomy.openai/v1
-cadenceHours: 24
-maximumLatenessHours: 6
+cadenceHours: 2
+maximumLatenessHours: 1
 registeredSourcesOnly: true
 allowedSourceTypes:
   - official-repository
