@@ -65,6 +65,10 @@ export interface AgentOptions {
   // the deterministic task-fixture replay (#224) supplies a scripted provider so
   // the same fixture always produces the same run. Undefined ⇒ network provider.
   streamProvider?: StreamProvider;
+  // Read-only mode (#234): restrict the run to read-only tools and refuse any
+  // mutating tool fail-closed, regardless of approval mode or folder trust, so
+  // parallel investigators can safely share one workspace. Defaults to false.
+  readOnly?: boolean;
 }
 
 // Cumulative usage and cost reported after each round. `estimatedCostUsd` is an
@@ -431,6 +435,7 @@ export async function runAgent(
         preToolUseHooks,
         opts.bottleneck,
         opts.failureTaxonomy,
+        opts.readOnly ?? false,
         opts.turnImages,
       );
       sink.toolResult({ id: tc.id, name: tc.name, result, round });
@@ -473,12 +478,25 @@ async function executeToolCall(
   preToolUseHooks: readonly PreToolUseHook[],
   bottleneck: BottleneckCollector | undefined,
   failureTaxonomy: FailureTaxonomyCollector | undefined,
+  readOnly: boolean,
   turnImages?: TurnImageCollector,
 ): Promise<ToolResult> {
   const tool = toolMap.get(tc.name);
   if (!tool) {
     failureTaxonomy?.record("unknown_tool");
     return { content: `Error: unknown tool "${tc.name}"`, isError: true };
+  }
+
+  // Read-only mode (e.g. parallel investigation, #234) restricts the run to
+  // read-only tools and refuses any mutating tool fail-closed, regardless of
+  // approval mode or folder-trust state — yolo cannot widen it. This is what lets
+  // several investigators share one workspace safely without isolation.
+  if (readOnly && tool.category !== "read") {
+    failureTaxonomy?.record("read_only_denied");
+    return {
+      content: "Tool execution denied: read-only mode allows only read-only tools (list, glob, grep, read)",
+      isError: true,
+    };
   }
 
   // Folder-trust enforcement runs first and regardless of approval mode, so an

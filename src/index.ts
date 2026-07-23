@@ -404,6 +404,10 @@ program
     "Print a privacy-safe failure-cause taxonomy report for the run (unattended use)",
   )
   .option(
+    "--read-only",
+    "Restrict the run to read-only tools (list, glob, grep, read); refuse any mutating tool fail-closed (for safe parallel investigation)",
+  )
+  .option(
     "--replay-fixture <file>",
     "Replay a deterministic task fixture (bounded prompt + scripted responses) for a reproducible unattended run",
   )
@@ -2106,6 +2110,7 @@ program
               bottleneck: bottleneck?.collector,
               failureTaxonomy: failureTaxonomy?.collector,
               streamProvider,
+              readOnly: Boolean(opts.readOnly),
             });
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -2201,6 +2206,7 @@ program
           bottleneck: bottleneck?.collector,
           failureTaxonomy: failureTaxonomy?.collector,
           streamProvider,
+          readOnly: Boolean(opts.readOnly),
         });
         sealSession();
         recordTurnCheckpoint(turnImages);
