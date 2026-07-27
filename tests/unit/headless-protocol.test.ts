@@ -184,6 +184,8 @@ describe("createHeadlessSink: schema for every event", () => {
       costKnown: true,
       budgetUsd: 0.001,
       budgetReached: true,
+      ttftMs: 200,
+      tokensPerSecond: 100,
     });
     const u = out.records()[0];
     expect(u.type).toBe("usage");
@@ -196,6 +198,8 @@ describe("createHeadlessSink: schema for every event", () => {
     expect(u.costKnown).toBe(true);
     expect(u.budgetUsd).toBeCloseTo(0.001, 9);
     expect(u.budgetReached).toBe(true);
+    expect(u.ttftMs).toBe(200);
+    expect(u.tokensPerSecond).toBe(100);
   });
 
   it("reports no budget when none is set", () => {
@@ -208,12 +212,17 @@ describe("createHeadlessSink: schema for every event", () => {
       costKnown: false,
       budgetUsd: null,
       budgetReached: false,
+      ttftMs: null,
+      tokensPerSecond: null,
     });
     const u = out.records()[0];
     if (u.type !== "usage") throw new Error("unreachable");
     expect(u.budgetUsd).toBeNull();
     expect(u.budgetReached).toBe(false);
     expect(u.costKnown).toBe(false);
+    // Unavailable per-message timing is carried as null, never fabricated.
+    expect(u.ttftMs).toBeNull();
+    expect(u.tokensPerSecond).toBeNull();
   });
 });
 

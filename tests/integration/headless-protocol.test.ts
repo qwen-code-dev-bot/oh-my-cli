@@ -91,6 +91,29 @@ describe("Integration: headless JSON protocol", () => {
     }
   });
 
+  it("carries per-message TTFT and throughput in the usage event (#241)", async () => {
+    server.setResponses([{ type: "text", content: "Hello with usage" }]);
+
+    const r = await runCli(
+      ["-p", "Say hello", "--output", "json", "--workspace", tmpDir],
+      baseEnv,
+    );
+
+    expect(r.code).toBe(0);
+    const recs = parseHeadlessStream(r.stdout);
+    const usage = recs.find((x) => x.type === "usage");
+    expect(usage).toBeDefined();
+    if (usage?.type !== "usage") throw new Error("expected a usage record");
+    // The fake provider streams text and reports usage, so both per-message
+    // timing metrics are present (not null) and sane: a non-negative TTFT and a
+    // positive throughput over the call wall-time.
+    expect(usage.totalTokens).toBeGreaterThan(0);
+    expect(typeof usage.ttftMs).toBe("number");
+    expect(usage.ttftMs).toBeGreaterThanOrEqual(0);
+    expect(typeof usage.tokensPerSecond).toBe("number");
+    expect(usage.tokensPerSecond).toBeGreaterThan(0);
+  });
+
   it("reports a tool failure in-stream while the run still completes", async () => {
     fs.writeFileSync(path.join(tmpDir, "f.txt"), "hello");
     server.setResponses([
