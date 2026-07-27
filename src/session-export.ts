@@ -305,7 +305,10 @@ export function renderSessionMarkdown(
     lines.push("_(no messages)_");
   }
   for (const m of messages) {
-    lines.push(`### ${m.role}`);
+    // An interrupted assistant turn (#243) is labeled so the exported transcript
+    // never presents a preserved partial answer as a completed response.
+    const interrupted = m.role === "assistant" && m.interrupted === true;
+    lines.push(`### ${m.role}${interrupted ? " (interrupted)" : ""}`);
     lines.push("");
     if (m.tool_calls && m.tool_calls.length > 0) {
       for (const tc of m.tool_calls) {

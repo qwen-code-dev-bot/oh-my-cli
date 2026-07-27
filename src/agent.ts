@@ -121,7 +121,10 @@ export interface AgentCompaction {
 // renders the same lifecycle as a versioned JSON event stream.
 export interface AgentSink {
   assistantDelta(delta: string): void;
-  assistantTurn(text: string, round: number, opts: { final: boolean }): void;
+  // `interrupted` is true when the turn's provider stream failed after emitting
+  // text (#243): the text is preserved but the turn is incomplete. Absent/false
+  // for normal turns.
+  assistantTurn(text: string, round: number, opts: { final: boolean; interrupted?: boolean }): void;
   // `args` carries the tool's parsed arguments so a sink can render structured
   // detail (e.g. a file diff) without re-parsing; optional so existing sinks are
   // unaffected.
@@ -148,6 +151,14 @@ export function createConsoleSink(opts?: { messageUsage?: boolean }): AgentSink 
       process.stdout.write(delta);
     },
     assistantTurn: (_text, _round, opts) => {
+      if (opts.interrupted) {
+        // Terminate the partial line and show a plain-text (non-color-only)
+        // interruption indicator. The emitted text stays visible on stdout; the
+        // marker goes to stderr like the other run-level notes (#243).
+        process.stdout.write("\n");
+        process.stderr.write("[interrupted: incomplete response; the partial answer above was preserved]\n");
+        return;
+      }
       if (opts.final) process.stdout.write("\n");
     },
     toolStart: () => {},
@@ -389,6 +400,24 @@ export async function runAgent(
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      // Preserve a partial answer (#243): when the stream fails after emitting
+      // text, persist exactly one interrupted assistant turn carrying only the
+      // emitted text — never partial tool calls, raw provider errors, or
+      // credentials — and surface it to the sink BEFORE the terminal failure so
+      // consumers observe the partial record first. A failure before any text
+      // persists nothing (no empty entry). The run still terminates as
+      // provider_error with a non-zero exit; the partial turn is never reported
+      // as completed, and the no-retry-after-output invariant is unchanged.
+      if (assistantText.length > 0) {
+        const partial: SessionMessage = {
+          role: "assistant",
+          content: assistantText,
+          interrupted: true,
+        };
+        messages.push(partial);
+        opts.onMessage(partial);
+        sink.assistantTurn(assistantText, round, { final: false, interrupted: true });
+      }
       sink.providerError(msg);
       return {
         text: assistantText,

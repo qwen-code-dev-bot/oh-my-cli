@@ -13,6 +13,10 @@ export interface SessionMessage {
     function: { name: string; arguments: string };
   }>;
   tool_call_id?: string;
+  // Marks an assistant turn whose provider stream failed after emitting text
+  // (#243). The partial content is preserved durably but the turn is incomplete;
+  // it is never reported as a successful final answer. Absent on normal turns.
+  interrupted?: boolean;
   // Multimodal image attachments on a user message. Only a non-secret reference
   // (name, media type, size) is persisted; the data URL (raw bytes) lives solely
   // in the in-memory transcript sent to the provider and is stripped before this
