@@ -72,10 +72,73 @@ export interface TransientClassification {
   retryAfterMs: number | null;
 }
 
+// Stable reason class for an exhausted provider quota (#247), distinct from
+// transient rate limiting. Surfaced consistently across preflight, direct
+// invocation, the main-agent path, and headless output.
+export const QUOTA_REASON_CLASS = "quota_exhausted";
+
+// Bounded set of documented error code/type fragments that indicate exhausted
+// quota (as opposed to transient throttling). Matched case-insensitively against
+// structured code/type fields only — never arbitrary response bodies — so an
+// ambiguous 429/403 is never falsely labeled (false-negative safe).
+const QUOTA_SIGNALS = [
+  "insufficient_quota",
+  "insufficient-quota",
+  "quota_exceeded",
+  "quota-exceeded",
+  "quota_exhausted",
+  "quota-exhausted",
+  "resource_exhausted",
+  "resource-exhausted",
+  "billing_quota_exceeded",
+  "quota_limit_reached",
+  "quota_limit_exceeded",
+];
+
+// Detect an exhausted-quota provider failure from bounded structured fields: a
+// 429 or 403 whose code/type carries a documented quota signal. A bare 429
+// (transient throttling) or a bare 403 (auth) does NOT qualify.
+export function isQuotaExhausted(err: unknown): boolean {
+  const e = err as {
+    status?: number;
+    code?: string;
+    type?: string;
+    error?: { code?: string; type?: string };
+    cause?: { code?: string };
+  };
+  const status = typeof e.status === "number" ? e.status : undefined;
+  if (status !== 429 && status !== 403) return false;
+  const fields = [e.code, e.type, e.error?.code, e.error?.type, e.cause?.code]
+    .filter((f): f is string => typeof f === "string")
+    .map((f) => f.toLowerCase());
+  return fields.some((f) => QUOTA_SIGNALS.some((signal) => f.includes(signal)));
+}
+
+// Provider-neutral, secret-safe next-step guidance for an exhausted quota
+// (#247). Preserves the configured model and a redacted endpoint host for
+// orientation; never includes account/project IDs, credentials, or URL
+// path/query. Informational only — it never changes account, project, or model.
+export function quotaExhaustedGuidance(
+  opts: { model?: string; redactedHost?: string } = {},
+): string {
+  const model = opts.model ? ` for model "${opts.model}"` : "";
+  const host = opts.redactedHost ? ` (endpoint ${opts.redactedHost})` : "";
+  return (
+    `Provider quota appears exhausted${model}${host}. ` +
+    "Check the selected account/project quota and model access, then retry once quota is restored. " +
+    "This is not a transient rate limit, so it will not be retried automatically."
+  );
+}
+
 // Classify a provider error as transient (retryable) or not. Returns null for
-// non-retryable failures (auth, invalid request, unsupported model, …), which
-// must surface immediately.
+// non-retryable failures (auth, invalid request, unsupported model, exhausted
+// quota, …), which must surface immediately.
 export function classifyTransient(err: unknown): TransientClassification | null {
+  // Exhausted quota can carry a 429 but is NOT transient; classify it before the
+  // 429 rate-limit branch so it is never retried (#247).
+  if (isQuotaExhausted(err)) {
+    return null;
+  }
   const e = err as {
     status?: number;
     code?: string;

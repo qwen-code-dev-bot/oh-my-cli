@@ -2,8 +2,9 @@ import type { Config } from "./config.js";
 import type { SessionMessage } from "./session.js";
 import type { ToolDef, ToolResult } from "./tools.js";
 import { createTools, toolSchemasForOpenAI } from "./tools.js";
-import { streamChat, backoffDelayMs, RETRY_MAX_ATTEMPTS } from "./provider.js";
+import { streamChat, backoffDelayMs, RETRY_MAX_ATTEMPTS, isQuotaExhausted, quotaExhaustedGuidance } from "./provider.js";
 import type { StreamProvider } from "./provider.js";
+import { redactEndpointHost } from "./permission-impact.js";
 import type { Workspace } from "./workspace.js";
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
@@ -424,7 +425,16 @@ export async function runAgent(
           }
         }
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const rawMsg = err instanceof Error ? err.message : String(err);
+        // Surface a stable, secret-safe quota-exhausted guidance instead of raw
+        // provider prose when the failure is an exhausted quota (#247); other
+        // failures keep their existing message.
+        const msg = isQuotaExhausted(err)
+          ? quotaExhaustedGuidance({
+              model: opts.config.model,
+              redactedHost: redactEndpointHost(opts.config.baseUrl),
+            })
+          : rawMsg;
         // Preserve a partial answer (#243): when the stream fails after emitting
         // text, persist exactly one interrupted assistant turn carrying only the
         // emitted text — never partial tool calls, raw provider errors, or
