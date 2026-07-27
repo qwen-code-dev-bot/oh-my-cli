@@ -52,6 +52,12 @@ export type HeadlessEvent =
       costKnown: boolean;
       budgetUsd: number | null;
       budgetReached: boolean;
+      // Per-message responsiveness for this turn (#241). TTFT is the wait until
+      // the first streamed token; tokensPerSecond is the turn's output throughput
+      // over the call wall-time. Either is null when the provider did not stream
+      // text tokens or did not report usage/timing — omitted, never fabricated.
+      ttftMs: number | null;
+      tokensPerSecond: number | null;
     }
   // A transient provider failure is being retried within a round (bounded
   // backoff). Metadata only: which attempt, the transient reason class, and the
@@ -195,6 +201,8 @@ export function createHeadlessSink(writer: HeadlessWriter): AgentSink {
         costKnown: info.costKnown,
         budgetUsd: info.budgetUsd,
         budgetReached: info.budgetReached,
+        ttftMs: info.ttftMs,
+        tokensPerSecond: info.tokensPerSecond,
       });
     },
     retry: (info) => {

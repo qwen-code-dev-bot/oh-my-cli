@@ -11,6 +11,7 @@ import { evaluateCommandPolicy, policyDenialMessage } from "./command-policy.js"
 import { evaluatePreToolUseHooks, type PreToolUseHook } from "./hook-contract.js";
 import { folderTrustDenialMessage } from "./folder-trust.js";
 import { estimateCostUsd, lookupModelPrice, formatCostUsd } from "./cost.js";
+import { computeMessageTiming, formatMessageUsageLine } from "./message-usage.js";
 import { buildEffectiveSystemPrompt } from "./instruction-context.js";
 import { compactMessages, buildCompactedTranscript } from "./compaction.js";
 import type { LoadedImage } from "./image-input.js";
@@ -69,6 +70,10 @@ export interface AgentOptions {
   // mutating tool fail-closed, regardless of approval mode or folder trust, so
   // parallel investigators can safely share one workspace. Defaults to false.
   readOnly?: boolean;
+  // Injectable wall-clock for per-message timing (TTFT / tok/s). Defaults to
+  // Date.now; tests supply a deterministic clock so responsiveness metrics are
+  // reproducible. Undefined ⇒ Date.now.
+  now?: () => number;
 }
 
 // Cumulative usage and cost reported after each round. `estimatedCostUsd` is an
@@ -82,6 +87,11 @@ export interface AgentUsage {
   costKnown: boolean;
   budgetUsd: number | null;
   budgetReached: boolean;
+  // Per-message responsiveness for this turn (#241): time-to-first-token and
+  // output throughput. Null when the provider did not stream text tokens or did
+  // not report usage/timing — omitted downstream rather than guessed.
+  ttftMs: number | null;
+  tokensPerSecond: number | null;
 }
 
 // A transient provider failure is being retried within a round. Metadata only —
@@ -131,7 +141,8 @@ export interface AgentSink {
   requestApproval?(info: { name: string; args: Record<string, unknown> }): Promise<boolean>;
 }
 
-export function createConsoleSink(): AgentSink {
+export function createConsoleSink(opts?: { messageUsage?: boolean }): AgentSink {
+  const messageUsage = opts?.messageUsage ?? false;
   return {
     assistantDelta: (delta) => {
       process.stdout.write(delta);
@@ -145,6 +156,24 @@ export function createConsoleSink(): AgentSink {
       process.stderr.write(`\nProvider error: ${message}\n`);
     },
     usage: (info) => {
+      // Opt-in per-message usage line (#241): a redacted turn-level readout of
+      // tokens, estimated cost, TTFT, and throughput. Off by default so normal
+      // conversation output is unchanged; written to stderr like the other
+      // run-level notes so it never interleaves with assistant text on stdout.
+      if (messageUsage) {
+        process.stderr.write(
+          `\n${formatMessageUsageLine({
+            round: info.round,
+            promptTokens: info.tokens.prompt,
+            completionTokens: info.tokens.completion,
+            totalTokens: info.tokens.total,
+            estimatedCostUsd: info.estimatedCostUsd,
+            costKnown: info.costKnown,
+            ttftMs: info.ttftMs,
+            tokensPerSecond: info.tokensPerSecond,
+          })}\n`,
+        );
+      }
       // Keep normal output uncluttered; surface only the actionable budget stop.
       if (info.budgetReached && info.budgetUsd !== null) {
         process.stderr.write(
@@ -202,6 +231,8 @@ export async function runAgent(
   opts: AgentOptions,
 ): Promise<AgentResult> {
   const sink = opts.sink ?? createConsoleSink();
+  // Wall-clock used for per-message timing; injectable for deterministic tests.
+  const now = opts.now ?? Date.now;
   // Approval is owned by the sink when it offers a handler (the full-screen shell
   // coordinates the prompt within its raw-mode input model); otherwise the agent
   // falls back to the terminal prompt so non-interactive callers are unchanged.
@@ -322,9 +353,18 @@ export async function runAgent(
     let assistantText = "";
     const assistantToolCalls: Array<{ id: string; name: string; arguments: string }> = [];
 
+    // Per-message timing (#241): the wall-clock just before the request, the
+    // first streamed text token (for TTFT), and the turn's own completion tokens
+    // (for throughput). firstTokenAt stays null for a turn that streams no text
+    // (e.g. a pure tool-call turn), which omits TTFT downstream.
+    const roundStart = now();
+    let firstTokenAt: number | null = null;
+    let roundCompletionTokens: number | null = null;
+
     try {
       for await (const event of stream(opts.config, messages, { tools: schemas })) {
         if (event.type === "text") {
+          if (firstTokenAt === null) firstTokenAt = now();
           assistantText += event.delta;
           sink.assistantDelta(event.delta);
         } else if (event.type === "tool_call") {
@@ -335,6 +375,7 @@ export async function runAgent(
           tokens.completion += event.completionTokens;
           tokens.total += event.totalTokens;
           lastPromptTokens = event.promptTokens;
+          roundCompletionTokens = event.completionTokens;
         } else if (event.type === "retry") {
           retries++;
           sink.retry({
@@ -369,6 +410,14 @@ export async function runAgent(
         completion: tokens.completion,
       }).usd;
     }
+    // Per-message responsiveness for this turn (#241), derived from the captured
+    // timestamps; degrades to nulls when the provider gave no text token or usage.
+    const timing = computeMessageTiming({
+      requestStartMs: roundStart,
+      firstTokenMs: firstTokenAt,
+      generationEndMs: now(),
+      completionTokens: roundCompletionTokens,
+    });
     sink.usage({
       round,
       tokens: { ...tokens },
@@ -376,6 +425,8 @@ export async function runAgent(
       costKnown,
       budgetUsd,
       budgetReached: budgetReached(),
+      ttftMs: timing.ttftMs,
+      tokensPerSecond: timing.tokensPerSecond,
     });
 
     const final = assistantToolCalls.length === 0;

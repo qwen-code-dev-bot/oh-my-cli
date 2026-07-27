@@ -26,7 +26,7 @@ import {
 import { Workspace } from "./workspace.js";
 import { SessionStore } from "./session.js";
 import { runGoalCommand } from "./session-goal.js";
-import { runAgent } from "./agent.js";
+import { runAgent, createConsoleSink } from "./agent.js";
 import type { AgentResult } from "./agent.js";
 import type { ApprovalMode } from "./approval.js";
 import type { SessionMessage } from "./session.js";
@@ -2240,6 +2240,10 @@ program
           approvalMode,
           sessionId,
           onMessage,
+          // Opt-in per-message usage line (#241); off by default so the default
+          // conversation output is unchanged. The headless JSON stream always
+          // carries the same per-message timing in its `usage` event.
+          sink: createConsoleSink({ messageUsage: process.env.OMC_MESSAGE_USAGE === "1" }),
           budgetUsd,
           compactThreshold,
           mutatingAllowed,
