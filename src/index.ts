@@ -36,7 +36,8 @@ import { runPreflight, formatPreflight } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
 import { collectSessionSummaries, formatSessionList } from "./session-summary.js";
-import { runSessionPicker, resolveResumeTarget } from "./session-picker.js";
+import { runSessionPicker, resolveResumeTarget, shortSessionId } from "./session-picker.js";
+import { normalizeSessionName } from "./session-name.js";
 import {
   compactMessages,
   saveCompaction,
@@ -378,6 +379,8 @@ program
   .option("--export-session <session-id>", "Export a session locally as redacted Markdown + a deterministic JSON manifest and exit")
   .option("--out <dir>", "Output directory for --export-session (default: current directory)")
   .option("--force", "Overwrite existing --export-session output files")
+  .option("--rename-session <session-id>", "Set, replace, or clear a user-owned name for an exact session (with --session-name) and exit")
+  .option("--session-name <name>", "The name for --rename-session; empty/whitespace clears the override")
   .option("--compact <session-id>", "Compact a session into a bounded summary sidecar (original preserved) and exit")
   .option("--compact-threshold <tokens>", "Auto-compact the in-memory transcript when the latest prompt size reaches this (env: OMC_COMPACT_THRESHOLD)")
   .option("--undo-turn <session-id>", "Safely undo the most recent completed agent turn of a session (restores its files + transcript) and exit")
@@ -691,6 +694,41 @@ program
           const msg = err instanceof Error ? err.message : String(err);
           process.stderr.write(`${msg}\n`);
           process.exit(2);
+        }
+        process.exit(0);
+      }
+
+      // Session rename mode (#249): set, replace, or clear a user-owned name for
+      // an exact session. The name is normalized (bounded; control/escape/
+      // secret-like rejected; empty clears) and persisted atomically as bounded
+      // metadata — the transcript is never rewritten. Missing/corrupt targets fail
+      // closed (exit 2) without touching any other session.
+      if (opts.renameSession !== undefined) {
+        const store = new SessionStore();
+        const id = String(opts.renameSession);
+        if (opts.sessionName === undefined) {
+          process.stderr.write("Error: --rename-session requires --session-name <name> (empty clears the override)\n");
+          process.exit(2);
+        }
+        const status = store.integrity(id).status;
+        if (status === "missing") {
+          process.stderr.write(`Error: session ${shortSessionId(id)} was not found\n`);
+          process.exit(2);
+        }
+        if (status === "corrupt") {
+          process.stderr.write(`Error: session ${shortSessionId(id)} is corrupt and cannot be renamed safely\n`);
+          process.exit(2);
+        }
+        const normalized = normalizeSessionName(String(opts.sessionName));
+        if (!normalized.ok) {
+          process.stderr.write(`Error: ${normalized.reason}\n`);
+          process.exit(2);
+        }
+        store.writeName(id, normalized.name);
+        if (normalized.name === null) {
+          process.stdout.write(`Cleared the name for session ${shortSessionId(id)}.\n`);
+        } else {
+          process.stdout.write(`Named session ${shortSessionId(id)}: ${redactSecrets(normalized.name).text}\n`);
         }
         process.exit(0);
       }

@@ -154,6 +154,39 @@ export class SessionStore {
     fs.renameSync(temp, target);
   }
 
+  // Sidecar holding a user-owned session name (#249). A distinct extension keeps
+  // it out of listIds() (which matches *.jsonl). The name is bounded user
+  // metadata, validated by normalizeSessionName before it is written; the
+  // transcript history is never touched.
+  namePath(id: string): string {
+    return path.join(this.dir, `${id}.name.json`);
+  }
+
+  // Read a session's user-owned name, or null when none is set (or the sidecar is
+  // missing/unreadable). Reading never mutates the file.
+  readName(id: string): string | null {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.namePath(id), "utf-8")) as { name?: unknown };
+      return typeof parsed.name === "string" && parsed.name.length > 0 ? parsed.name : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Persist a user-owned session name atomically (temp + rename), or clear the
+  // override when `name` is null. Only the name sidecar is written; transcript
+  // bytes are never modified.
+  writeName(id: string, name: string | null): void {
+    const target = this.namePath(id);
+    if (name === null) {
+      fs.rmSync(target, { force: true });
+      return;
+    }
+    const temp = `${target}.tmp`;
+    fs.writeFileSync(temp, `${JSON.stringify({ name })}\n`, "utf-8");
+    fs.renameSync(temp, target);
+  }
+
   // Sidecar holding a session's durable background-task receipts. A distinct
   // extension keeps it out of listIds() (which matches *.jsonl). The persisted
   // form carries only redacted fields and opaque evidence digests — never task
