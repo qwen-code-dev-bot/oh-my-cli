@@ -26,6 +26,7 @@
 import path from "node:path";
 import OpenAI from "openai";
 import type { Config } from "./config.js";
+import { isQuotaExhausted, quotaExhaustedGuidance } from "./provider.js";
 import { redactHomePath, redactSecrets, redactEndpointHost } from "./permission-impact.js";
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
@@ -81,7 +82,8 @@ export type ProviderOutcome =
   | "empty" // the provider returned no content
   | "auth-rejected" // 401/403
   | "unsupported-model" // 404 referencing the model
-  | "rate-limited" // 429
+  | "rate-limited" // 429 (transient throttling)
+  | "quota-exhausted" // 429/403 with a documented quota signal (not retried)
   | "network-error" // connection failure
   | "api-error" // any other HTTP/API error
   | "timeout" // exceeded the hard timeout
@@ -212,7 +214,10 @@ export const openaiProviderRunner: ProviderRunner = async (opts) => {
         reason: `provider request exceeded the ${opts.timeoutMs}ms hard timeout`,
       };
     }
-    const classified = classifyProviderError(err);
+    const classified = classifyProviderError(err, {
+      model: opts.config.model,
+      redactedHost: redactEndpointHost(opts.config.baseUrl),
+    });
     return {
       outcome: classified.outcome,
       text: "",
@@ -241,7 +246,10 @@ function capOutput(text: string, maxBytes: number): { text: string; capped: bool
 // Classify a thrown SDK/network error into a bounded outcome. The credential is
 // never part of an SDK error message; the reason is still redacted when the
 // report is built.
-function classifyProviderError(err: unknown): {
+function classifyProviderError(
+  err: unknown,
+  context: { model?: string; redactedHost?: string } = {},
+): {
   outcome: ProviderOutcome;
   status: number | null;
   reason: string;
@@ -257,6 +265,11 @@ function classifyProviderError(err: unknown): {
   const code = e.code ?? e.cause?.code;
   const msg = e.message ?? e.error?.message ?? "";
   const lower = msg.toLowerCase();
+  // Exhausted quota (a 429/403 carrying a documented quota signal) is classified
+  // before auth/rate-limit so it is reported distinctly and never retried (#247).
+  if (isQuotaExhausted(err)) {
+    return { outcome: "quota-exhausted", status: status ?? null, reason: quotaExhaustedGuidance(context) };
+  }
   if (status === 401 || status === 403) {
     return { outcome: "auth-rejected", status, reason: `provider rejected authentication (${status})` };
   }

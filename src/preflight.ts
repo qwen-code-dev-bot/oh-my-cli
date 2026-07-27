@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import type { Config } from "./config.js";
 import { redactEndpointHost } from "./permission-impact.js";
+import { isQuotaExhausted, quotaExhaustedGuidance } from "./provider.js";
 
 export type PreflightResult =
   | { ok: true; model: string; latencyMs: number }
@@ -11,6 +12,7 @@ export type PreflightFailure =
   | "auth_rejected"
   | "network_failure"
   | "unsupported_model"
+  | "quota_exhausted"
   | "unknown_error";
 
 export async function runPreflight(config: Config): Promise<PreflightResult> {
@@ -48,6 +50,19 @@ function classifyError(err: unknown, config: Config): PreflightResult {
   const code = e.code ?? e.cause?.code;
   const msg = e.message ?? e.error?.message ?? "";
   const errMsg = e.error;
+
+  // Exhausted quota (a 429/403 carrying a documented quota signal) is classified
+  // before auth/rate-limit so it is reported distinctly and not retried (#247).
+  if (isQuotaExhausted(err)) {
+    return {
+      ok: false,
+      category: "quota_exhausted",
+      message: quotaExhaustedGuidance({
+        model: config.model,
+        redactedHost: redactEndpointHost(config.baseUrl),
+      }),
+    };
+  }
 
   if (status === 401 || status === 403) {
     return {
