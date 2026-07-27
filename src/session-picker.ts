@@ -13,6 +13,7 @@ import fs from "node:fs";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { collectSessionSummaries, formatSessionAge } from "./session-summary.js";
 import type { SessionSummary } from "./session-summary.js";
+import { sessionDisplayTitle } from "./session-name.js";
 import type { SessionStore } from "./session.js";
 
 // A session's resumability, derived from its checkpoint integrity and whether
@@ -25,8 +26,13 @@ export interface SessionPickerRow {
   id: string;
   // Short, stable display id (first uuid segment). Never transcript text.
   shortId: string;
-  // Goal objective when present, else a neutral "Session <shortId>" label.
-  // Redacted because a goal is user-authored text.
+  // The user-owned name (#249), redacted; undefined when none is set. Carried
+  // separately from `title` so search matches the full name even when the display
+  // title is clamped.
+  name?: string;
+  // Display title: explicit name, else goal objective, else a neutral
+  // "Session <shortId>" label. Redacted because both name and goal are
+  // user-authored text.
   title: string;
   workspace: string; // redacted, ~ collapsed, or "unknown"
   model: string; // redacted, or "unknown"
@@ -72,19 +78,21 @@ function workspaceExists(p: string): boolean {
   }
 }
 
-// Project a stored summary plus its goal title into a redacted picker row.
-// Pure: it never touches the filesystem, so rendering and redaction are
-// testable in isolation.
+// Project a stored summary plus its goal title and user-owned name into a
+// redacted picker row. Pure: it never touches the filesystem, so rendering and
+// redaction are testable in isolation.
 export function projectSessionRow(
   summary: SessionSummary,
-  opts: { title?: string; state: SessionPickerState },
+  opts: { name?: string | null; title?: string; state: SessionPickerState },
 ): SessionPickerRow {
   const shortId = shortSessionId(summary.id);
-  const goalTitle = opts.title?.trim();
-  const title = goalTitle ? clampTitle(redactSecrets(goalTitle).text) : `Session ${shortId}`;
+  const name = opts.name && opts.name.trim() ? redactSecrets(opts.name).text : null;
+  const goalTitle = opts.title && opts.title.trim() ? redactSecrets(opts.title).text : null;
+  const title = clampTitle(sessionDisplayTitle({ name, goalTitle, shortId }));
   return {
     id: summary.id,
     shortId,
+    name: name ?? undefined,
     title,
     workspace: redactWorkspace(summary.workspace),
     model: redactModel(summary.model),
@@ -112,6 +120,7 @@ export function collectSessionPickerRows(
   const summaries = collectSessionSummaries(store, { now });
   const rows = summaries.map((summary) =>
     projectSessionRow(summary, {
+      name: store.readName(summary.id),
       title: store.readGoal(summary.id).goal?.objective,
       state: classifyState(store, summary),
     }),
@@ -127,13 +136,14 @@ export function orderSessionRows(rows: SessionPickerRow[]): SessionPickerRow[] {
   );
 }
 
-// Case-insensitive substring match across the visible fields. Order is
-// preserved so filtering stays deterministic.
+// Case-insensitive substring match across the visible fields, including the
+// user-owned name (#249). Order is preserved so filtering stays deterministic
+// and stable recency ordering is unchanged.
 export function filterSessionRows(rows: SessionPickerRow[], query: string): SessionPickerRow[] {
   const q = query.trim().toLowerCase();
   if (!q) return [...rows];
   return rows.filter((row) =>
-    [row.shortId, row.id, row.title, row.workspace, row.model]
+    [row.shortId, row.id, row.name ?? "", row.title, row.workspace, row.model]
       .join(" ")
       .toLowerCase()
       .includes(q),

@@ -63,6 +63,8 @@ export interface SessionExportManifest {
   schema: typeof SESSION_EXPORT_SCHEMA;
   v: typeof SESSION_EXPORT_VERSION;
   sessionId: string;
+  /** The user-owned session name (#249), redacted; null when none is set. */
+  name: string | null;
   /** Redacted (home collapsed to ~); null when the session recorded none. */
   workspace: string | null;
   /** Redacted; null when the session recorded none. */
@@ -239,6 +241,10 @@ export function buildSessionManifest(
     schema: SESSION_EXPORT_SCHEMA,
     v: SESSION_EXPORT_VERSION,
     sessionId: id,
+    name: (() => {
+      const n = store.readName(id);
+      return n ? redact(n) : null;
+    })(),
     workspace: meta?.workspace ? redact(meta.workspace) : null,
     model: meta?.model ? redact(meta.model) : null,
     createdAt: typeof meta?.createdAt === "number" ? meta.createdAt : null,
@@ -264,6 +270,9 @@ export function renderSessionMarkdown(
   const lines: string[] = [];
   lines.push(`# Session export ${manifest.sessionId}`);
   lines.push("");
+  if (manifest.name) {
+    lines.push(`- Name: ${manifest.name}`);
+  }
   lines.push(`- Schema: ${manifest.schema} v${manifest.v}`);
   lines.push(`- Workspace: ${manifest.workspace ?? "(unknown)"}`);
   lines.push(`- Model: ${manifest.model ?? "(unknown)"}`);
