@@ -2232,6 +2232,121 @@ export function renderShell(state: ShellState): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Bounded incremental repainting (#245)
+// ---------------------------------------------------------------------------
+//
+// composeScreen is pure and cheap; the expensive part of streaming is terminal
+// I/O — clearing the alternate screen and rewriting every visible row for each
+// coalesced paint. These helpers let the driver repaint only the rows that
+// actually changed for an ordinary streamed delta, while keeping a deterministic
+// full repaint as the fail-safe for any structural change (resize, scroll,
+// overlay transition, explicit redraw, color-mode change) or write error. The
+// final visible content is always byte-for-byte the canonical full composition:
+// incremental paints write the very same composed rows, selectively.
+
+export interface RepaintPlan {
+  // True when the whole screen must be cleared and rewritten.
+  full: boolean;
+  // Row indices whose composed content differs from the previously painted
+  // screen (meaningful only when `full` is false).
+  changedRows: number[];
+  // Whether the cursor must be repositioned (it moved, or rows were rewritten).
+  cursorMoved: boolean;
+}
+
+// Decide how to repaint `next` given the previously painted screen `prev`. A
+// null `prev` (first paint), a forced full repaint, or a changed row count
+// (layout shifted) yields a full repaint; otherwise only differing rows are
+// reported so the driver can rewrite just those.
+export function planRepaint(
+  prev: ComposedScreen | null,
+  next: ComposedScreen,
+  opts: { forceFull: boolean },
+): RepaintPlan {
+  if (opts.forceFull || prev === null || prev.lines.length !== next.lines.length) {
+    return { full: true, changedRows: [], cursorMoved: true };
+  }
+  const changedRows: number[] = [];
+  for (let i = 0; i < next.lines.length; i++) {
+    if (prev.lines[i] !== next.lines[i]) changedRows.push(i);
+  }
+  const cursorMoved =
+    prev.cursorRow !== next.cursorRow || prev.cursorCol !== next.cursorCol;
+  return { full: false, changedRows, cursorMoved };
+}
+
+// A structural signature of the shell state: the fields that change row
+// ALIGNMENT or the byte palette (viewport, composer band height, scroll, the
+// active overlay, expanded blocks, color mode, hint footer, turn phase). When
+// this is unchanged between paints, only content changed and an incremental
+// repaint is safe; when it changes, the driver forces a full repaint. Content
+// fields (streaming text, composer text, status counters) are deliberately
+// omitted so ordinary streaming stays incremental.
+export function repaintSignature(state: ShellState): string {
+  const composerRows = composerTotalRows(
+    state.composer.text,
+    state.slashPreview,
+    state.goal,
+    state.viewport.cols,
+    state.referencePreview,
+  );
+  const overlay = state.sideQuestion
+    ? "side"
+    : state.stats
+      ? "stats"
+      : state.lsp
+        ? "lsp"
+        : state.tasks
+          ? "tasks"
+          : state.helpOpen
+            ? "help"
+            : "none";
+  return JSON.stringify([
+    state.viewport.rows,
+    state.viewport.cols,
+    composerRows,
+    state.scroll,
+    overlay,
+    state.sideQuestion?.phase ?? null,
+    [...(state.expanded ?? [])].sort((a, b) => a - b),
+    state.color,
+    state.colorDepth ?? (state.color ? "256" : "none"),
+    state.reducedMotion ?? false,
+    state.hintsLearned ?? false,
+    state.turn.phase,
+    state.composer.mode,
+    state.goal ? goalVisualState(state.goal, state.turn) : null,
+  ]);
+}
+
+// Local, per-shell render instrumentation (#245): counts composed screens and
+// how they were painted plus the terminal I/O they produced. Test-observable via
+// ConversationShellOptions.renderStats; never emitted as production telemetry.
+export interface RenderStats {
+  composeCount: number;
+  fullRepaints: number;
+  incrementalRepaints: number;
+  // Rows actually written to the terminal (a full repaint writes every visible
+  // row; an incremental repaint writes only the changed rows).
+  rowsWritten: number;
+  // Number of stdout.write calls performed by the painter.
+  writes: number;
+  // Total bytes written by the painter.
+  bytesWritten: number;
+}
+
+export function createRenderStats(): RenderStats {
+  return {
+    composeCount: 0,
+    fullRepaints: 0,
+    incrementalRepaints: 0,
+    rowsWritten: 0,
+    writes: 0,
+    bytesWritten: 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Capability detection
 // ---------------------------------------------------------------------------
 
@@ -2265,6 +2380,9 @@ const SHOW_CURSOR = "\x1b[?25h";
 const CLEAR = "\x1b[2J";
 const HOME = "\x1b[H";
 const RESET_ALL = "\x1b[0m";
+// Erase the entire current row (used to rewrite a single changed row without
+// leaving stale trailing cells from a previously longer line).
+const CLEAR_LINE = "\x1b[2K";
 const MOVE = (row: number, col: number) => `\x1b[${row + 1};${col + 1}H`;
 
 export interface ConversationShellOptions {
@@ -2304,6 +2422,10 @@ export interface ConversationShellOptions {
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
   env?: Record<string, string | undefined>;
+  // Optional render instrumentation the painter updates in place (#245). Lets a
+  // test observe composed-screen and terminal write counts; never read in
+  // production. When omitted, the shell keeps its own private counters.
+  renderStats?: RenderStats;
 }
 
 // Run the interactive conversation shell. Resolves never under normal operation:
@@ -2386,6 +2508,14 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   let paletteOpen = false;
   let renderScheduled = false;
   let cleaned = false;
+  // Bounded incremental repainting (#245): the last painted screen and its
+  // structural signature, used to rewrite only changed rows for ordinary
+  // streamed deltas. `forceFull` starts true so the first paint clears and
+  // draws the whole screen, and is re-asserted on explicit redraw or write error.
+  let lastPainted: ComposedScreen | null = null;
+  let lastSignature: string | null = null;
+  let forceFull = true;
+  const renderStats = opts.renderStats ?? createRenderStats();
   // Generation guard: a cancelled run stops contributing to the UI even though
   // the underlying provider call cannot be aborted (no new provider capability).
   let runGeneration = 0;
@@ -2445,13 +2575,58 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   function paint(): void {
     renderScheduled = false;
     if (!running || paletteOpen) return;
-    const { lines, cursorRow, cursorCol } = composeScreen(state);
-    // Full, deterministic repaint: clear, home, draw every row. The transcript
-    // scrolls within its region; the composer and status stay anchored, and no
-    // stale scrollback is left behind during rapid streaming.
-    write(HIDE_CURSOR + CLEAR + HOME);
-    write(lines.join("\r\n"));
-    write(MOVE(cursorRow, cursorCol) + SHOW_CURSOR);
+    const next = composeScreen(state);
+    renderStats.composeCount++;
+    const signature = repaintSignature(state);
+    // A structural change (resize, scroll, overlay transition, color mode, …) or
+    // an explicit redraw forces a full repaint; otherwise only changed rows are
+    // rewritten.
+    const plan = planRepaint(lastPainted, next, {
+      forceFull: forceFull || signature !== lastSignature,
+    });
+    try {
+      if (plan.full) {
+        // Full, deterministic repaint: clear, home, draw every row. The
+        // transcript scrolls within its region; the composer and status stay
+        // anchored, and no stale scrollback is left behind.
+        const head = HIDE_CURSOR + CLEAR + HOME;
+        const body = next.lines.join("\r\n");
+        const tail = MOVE(next.cursorRow, next.cursorCol) + SHOW_CURSOR;
+        write(head);
+        write(body);
+        write(tail);
+        renderStats.fullRepaints++;
+        renderStats.rowsWritten += next.lines.length;
+        renderStats.writes += 3;
+        renderStats.bytesWritten +=
+          Buffer.byteLength(head) + Buffer.byteLength(body) + Buffer.byteLength(tail);
+      } else {
+        // Incremental repaint: rewrite only the rows that changed, then
+        // reposition the cursor. The composed rows are identical to a full
+        // repaint, so the visible screen stays byte-for-byte canonical.
+        let out = HIDE_CURSOR;
+        for (const row of plan.changedRows) {
+          out += MOVE(row, 0) + CLEAR_LINE + next.lines[row];
+        }
+        if (plan.cursorMoved || plan.changedRows.length > 0) {
+          out += MOVE(next.cursorRow, next.cursorCol);
+        }
+        out += SHOW_CURSOR;
+        write(out);
+        renderStats.incrementalRepaints++;
+        renderStats.rowsWritten += plan.changedRows.length;
+        renderStats.writes += 1;
+        renderStats.bytesWritten += Buffer.byteLength(out);
+      }
+      lastPainted = next;
+      lastSignature = signature;
+      forceFull = false;
+    } catch (err) {
+      // A failed write leaves the visible screen uncertain; the next paint must
+      // reconstruct the terminal from scratch.
+      forceFull = true;
+      throw err;
+    }
   }
 
   function scheduleRender(): void {
@@ -3575,6 +3750,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         return;
       } // Ctrl+K
       if (b === 0x0c) {
+        forceFull = true; // explicit redraw reconstructs the whole screen
         paint();
         return;
       } // Ctrl+L redraw
