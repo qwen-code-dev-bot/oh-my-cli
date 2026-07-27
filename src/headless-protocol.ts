@@ -22,7 +22,10 @@ const MAX_NAME = 256;
 
 export type HeadlessEvent =
   | { type: "start"; sessionId: string; model: string; prompt: string }
-  | { type: "assistant"; round: number; final: boolean; text: string; truncated: boolean }
+  // `interrupted` is true when the turn's provider stream failed after emitting
+  // text (#243): the partial text is preserved and emitted before the terminal
+  // failure record, and is never a completed final answer. False for normal turns.
+  | { type: "assistant"; round: number; final: boolean; interrupted: boolean; text: string; truncated: boolean }
   | { type: "tool_start"; round: number; id: string; name: string }
   | {
       type: "tool_result";
@@ -168,7 +171,14 @@ export function createHeadlessSink(writer: HeadlessWriter): AgentSink {
     assistantTurn: (text, round, opts) => {
       if (!text) return;
       const s = safeText(text, MAX_TEXT);
-      writer.emit({ type: "assistant", round, final: opts.final, text: s.text, truncated: s.truncated });
+      writer.emit({
+        type: "assistant",
+        round,
+        final: opts.final,
+        interrupted: opts.interrupted === true,
+        text: s.text,
+        truncated: s.truncated,
+      });
     },
     toolStart: ({ id, name, round }) => {
       writer.emit({ type: "tool_start", round, id, name: safeName(name) });
