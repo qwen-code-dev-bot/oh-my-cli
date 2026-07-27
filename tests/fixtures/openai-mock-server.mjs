@@ -36,9 +36,10 @@ function parseRequest(body) {
     const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
     const last = messages[messages.length - 1];
     const prompt = last && typeof last.content === "string" ? last.content : "";
-    return { model, prompt };
+    const stream = parsed.stream === true;
+    return { model, prompt, stream };
   } catch {
-    return { model: "", prompt: "" };
+    return { model: "", prompt: "", stream: false };
   }
 }
 
@@ -82,11 +83,58 @@ function handle(model, prompt, res) {
   }
 }
 
+// Streaming (SSE) counterpart to `handle`, used by the main agent loop and the
+// workflow headless step path (both request stream:true). It echoes the same
+// content the non-streaming path would return, as a single text delta plus a
+// trailing usage chunk and [DONE], so streaming consumers receive a real,
+// non-empty completion. Error/status models fall back to the JSON error path.
+function handleStream(model, prompt, res) {
+  if (model === "auth" || model === "nomodel" || model === "ratelimit" || model === "hang") {
+    return handle(model, prompt, res);
+  }
+  let content;
+  switch (model) {
+    case "empty":
+      content = "";
+      break;
+    case "secret":
+      content = "leak ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 here";
+      break;
+    default:
+      content = prompt || "pong";
+      break;
+  }
+  res.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache",
+    connection: "keep-alive",
+  });
+  const id = "chatcmpl-test";
+  const chunkBase = { id, object: "chat.completion.chunk", created: 0, model: model || "mock" };
+  if (content) {
+    res.write(
+      `data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`,
+    );
+  }
+  res.write(
+    `data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`,
+  );
+  res.write(
+    `data: ${JSON.stringify({ ...chunkBase, choices: [], usage: { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8 } })}\n\n`,
+  );
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+
 export function startMockServer() {
   const server = http.createServer((req, res) => {
     readBody(req).then((body) => {
-      const { model, prompt } = parseRequest(body);
-      handle(model, prompt, res);
+      const { model, prompt, stream } = parseRequest(body);
+      if (stream) {
+        handleStream(model, prompt, res);
+      } else {
+        handle(model, prompt, res);
+      }
     });
   });
   return new Promise((resolve) => {

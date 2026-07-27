@@ -2,7 +2,7 @@ import type { Config } from "./config.js";
 import type { SessionMessage } from "./session.js";
 import type { ToolDef, ToolResult } from "./tools.js";
 import { createTools, toolSchemasForOpenAI } from "./tools.js";
-import { streamChat } from "./provider.js";
+import { streamChat, backoffDelayMs, RETRY_MAX_ATTEMPTS } from "./provider.js";
 import type { StreamProvider } from "./provider.js";
 import type { Workspace } from "./workspace.js";
 import type { ApprovalMode } from "./approval.js";
@@ -20,6 +20,13 @@ import type { BottleneckCollector } from "./run-bottleneck.js";
 import type { FailureTaxonomyCollector } from "./run-failure-taxonomy.js";
 
 const MAX_ROUNDS = 30;
+
+// Bounded wait between empty-completion recovery attempts (#244). Mirrors the
+// provider's own bounded backoff so an unattended run can never loop or overspend
+// indefinitely waiting for a non-empty answer.
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export interface AgentOptions {
   config: Config;
@@ -213,7 +220,10 @@ export function createConsoleSink(opts?: { messageUsage?: boolean }): AgentSink 
 export interface AgentResult {
   text: string;
   ok: boolean;
-  reason: "completed" | "provider_error" | "max_rounds" | "budget_reached";
+  // `empty_response` is the terminal anomaly when the provider keeps returning a
+  // stream with no assistant text and no valid tool call and the bounded
+  // empty-completion recovery is exhausted (#244).
+  reason: "completed" | "provider_error" | "max_rounds" | "budget_reached" | "empty_response";
   rounds: number;
   // Total transient provider retries across the run (0 when the provider never
   // failed transiently). Lets a consumer distinguish "exhausted retries"
@@ -362,67 +372,145 @@ export async function runAgent(
     }
 
     let assistantText = "";
-    const assistantToolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+    let assistantToolCalls: Array<{ id: string; name: string; arguments: string }> = [];
 
     // Per-message timing (#241): the wall-clock just before the request, the
     // first streamed text token (for TTFT), and the turn's own completion tokens
     // (for throughput). firstTokenAt stays null for a turn that streams no text
-    // (e.g. a pure tool-call turn), which omits TTFT downstream.
-    const roundStart = now();
+    // (e.g. a pure tool-call turn), which omits TTFT downstream. These are
+    // (re)assigned at the start of each attempt below; the placeholders here
+    // satisfy definite-assignment without consuming a clock read.
+    let roundStart = 0;
     let firstTokenAt: number | null = null;
     let roundCompletionTokens: number | null = null;
 
-    try {
-      for await (const event of stream(opts.config, messages, { tools: schemas })) {
-        if (event.type === "text") {
-          if (firstTokenAt === null) firstTokenAt = now();
-          assistantText += event.delta;
-          sink.assistantDelta(event.delta);
-        } else if (event.type === "tool_call") {
-          assistantToolCalls.push({ id: event.id, name: event.name, arguments: event.arguments });
-        } else if (event.type === "usage") {
-          hasUsage = true;
-          tokens.prompt += event.promptTokens;
-          tokens.completion += event.completionTokens;
-          tokens.total += event.totalTokens;
-          lastPromptTokens = event.promptTokens;
-          roundCompletionTokens = event.completionTokens;
-        } else if (event.type === "retry") {
-          retries++;
-          sink.retry({
-            round,
-            attempt: event.attempt,
-            maxAttempts: event.maxAttempts,
-            reasonClass: event.reasonClass,
-            delayMs: event.delayMs,
-          });
+    // Bounded empty-completion recovery (#244): a stream that ends with neither
+    // assistant text nor a valid tool call is an anomaly, not a completed answer.
+    // Re-invoke the provider up to the fixed retry cap, charging each attempt's
+    // usage to the budget and exposing each retry through the retry event path.
+    let emptyAttempts = 0;
+    let exhaustedEmpty = false;
+    while (true) {
+      assistantText = "";
+      assistantToolCalls = [];
+      roundStart = now();
+      firstTokenAt = null;
+      roundCompletionTokens = null;
+
+      try {
+        for await (const event of stream(opts.config, messages, { tools: schemas })) {
+          if (event.type === "text") {
+            if (firstTokenAt === null) firstTokenAt = now();
+            assistantText += event.delta;
+            sink.assistantDelta(event.delta);
+          } else if (event.type === "tool_call") {
+            assistantToolCalls.push({ id: event.id, name: event.name, arguments: event.arguments });
+          } else if (event.type === "usage") {
+            hasUsage = true;
+            tokens.prompt += event.promptTokens;
+            tokens.completion += event.completionTokens;
+            tokens.total += event.totalTokens;
+            lastPromptTokens = event.promptTokens;
+            roundCompletionTokens = event.completionTokens;
+          } else if (event.type === "retry") {
+            retries++;
+            sink.retry({
+              round,
+              attempt: event.attempt,
+              maxAttempts: event.maxAttempts,
+              reasonClass: event.reasonClass,
+              delayMs: event.delayMs,
+            });
+          }
         }
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Preserve a partial answer (#243): when the stream fails after emitting
-      // text, persist exactly one interrupted assistant turn carrying only the
-      // emitted text — never partial tool calls, raw provider errors, or
-      // credentials — and surface it to the sink BEFORE the terminal failure so
-      // consumers observe the partial record first. A failure before any text
-      // persists nothing (no empty entry). The run still terminates as
-      // provider_error with a non-zero exit; the partial turn is never reported
-      // as completed, and the no-retry-after-output invariant is unchanged.
-      if (assistantText.length > 0) {
-        const partial: SessionMessage = {
-          role: "assistant",
-          content: assistantText,
-          interrupted: true,
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Preserve a partial answer (#243): when the stream fails after emitting
+        // text, persist exactly one interrupted assistant turn carrying only the
+        // emitted text — never partial tool calls, raw provider errors, or
+        // credentials — and surface it to the sink BEFORE the terminal failure so
+        // consumers observe the partial record first. A failure before any text
+        // persists nothing (no empty entry). The run still terminates as
+        // provider_error with a non-zero exit; the partial turn is never reported
+        // as completed, and the no-retry-after-output invariant is unchanged.
+        if (assistantText.length > 0) {
+          const partial: SessionMessage = {
+            role: "assistant",
+            content: assistantText,
+            interrupted: true,
+          };
+          messages.push(partial);
+          opts.onMessage(partial);
+          sink.assistantTurn(assistantText, round, { final: false, interrupted: true });
+        }
+        sink.providerError(msg);
+        return {
+          text: assistantText,
+          ok: false,
+          reason: "provider_error",
+          rounds: round,
+          retries,
+          stats: statsSnapshot(),
+          tokens: tokensSnapshot(),
+          estimatedCostUsd: costSnapshot(),
+          costKnown,
         };
-        messages.push(partial);
-        opts.onMessage(partial);
-        sink.assistantTurn(assistantText, round, { final: false, interrupted: true });
       }
-      sink.providerError(msg);
+
+      // Charge this attempt's usage to the running cost estimate so every empty
+      // attempt is accounted before any retry.
+      if (hasUsage) {
+        costUsd = estimateCostUsd(opts.config.model, {
+          prompt: tokens.prompt,
+          completion: tokens.completion,
+        }).usd;
+      }
+
+      // A valid completion has at least one non-empty text delta or at least one
+      // complete tool call; anything else is an empty completion to recover from.
+      if (assistantText.length > 0 || assistantToolCalls.length > 0) break;
+
+      emptyAttempts++;
+      // The spend budget can prevent the next attempt.
+      if (budgetReached()) {
+        return {
+          text: finalText,
+          ok: false,
+          reason: "budget_reached",
+          rounds: round,
+          retries,
+          stats: statsSnapshot(),
+          tokens: tokensSnapshot(),
+          estimatedCostUsd: costSnapshot(),
+          costKnown,
+        };
+      }
+      if (emptyAttempts >= RETRY_MAX_ATTEMPTS) {
+        exhaustedEmpty = true;
+        break;
+      }
+      const delayMs = backoffDelayMs(emptyAttempts, null);
+      retries++;
+      sink.retry({
+        round,
+        attempt: emptyAttempts + 1,
+        maxAttempts: RETRY_MAX_ATTEMPTS,
+        reasonClass: "empty_response",
+        delayMs,
+      });
+      await sleep(delayMs);
+    }
+
+    if (exhaustedEmpty) {
+      // Persistent empty completions: a truthful terminal failure with a non-zero
+      // exit. No assistant turn (empty or otherwise) is persisted.
+      sink.providerError(
+        "provider returned an empty completion (no assistant text or tool call) after bounded retries",
+      );
       return {
-        text: assistantText,
+        text: "",
         ok: false,
-        reason: "provider_error",
+        reason: "empty_response",
         rounds: round,
         retries,
         stats: statsSnapshot(),
@@ -432,13 +520,6 @@ export async function runAgent(
       };
     }
 
-    // Refresh the running cost estimate from cumulative tokens and report usage.
-    if (hasUsage) {
-      costUsd = estimateCostUsd(opts.config.model, {
-        prompt: tokens.prompt,
-        completion: tokens.completion,
-      }).usd;
-    }
     // Per-message responsiveness for this turn (#241), derived from the captured
     // timestamps; degrades to nulls when the provider gave no text token or usage.
     const timing = computeMessageTiming({
