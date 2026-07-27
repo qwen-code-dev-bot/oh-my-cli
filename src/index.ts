@@ -179,6 +179,12 @@ import type { RunSummary } from "./run-summary.js";
 import { colorEnabled, createColorPalette } from "./color.js";
 import { detectColorDepth, formatProductBanner, VERSION } from "./product-banner.js";
 import { runConversationShell, isFullScreenCapable } from "./tui-shell.js";
+import {
+  installFatalBoundary,
+  FATAL_EXIT_CODE,
+  FATAL_REASON,
+  TERMINAL_RESTORE_SEQUENCE,
+} from "./fatal-boundary.js";
 import path from "node:path";
 import fs from "node:fs";
 
@@ -187,6 +193,52 @@ process.on("SIGINT", () => {
   process.stderr.write("\nInterrupted. Session saved.\n");
   process.exit(130);
 });
+
+// One bounded top-level fatal-failure boundary (#246) for uncaught exceptions and
+// unhandled rejections during an active run. It restores a usable terminal when
+// attached to a TTY, emits exactly one headless terminal record when the protocol
+// has started, and exits non-zero. The headless writer reference is set when a
+// headless run begins so the boundary can emit its terminal record.
+let activeHeadlessWriter: HeadlessWriter | null = null;
+installFatalBoundary({
+  cleanup: () => {
+    // Restore the terminal only when attached to a TTY; in headless mode stdout
+    // carries the protocol stream and must not receive control codes.
+    if (process.stdout.isTTY) {
+      try {
+        process.stdout.write(TERMINAL_RESTORE_SEQUENCE);
+      } catch {
+        /* best-effort terminal restore */
+      }
+    }
+  },
+  emitTerminalRecord: () => {
+    if (activeHeadlessWriter) {
+      activeHeadlessWriter.emit({
+        type: "complete",
+        ok: false,
+        exitCode: FATAL_EXIT_CODE,
+        rounds: 0,
+        reason: FATAL_REASON,
+      });
+    }
+  },
+});
+
+// Test-only deterministic fault injection (#246): trigger a real unhandled
+// rejection or uncaught exception so the fatal boundary's end-to-end contract can
+// be exercised by child-process integration tests. Inert unless OMC_FAULT_INJECT
+// is set; never active in ordinary runs.
+function maybeInjectFault(): void {
+  const fault = process.env.OMC_FAULT_INJECT;
+  if (fault === "unhandled-rejection") {
+    void Promise.reject(new Error("injected unhandled rejection (fault injection)"));
+  } else if (fault === "uncaught-exception") {
+    setTimeout(() => {
+      throw new Error("injected uncaught exception (fault injection)");
+    }, 0);
+  }
+}
 
 // Whether a command is present on PATH (or, on Windows, with a PATHEXT suffix).
 // Read-only: it never installs anything — the Issue #202 discovery invariant.
@@ -2130,6 +2182,10 @@ program
           // terminal `complete` record's exitCode matches the process exit code.
           const writer = new HeadlessWriter(process.stdout);
           writer.emit(startEvent({ sessionId, model: config.model, prompt: runPrompt }));
+          // Publish the writer so the fatal boundary (#246) can emit exactly one
+          // terminal record if the run fails with an uncaught asynchronous error.
+          activeHeadlessWriter = writer;
+          maybeInjectFault();
           const sink = createHeadlessSink(writer);
           const startedAt = Date.now();
           const turnImages = new TurnImageCollector();
@@ -2413,6 +2469,7 @@ program
             env: process.env,
           })
         ) {
+          maybeInjectFault();
           await runConversationShell({
             config,
             workspace,
