@@ -6,6 +6,10 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 
+function stripAnsi(value: string): string {
+  return value.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
 function runCli(
   args: string[],
   env: Record<string, string | undefined>,
@@ -188,14 +192,15 @@ describe("Integration: workflow contract", () => {
       ["--run-workflow", "ci-readonly", "--workspace", tmpRoot],
       runEnv(home),
     );
+    const output = stripAnsi(r.stdout);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("DYNAMIC WORKFLOW");
-    expect(r.stdout).toContain("ci-readonly");
-    expect(r.stdout).toContain("◆ RUNNING  1/2");
-    expect(r.stdout).toContain("● DONE     1/2");
-    expect(r.stdout).toContain("◆ RUNNING  2/2");
-    expect(r.stdout).toContain("● DONE     2/2");
-    expect(r.stdout).toContain("✓ COMPLETED  2/2 steps");
+    expect(output).toContain("DYNAMIC WORKFLOW");
+    expect(output).toContain("ci-readonly");
+    expect(output).toContain("◆ RUNNING  1/2");
+    expect(output).toContain("● DONE     1/2");
+    expect(output).toContain("◆ RUNNING  2/2");
+    expect(output).toContain("● DONE     2/2");
+    expect(output).toContain("✓ COMPLETED  2/2 steps");
   });
 
   it("makes a halted human-readable run explicit without running queued work", async () => {
@@ -213,12 +218,13 @@ describe("Integration: workflow contract", () => {
       },
     });
     const r = await runCli(["--run-workflow", "wf", "--workspace", tmpRoot], runEnv(home), 40_000);
+    const output = stripAnsi(r.stdout);
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain("◆ RUNNING  1/2");
-    expect(r.stdout).toContain("✕ FAILED   1/2");
-    expect(r.stdout).toContain("│   reason");
-    expect(r.stdout).toContain("○ SKIPPED  1 step");
-    expect(r.stdout).toContain("│  ✕ FAILED     1/2 steps");
+    expect(output).toContain("◆ RUNNING  1/2");
+    expect(output).toContain("✕ FAILED   1/2");
+    expect(output).toContain("│   reason");
+    expect(output).toContain("○ SKIPPED  1 step");
+    expect(output).toContain("│  ✕ FAILED     1/2 steps");
     expect(server.requests.length).toBeGreaterThan(0);
   });
 
