@@ -936,6 +936,30 @@ describe("tui-shell: keyboard-shortcut help panel (Issue #169)", () => {
     }
   });
 
+  it("uses a dense grouped two-column dashboard on wide terminals", () => {
+    const lines = renderShortcutHelp(72);
+    const text = lines.join("\n");
+    expect(text).toContain("PROMPT & DISCOVERY");
+    expect(text).toContain("VIEW & SESSION");
+    expect(lines.some((line) => line.includes("Enter") && line.includes("Tab"))).toBe(true);
+    expect(lines.length).toBeLessThanOrEqual(9);
+    for (const entry of SHORTCUT_HELP) {
+      expect(text).toContain(entry.keys.trim());
+      expect(text).toContain(entry.action);
+    }
+  });
+
+  it("falls back to a complete single column on narrow terminals", () => {
+    const lines = renderShortcutHelp(60);
+    const text = lines.join("\n");
+    expect(text).not.toContain("PROMPT & DISCOVERY");
+    expect(lines.length).toBeGreaterThan(renderShortcutHelp(80).length);
+    for (const entry of SHORTCUT_HELP) {
+      expect(text).toContain(entry.keys.trim());
+      expect(text).toContain(entry.action);
+    }
+  });
+
   it("is color-independent: identical visible text across color depths", () => {
     const plain = renderShortcutHelp(80).join("\n");
     const colored = renderShortcutHelp(80, shellStyle(true)).join("\n");
@@ -987,6 +1011,20 @@ describe("tui-shell: keyboard-shortcut help panel (Issue #169)", () => {
       // Composer + status stay anchored below the panel.
       expect(lines[viewport.rows - 1]).toContain("approval default");
     }
+  });
+
+  it("keeps the responsive product banner visible above Help", () => {
+    const wide = composeScreen(
+      baseState({ helpOpen: true, viewport: { rows: 36, cols: 120 } }),
+    ).lines.join("\n");
+    expect(wide).toContain("██╔═══██╗");
+    expect(wide).toContain(SHORTCUT_HELP_TITLE);
+
+    const compact = composeScreen(
+      baseState({ helpOpen: true, viewport: { rows: 24, cols: 80 } }),
+    ).lines.join("\n");
+    expect(compact).toContain("Qwen3.8-Max");
+    expect(compact).toContain(SHORTCUT_HELP_TITLE);
   });
 
   it("composeScreen renders the panel with no ANSI when color is disabled", () => {
