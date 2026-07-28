@@ -189,9 +189,37 @@ describe("Integration: workflow contract", () => {
       runEnv(home),
     );
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("Step 1/2");
-    expect(r.stdout).toContain("Step 2/2");
-    expect(r.stdout).toContain('Workflow "ci-readonly": completed (2/2 steps');
+    expect(r.stdout).toContain("DYNAMIC WORKFLOW");
+    expect(r.stdout).toContain("ci-readonly");
+    expect(r.stdout).toContain("◆ RUNNING  1/2");
+    expect(r.stdout).toContain("● DONE     1/2");
+    expect(r.stdout).toContain("◆ RUNNING  2/2");
+    expect(r.stdout).toContain("● DONE     2/2");
+    expect(r.stdout).toContain("✓ COMPLETED  2/2 steps");
+  });
+
+  it("makes a halted human-readable run explicit without running queued work", async () => {
+    server.setResponses([
+      { type: "text", failWith: { status: 500 } },
+      { type: "text", failWith: { status: 500 } },
+      { type: "text", failWith: { status: 500 } },
+      { type: "text", failWith: { status: 500 } },
+      { type: "text", failWith: { status: 500 } },
+    ]);
+    const home = homeWith({
+      workflows: {
+        contractVersion: 1,
+        definitions: { wf: { steps: [{ prompt: "one" }, { prompt: "two" }] } },
+      },
+    });
+    const r = await runCli(["--run-workflow", "wf", "--workspace", tmpRoot], runEnv(home), 40_000);
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain("◆ RUNNING  1/2");
+    expect(r.stdout).toContain("✕ FAILED   1/2");
+    expect(r.stdout).toContain("│   reason");
+    expect(r.stdout).toContain("○ SKIPPED  1 step");
+    expect(r.stdout).toContain("│  ✕ FAILED     1/2 steps");
+    expect(server.requests.length).toBeGreaterThan(0);
   });
 
   it("exits 2 on an unknown workflow name", async () => {

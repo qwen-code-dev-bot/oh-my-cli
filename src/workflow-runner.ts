@@ -13,6 +13,7 @@
 import { spawn } from "node:child_process";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { parseHeadlessStream, terminalRecord } from "./headless-protocol.js";
+import type { ColorDepth } from "./product-banner.js";
 import {
   resolveWorkflow,
   WORKFLOW_CONTRACT_SCHEMA,
@@ -49,6 +50,11 @@ export interface WorkflowRunReport {
   elapsedMs: number;
   settings: string;
   workspace: string;
+}
+
+export interface WorkflowRunStart {
+  workflow: string;
+  stepsTotal: number;
 }
 
 export interface StepExecutionContext {
@@ -163,6 +169,8 @@ export interface RunWorkflowOptions {
   env?: Record<string, string | undefined>;
   /** Override the step executor (tests). Defaults to spawning the CLI -p path. */
   executor?: StepExecutor;
+  /** Invoked with the redacted plan before the first executor call. */
+  onWorkflowStart?: (start: WorkflowRunStart) => void;
   /** Invoked with the redacted step view before a step runs (streaming). */
   onStepStart?: (step: WorkflowStepResult, stepsTotal: number) => void;
   /** Invoked with the redacted step result after a step completes (streaming). */
@@ -178,16 +186,22 @@ export async function runWorkflow(opts: RunWorkflowOptions): Promise<WorkflowRun
   const resolved = resolveWorkflow(opts.name, { settingsPath: opts.settingsPath });
   const definition = resolved.definition;
   const total = definition.steps.length;
+  const displayPrompts = definition.steps.map((step) =>
+    redactPromptForDisplay(step.prompt, opts.workspace),
+  );
+  opts.onWorkflowStart?.({
+    workflow: definition.name,
+    stepsTotal: total,
+  });
 
   const startedAt = Date.now();
   const steps: WorkflowStepResult[] = [];
   let result: "completed" | "failed" = "completed";
 
   for (let i = 0; i < total; i++) {
-    const displayPrompt = redactPromptForDisplay(definition.steps[i].prompt, opts.workspace);
     const pending: WorkflowStepResult = {
       index: i,
-      prompt: displayPrompt,
+      prompt: displayPrompts[i],
       ok: false,
       exitCode: null,
       elapsedMs: 0,
@@ -202,7 +216,7 @@ export async function runWorkflow(opts: RunWorkflowOptions): Promise<WorkflowRun
     });
     const stepResult: WorkflowStepResult = {
       index: i,
-      prompt: displayPrompt,
+      prompt: displayPrompts[i],
       ok: exec.ok,
       exitCode: exec.exitCode,
       elapsedMs: Date.now() - stepStart,
@@ -234,15 +248,204 @@ export async function runWorkflow(opts: RunWorkflowOptions): Promise<WorkflowRun
   };
 }
 
-// A single redacted line for one step, shared by the streaming and full-report
-// paths so the human rendering never diverges.
-export function formatWorkflowStepLine(step: WorkflowStepResult, stepsTotal: number): string {
-  const status = step.ok ? "ok" : "FAILED";
-  return `  Step ${step.index + 1}/${stepsTotal}: ${step.prompt} — ${status} (${step.elapsedMs}ms)`;
+export interface WorkflowConsoleStyle {
+  bold: string;
+  dim: string;
+  accent: string;
+  accentWarm: string;
+  success: string;
+  error: string;
+  reset: string;
+}
+
+export interface WorkflowFormatOptions {
+  style?: WorkflowConsoleStyle;
+  width?: number;
+}
+
+const PLAIN_WORKFLOW_STYLE: WorkflowConsoleStyle = {
+  bold: "",
+  dim: "",
+  accent: "",
+  accentWarm: "",
+  success: "",
+  error: "",
+  reset: "",
+};
+
+export function workflowConsoleStyle(depth: ColorDepth): WorkflowConsoleStyle {
+  if (depth === "none") return { ...PLAIN_WORKFLOW_STYLE };
+  if (depth === "basic") {
+    return {
+      bold: "\x1b[1m",
+      dim: "\x1b[2m",
+      accent: "\x1b[34m",
+      accentWarm: "\x1b[35m",
+      success: "\x1b[32m",
+      error: "\x1b[31m",
+      reset: "\x1b[0m",
+    };
+  }
+  return {
+    bold: "\x1b[1m",
+    dim: "\x1b[2m",
+    accent: "\x1b[38;5;27m",
+    accentWarm: "\x1b[38;5;176m",
+    success: "\x1b[38;5;114m",
+    error: "\x1b[38;5;203m",
+    reset: "\x1b[0m",
+  };
+}
+
+function workflowFormatOptions(opts: WorkflowFormatOptions): {
+  style: WorkflowConsoleStyle;
+  width: number;
+} {
+  return {
+    style: opts.style ?? PLAIN_WORKFLOW_STYLE,
+    width: Math.max(1, Math.floor(opts.width ?? 80)),
+  };
+}
+
+function clipWorkflowText(text: string, width: number): string {
+  const cells = Array.from(text);
+  if (cells.length <= width) return text;
+  if (width <= 1) return "…".slice(0, width);
+  return cells.slice(0, width - 1).join("") + "…";
+}
+
+function workflowStateLine(input: {
+  glyph: string;
+  label: string;
+  position?: string;
+  detail: string;
+  tone: string;
+  style: WorkflowConsoleStyle;
+  width: number;
+}): string {
+  const position = input.position ? `${input.position}  ` : "";
+  const prefix = `${input.glyph} ${input.label.padEnd(8)} ${position}`;
+  const plain = clipWorkflowText(prefix + input.detail, input.width);
+  const detailStart = Math.min(prefix.length, Array.from(plain).length);
+  const visiblePrefix = Array.from(plain).slice(0, detailStart).join("");
+  const visibleDetail = Array.from(plain).slice(detailStart).join("");
+  return `${input.tone}${visiblePrefix}${input.style.reset}${visibleDetail}`;
+}
+
+export function formatWorkflowStart(
+  start: WorkflowRunStart,
+  opts: WorkflowFormatOptions = {},
+): string {
+  const { style, width } = workflowFormatOptions(opts);
+  const lines = [
+    clipWorkflowText("╭─ DYNAMIC WORKFLOW", width),
+    clipWorkflowText(
+      `│  ${start.workflow}  ·  ${start.stepsTotal} step${start.stepsTotal === 1 ? "" : "s"}  ·  SEQUENTIAL`,
+      width,
+    ),
+    clipWorkflowText("╰─ execution started", width),
+  ];
+  return [
+    `${style.accentWarm}${lines[0]}${style.reset}`,
+    `${style.bold}${lines[1]}${style.reset}`,
+    `${style.dim}${lines[2]}${style.reset}`,
+  ].join("\n");
+}
+
+export function formatWorkflowStepStart(
+  step: WorkflowStepResult,
+  stepsTotal: number,
+  opts: WorkflowFormatOptions = {},
+): string {
+  const { style, width } = workflowFormatOptions(opts);
+  const position = `${step.index + 1}/${stepsTotal}`;
+  const lines = [
+    workflowStateLine({
+      glyph: "◆",
+      label: "RUNNING",
+      position,
+      detail: step.prompt,
+      tone: style.accentWarm,
+      style,
+      width,
+    }),
+  ];
+  const remaining = Math.max(0, stepsTotal - step.index - 1);
+  if (remaining > 0) {
+    lines.push(
+      workflowStateLine({
+        glyph: "○",
+        label: "QUEUED",
+        detail: `${remaining} step${remaining === 1 ? "" : "s"} remaining`,
+        tone: style.dim,
+        style,
+        width,
+      }),
+    );
+  }
+  return lines.join("\n");
+}
+
+// A redacted completion line for one step. The same formatter is used by the
+// streaming and full-report paths so terminal state never diverges.
+export function formatWorkflowStepLine(
+  step: WorkflowStepResult,
+  stepsTotal: number,
+  opts: WorkflowFormatOptions = {},
+): string {
+  const { style, width } = workflowFormatOptions(opts);
+  const line = workflowStateLine({
+    glyph: step.ok ? "●" : "✕",
+    label: step.ok ? "DONE" : "FAILED",
+    position: `${step.index + 1}/${stepsTotal}`,
+    detail: `${step.prompt}  ·  ${step.elapsedMs}ms`,
+    tone: step.ok ? style.success : style.error,
+    style,
+    width,
+  });
+  if (step.ok || !step.reason) return line;
+  const reason = clipWorkflowText(`│   reason  ${step.reason}`, width);
+  return `${line}\n${style.error}${reason}${style.reset}`;
+}
+
+export function formatWorkflowOutcome(
+  report: WorkflowRunReport,
+  opts: WorkflowFormatOptions = {},
+): string {
+  const { style, width } = workflowFormatOptions(opts);
+  const lines: string[] = [];
+  const skipped = report.stepsTotal - report.stepsRun;
+  if (skipped > 0) {
+    lines.push(
+      workflowStateLine({
+        glyph: "○",
+        label: "SKIPPED",
+        detail: `${skipped} step${skipped === 1 ? "" : "s"}  ·  halted after ${report.stepsRun}/${report.stepsTotal}`,
+        tone: style.dim,
+        style,
+        width,
+      }),
+    );
+  }
+  lines.push(`${style.accent}${clipWorkflowText("╭─ OUTCOME", width)}${style.reset}`);
+  const completed = report.result === "completed";
+  const outcome = completed
+    ? `│  ✓ COMPLETED  ${report.stepsRun}/${report.stepsTotal} steps  ·  ${report.elapsedMs}ms`
+    : `│  ✕ FAILED     ${report.stepsRun}/${report.stepsTotal} steps  ·  ${report.elapsedMs}ms`;
+  lines.push(
+    `${completed ? style.success : style.error}${clipWorkflowText(outcome, width)}${style.reset}`,
+  );
+  lines.push(
+    `${style.dim}${clipWorkflowText(`╰─ ${report.workflow}`, width)}${style.reset}`,
+  );
+  return lines.join("\n");
 }
 
 // A redacted, human-readable summary of a workflow run.
-export function formatWorkflowRun(report: WorkflowRunReport): string {
+export function formatWorkflowRun(
+  report: WorkflowRunReport,
+  opts: WorkflowFormatOptions = {},
+): string {
   const lines: string[] = [];
   lines.push(`Workflow:  ${report.workflow}`);
   lines.push(
@@ -251,10 +454,7 @@ export function formatWorkflowRun(report: WorkflowRunReport): string {
   lines.push(`Settings:  ${report.settings}`);
   lines.push(`Workspace: ${report.workspace}`);
   for (const step of report.steps) {
-    lines.push(formatWorkflowStepLine(step, report.stepsTotal));
-    if (!step.ok && step.reason) {
-      lines.push(`    reason: ${step.reason}`);
-    }
+    lines.push(formatWorkflowStepLine(step, report.stepsTotal, opts));
   }
   if (report.stepsRun < report.stepsTotal) {
     lines.push(`  Steps ${report.stepsRun + 1}-${report.stepsTotal}: skipped (halted)`);
