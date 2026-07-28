@@ -5,8 +5,12 @@ import path from "node:path";
 import {
   runWorkflow,
   redactPromptForDisplay,
+  formatWorkflowStart,
+  formatWorkflowStepStart,
   formatWorkflowStepLine,
+  formatWorkflowOutcome,
   formatWorkflowRun,
+  workflowConsoleStyle,
 } from "../../src/workflow-runner.js";
 import type {
   StepExecutor,
@@ -155,6 +159,30 @@ describe("runWorkflow: sequential execution and safe failure defaults", () => {
     expect(starts).toEqual([0, 1]);
     expect(ends).toEqual([0, 1]);
   });
+
+  it("announces the redacted workflow plan before the first executor call", async () => {
+    const settings = writeSettings({
+      workflows: {
+        contractVersion: 1,
+        definitions: { wf: { steps: [{ prompt: "inspect one" }, { prompt: "verify two" }] } },
+      },
+    });
+    const events: string[] = [];
+    await runWorkflow({
+      name: "wf",
+      settingsPath: settings,
+      workspace: tmpDir(),
+      env: {},
+      executor: async () => {
+        events.push("execute");
+        return { ok: true, exitCode: 0 };
+      },
+      onWorkflowStart: (start) => {
+        events.push(`start:${start.workflow}:${start.stepsTotal}`);
+      },
+    });
+    expect(events).toEqual(["start:wf:2", "execute", "execute"]);
+  });
 });
 
 describe("redactPromptForDisplay", () => {
@@ -193,8 +221,8 @@ describe("formatWorkflowStepLine and formatWorkflowRun", () => {
   };
 
   it("renders an ok step and a failed step with reason", () => {
-    expect(formatWorkflowStepLine(step, 2)).toContain("Step 1/2");
-    expect(formatWorkflowStepLine(step, 2)).toContain("ok");
+    expect(formatWorkflowStepLine(step, 2)).toContain("● DONE");
+    expect(formatWorkflowStepLine(step, 2)).toContain("1/2");
     const failed: WorkflowStepResult = { ...step, ok: false, reason: "provider_error" };
     expect(formatWorkflowStepLine(failed, 2)).toContain("FAILED");
   });
@@ -214,8 +242,81 @@ describe("formatWorkflowStepLine and formatWorkflowRun", () => {
       workspace: "~/ws",
     });
     expect(out).toContain("Workflow:  wf");
-    expect(out).toContain("reason: boom");
+    expect(out).toContain("reason  boom");
     expect(out).toContain("Steps 2-3: skipped (halted)");
     expect(out).toContain("Result:    failed (1/3 steps");
+  });
+
+  it("renders an append-only execution console with truthful state labels", () => {
+    const style = workflowConsoleStyle("none");
+    expect(
+      formatWorkflowStart(
+        { workflow: "release-readiness", stepsTotal: 3 },
+        { style, width: 72 },
+      ),
+    ).toContain("DYNAMIC WORKFLOW");
+    expect(
+      formatWorkflowStepStart(
+        { index: 0, prompt: "scope", ok: false, exitCode: null, elapsedMs: 0 },
+        3,
+        { style, width: 72 },
+      ),
+    ).toContain("◆ RUNNING");
+    expect(
+      formatWorkflowStepStart(
+        { index: 0, prompt: "scope", ok: false, exitCode: null, elapsedMs: 0 },
+        3,
+        { style, width: 72 },
+      ),
+    ).toContain("○ QUEUED");
+    expect(formatWorkflowStepLine(step, 2, { style, width: 72 })).toContain("● DONE");
+    const failed: WorkflowStepResult = { ...step, ok: false, reason: "provider_error" };
+    const failure = formatWorkflowStepLine(failed, 2, { style, width: 72 });
+    expect(failure).toContain("✕ FAILED");
+    expect(failure).toContain("reason  provider_error");
+    expect(
+      formatWorkflowOutcome(
+        {
+          schema: "oh-my-cli.workflow-contract",
+          version: 1,
+          contractVersion: 1,
+          workflow: "wf",
+          result: "failed",
+          stepsTotal: 3,
+          stepsRun: 1,
+          steps: [failed],
+          elapsedMs: 42,
+          settings: "~/.oh-my-cli/settings.json",
+          workspace: "~/ws",
+        },
+        { style, width: 72 },
+      ),
+    ).toContain("○ SKIPPED  2 steps");
+  });
+
+  it("keeps narrow and no-color output bounded and free of ANSI", () => {
+    const style = workflowConsoleStyle("none");
+    const out = formatWorkflowStepStart(
+      {
+        index: 0,
+        prompt: "inspect a very long repository boundary before changing anything",
+        ok: false,
+        exitCode: null,
+        elapsedMs: 0,
+      },
+      4,
+      { style, width: 34 },
+    );
+    expect(out).not.toContain("\x1b[");
+    expect(out.split("\n").every((line) => Array.from(line).length <= 34)).toBe(true);
+    expect(out).toContain("…");
+    expect(
+      formatWorkflowStart(
+        { workflow: "wf", stepsTotal: 1 },
+        { style, width: 8 },
+      )
+        .split("\n")
+        .every((line) => Array.from(line).length <= 8),
+    ).toBe(true);
   });
 });

@@ -17,7 +17,14 @@ import {
   resolvePreToolUseHooks,
   type PreToolUseHook,
 } from "./hook-contract.js";
-import { runWorkflow, formatWorkflowStepLine } from "./workflow-runner.js";
+import {
+  runWorkflow,
+  formatWorkflowStart,
+  formatWorkflowStepStart,
+  formatWorkflowStepLine,
+  formatWorkflowOutcome,
+  workflowConsoleStyle,
+} from "./workflow-runner.js";
 import {
   collectProfileList,
   formatProfileList,
@@ -1864,19 +1871,42 @@ program
           process.exit(2);
         }
         let report;
+        const workflowFormat = {
+          style: workflowConsoleStyle(
+            detectColorDepth({
+              noColor: opts.color === false,
+              env: process.env,
+              isTTY: process.stdout.isTTY,
+            }),
+          ),
+          width: process.stdout.columns ?? 80,
+        };
         try {
           report = await runWorkflow({
             name,
             settingsPath: resolveSettingsPath(opts.settings),
             workspace: opts.workspace,
             env: process.env,
+            onWorkflowStart:
+              format === "text"
+                ? (start) => {
+                    process.stdout.write(formatWorkflowStart(start, workflowFormat) + "\n");
+                  }
+                : undefined,
+            onStepStart:
+              format === "text"
+                ? (step, stepsTotal) => {
+                    process.stdout.write(
+                      formatWorkflowStepStart(step, stepsTotal, workflowFormat) + "\n",
+                    );
+                  }
+                : undefined,
             onStepEnd:
               format === "text"
                 ? (step, stepsTotal) => {
-                    process.stdout.write(formatWorkflowStepLine(step, stepsTotal) + "\n");
-                    if (!step.ok && step.reason) {
-                      process.stdout.write(`    reason: ${step.reason}\n`);
-                    }
+                    process.stdout.write(
+                      formatWorkflowStepLine(step, stepsTotal, workflowFormat) + "\n",
+                    );
                   }
                 : undefined,
           });
@@ -1888,15 +1918,7 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(report) + "\n");
         } else {
-          if (report.stepsRun < report.stepsTotal) {
-            process.stdout.write(
-              `  Steps ${report.stepsRun + 1}-${report.stepsTotal}: skipped (halted)\n`,
-            );
-          }
-          process.stdout.write(
-            `Workflow "${report.workflow}": ${report.result} ` +
-              `(${report.stepsRun}/${report.stepsTotal} steps, ${report.elapsedMs}ms)\n`,
-          );
+          process.stdout.write(formatWorkflowOutcome(report, workflowFormat) + "\n");
         }
         process.exit(report.result === "completed" ? 0 : 1);
       }
