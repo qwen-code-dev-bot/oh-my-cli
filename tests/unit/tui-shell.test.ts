@@ -215,37 +215,60 @@ describe("tui-shell: compact goal rail", () => {
     objective: "Ship workspace health",
     status: "active",
     createdAt: 1_000,
+    updatedAt: 1_000,
     revision: 3,
   };
 
   it("maps lifecycle and turn states to distinct text markers", () => {
     expect(goalVisualState(goal, { phase: "running-tool" })).toBe("running");
     expect(goalVisualState({ ...goal, status: "paused" }, { phase: "idle" })).toBe("paused");
+    expect(goalVisualState({ ...goal, status: "achieved" }, { phase: "idle" })).toBe("achieved");
     expect(goalVisualState(goal, { phase: "awaiting-approval" })).toBe("waiting");
-    expect(goalVisualState(goal, { phase: "completed" })).toBe("completed");
+    expect(goalVisualState(goal, { phase: "completed" })).toBe("ready");
     expect(goalVisualState(goal, { phase: "failed" })).toBe("failed");
   });
 
-  it("renders a stable two-line rail with elapsed time, revision, and controls", () => {
+  it("renders a four-line mission console with truthful lifecycle stages", () => {
     const lines = renderGoalRail(goal, { phase: "running-tool" }, 120, shellStyle("256"), {
       now: 121_000,
       reducedMotion: true,
     });
-    const text = lines.join("\n");
-    expect(lines).toHaveLength(2);
-    expect(text).toContain("◆ GOAL running · 2m · iteration 3");
+    const text = lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+    expect(lines).toHaveLength(4);
+    expect(text).toContain("GOAL / MISSION CONTROL");
+    expect(text).toContain("◆ RUNNING");
     expect(text).toContain("Ship workspace health");
-    expect(text).toContain("/goal status · pause · resume · clear");
+    expect(text).toContain("● SET");
+    expect(text).toContain("◆ EXECUTE");
+    expect(text).toContain("○ ACHIEVE");
+    expect(text).toContain("2m · revision 3");
+    expect(text).toContain("/goal status · pause · resume · achieve · clear");
   });
 
-  it("collapses on narrow terminals and stays textual without color or motion", () => {
+  it("lights the full stage rail only for a persisted achieved goal", () => {
+    const achieved = renderGoalRail(
+      { ...goal, status: "achieved", updatedAt: 121_000, revision: 4 },
+      { phase: "idle" },
+      120,
+      shellStyle(false),
+      { now: 121_000, reducedMotion: true },
+    ).join("\n");
+    expect(achieved).toContain("✓ ACHIEVED");
+    expect(achieved).toContain("● SET");
+    expect(achieved).toContain("● EXECUTE");
+    expect(achieved).not.toContain("○ ACHIEVE");
+  });
+
+  it("collapses to two complete status lines on narrow terminals without color or motion", () => {
     const lines = renderGoalRail(goal, { phase: "waiting" }, 54, shellStyle(false), {
       now: 31_000,
       reducedMotion: true,
     });
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain("◇ GOAL waiting · 30s · iteration 3");
-    expect(lines[0]).not.toMatch(ANSI);
+    expect(lines).toHaveLength(2);
+    expect(lines.join("\n")).toContain("◇ GOAL waiting · 30s · rev 3");
+    expect(lines.join("\n")).toContain("● SET");
+    expect(lines.join("\n")).toContain("○ ACHIEVE");
+    expect(lines.join("\n")).not.toMatch(ANSI);
   });
 
   it("appears and disappears directly from the persisted checkpoint", () => {
@@ -259,7 +282,7 @@ describe("tui-shell: compact goal rail", () => {
       },
     })).toEqual(goal);
     expect(goalRailFromCheckpoint({ revision: 4, goal: null })).toBeUndefined();
-    expect(composerTotalRows("", undefined, goal, 120)).toBe(5);
+    expect(composerTotalRows("", undefined, goal, 120)).toBe(7);
   });
 });
 

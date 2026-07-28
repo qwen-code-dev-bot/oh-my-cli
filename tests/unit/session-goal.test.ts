@@ -18,9 +18,9 @@ describe("session goal", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("sets, reports, pauses, resumes, and clears one durable goal", () => {
+  it("sets, reports, pauses, resumes, achieves, and clears one durable goal", () => {
     expect(runGoalCommand(store, "a", "ship the release", 1000)).toBe(
-      "Goal active (revision 1): ship the release",
+      "Goal set (revision 1): ship the release",
     );
     expect(runGoalCommand(store, "a", "status", 1100)).toContain("objective: ship the release");
     expect(runGoalCommand(store, "a", "pause", 1200)).toBe(
@@ -29,8 +29,28 @@ describe("session goal", () => {
     expect(runGoalCommand(store, "a", "resume", 1300)).toBe(
       "Goal resumed (revision 3): ship the release",
     );
-    expect(runGoalCommand(store, "a", "clear", 1400)).toBe("Goal cleared (revision 4)");
-    expect(new SessionStore(dir).readGoal("a")).toEqual({ revision: 4, goal: null });
+    expect(runGoalCommand(store, "a", "achieve", 1400)).toBe(
+      "Goal achieved (revision 4): ship the release",
+    );
+    expect(runGoalCommand(store, "a", "status", 1500)).toContain("Goal: achieved");
+    expect(new SessionStore(dir).readGoal("a").goal).toMatchObject({
+      objective: "ship the release",
+      status: "achieved",
+      updatedAt: 1400,
+    });
+    expect(runGoalCommand(store, "a", "clear", 1600)).toBe("Goal cleared (revision 5)");
+    expect(new SessionStore(dir).readGoal("a")).toEqual({ revision: 5, goal: null });
+  });
+
+  it("keeps achieved goals terminal until they are cleared or replaced", () => {
+    runGoalCommand(store, "a", "preflight workspace readiness", 1000);
+    runGoalCommand(store, "a", "achieve", 2000);
+    const achieved = store.readGoal("a");
+
+    expect(runGoalCommand(store, "a", "pause", 3000)).toContain("Goal: achieved");
+    expect(runGoalCommand(store, "a", "resume", 4000)).toContain("Goal: achieved");
+    expect(runGoalCommand(store, "a", "achieve", 5000)).toContain("Goal: achieved");
+    expect(store.readGoal("a")).toEqual(achieved);
   });
 
   it("replaces an objective while preserving session isolation", () => {
@@ -61,5 +81,7 @@ describe("session goal", () => {
     runGoalCommand(store, "a", "second", 1400);
     expect(isGoalRevisionCurrent(store, "a", 4)).toBe(false);
     expect(isGoalRevisionCurrent(store, "a", 5)).toBe(true);
+    runGoalCommand(store, "a", "achieve", 1500);
+    expect(isGoalRevisionCurrent(store, "a", 6)).toBe(false);
   });
 });

@@ -2448,7 +2448,7 @@ program
           })),
           {
             name: "/goal",
-            description: "Set, inspect, pause, resume, or clear the session goal",
+            description: "Set, inspect, pause, resume, achieve, or clear the session goal",
             action: (args = "") => runGoalCommand(store, sessionId, args),
           },
           {
