@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  DELIVERY_ISSUE_NUMBER,
   DELIVERY_PULL_REQUEST_NUMBER,
   DELIVERY_WEB_HOST,
   parseDeliveryWebPort,
@@ -28,6 +27,8 @@ describe("delivery Web renderer", () => {
     expect(directory).not.toContain("See the feature.");
     expect(directory).not.toContain("<h1>");
     expect(directory).not.toContain('class="site-footer"');
+    expect(directory).not.toContain('class="product-header"');
+    expect(directory).not.toContain('class="evidence-strip"');
     expect(directory).not.toContain('data-action="toggle-session"');
     expect(directory).not.toContain('data-action="run-workflow"');
   });
@@ -42,13 +43,9 @@ describe("delivery Web renderer", () => {
     expect(remote).toContain("Handshake before control");
     expect(remote).not.toContain("<h1>");
     expect(remote).not.toContain('class="site-footer"');
+    expect(remote).not.toContain('class="product-header"');
+    expect(remote).not.toContain('class="evidence-strip"');
     expect(remote).not.toContain('data-action="run-workflow"');
-    expect(remote).toContain(
-      `https://github.com/qwen-code-dev-bot/oh-my-cli/issues/${DELIVERY_ISSUE_NUMBER}`,
-    );
-    expect(remote).toContain(
-      `https://github.com/qwen-code-dev-bot/oh-my-cli/pull/${DELIVERY_PULL_REQUEST_NUMBER}`,
-    );
   });
 
   it("renders Dynamic Workflow as a focused feature page", () => {
@@ -58,9 +55,12 @@ describe("delivery Web renderer", () => {
     expect(workflow).toContain('class="workflow-links"');
     expect(workflow).toContain("Parallelize");
     expect(workflow).toContain("Approval gate");
+    expect(workflow).toContain(`Update PR #${DELIVERY_PULL_REQUEST_NUMBER}`);
     expect(workflow.match(/data-workflow-step=/g)).toHaveLength(7);
     expect(workflow).not.toContain("<h1>");
     expect(workflow).not.toContain('class="site-footer"');
+    expect(workflow).not.toContain('class="product-header"');
+    expect(workflow).not.toContain('class="evidence-strip"');
     expect(workflow).not.toContain('data-action="toggle-session"');
   });
 
