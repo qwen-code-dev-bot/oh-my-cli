@@ -32,7 +32,11 @@ import {
 } from "./model-profiles.js";
 import { Workspace } from "./workspace.js";
 import { SessionStore } from "./session.js";
-import { runGoalCommand } from "./session-goal.js";
+import {
+  goalExecutionRequest,
+  runGoalCommand,
+  settleGoalExecution,
+} from "./session-goal.js";
 import { runAgent, createConsoleSink } from "./agent.js";
 import type { AgentResult } from "./agent.js";
 import type { ApprovalMode } from "./approval.js";
@@ -2544,6 +2548,8 @@ program
             colorDepth,
             paletteCommands,
             loadGoal: () => store.readGoal(sessionId),
+            settleGoal: (revision, succeeded) =>
+              settleGoalExecution(store, sessionId, revision, succeeded),
             loadLsp: () => buildLspView(workspace.root),
             loadTasks: () => buildTaskView(store, sessionId, workspace.root),
             settingsPath,
@@ -2611,6 +2617,8 @@ program
               prompt();
               return;
             }
+            let promptText = answer;
+            let goalRevision: number | undefined;
             const slash = answer.trim().startsWith("/attach")
               ? { kind: "prompt" as const }
               : resolveSlashCommand(answer, paletteCommands.map((command) => command.name));
@@ -2650,8 +2658,19 @@ program
               if (command) {
                 const result = await command.action(slash.args);
                 if (result) process.stderr.write(`${result}\n`);
-                prompt();
-                return;
+                if (slash.name === "/goal") {
+                  const request = goalExecutionRequest(slash.args, store.readGoal(sessionId));
+                  if (request) {
+                    promptText = request.prompt;
+                    goalRevision = request.revision;
+                  } else {
+                    prompt();
+                    return;
+                  }
+                } else {
+                  prompt();
+                  return;
+                }
               }
             }
             if (answer.trim().startsWith("/attach")) {
@@ -2677,7 +2696,7 @@ program
             try {
               existingMessages = loadSessionMessages(store, sessionId);
               const images = pendingImages.splice(0);
-              await runAgent(answer, existingMessages.slice(0, -1), {
+              const result = await runAgent(promptText, existingMessages.slice(0, -1), {
                 config,
                 workspace,
                 approvalMode,
@@ -2689,6 +2708,15 @@ program
                 images,
                 preToolUseHooks,
               });
+              if (goalRevision !== undefined) {
+                const output = settleGoalExecution(
+                  store,
+                  sessionId,
+                  goalRevision,
+                  result.ok,
+                );
+                if (output) process.stderr.write(`${output}\n`);
+              }
             } catch (err: unknown) {
               const msg = err instanceof Error ? err.message : String(err);
               process.stderr.write(`Error: ${msg}\n`);
