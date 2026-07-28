@@ -192,6 +192,10 @@ import { colorEnabled, createColorPalette } from "./color.js";
 import { detectColorDepth, formatProductBanner, VERSION } from "./product-banner.js";
 import { runConversationShell, isFullScreenCapable } from "./tui-shell.js";
 import {
+  parseDeliveryWebPort,
+  startDeliveryWebServer,
+} from "./delivery-web.js";
+import {
   installFatalBoundary,
   FATAL_EXIT_CODE,
   FATAL_REASON,
@@ -357,6 +361,15 @@ program
     "default",
   )
   .option("--workspace <dir>", "Workspace directory", process.cwd())
+  .option(
+    "--delivery-web",
+    "Start the browser-native Remote Control and Dynamic Workflow delivery board",
+  )
+  .option(
+    "--web-port <port>",
+    "Loopback port for --delivery-web (default 4317)",
+    "4317",
+  )
   .option("--preflight", "Run a provider connectivity preflight and exit")
   .option("--sandbox-info", "Show effective sandbox isolation diagnostic and exit")
   .option("--trust-info", "Show the folder-trust decision for the workspace (read-only) and exit")
@@ -498,6 +511,15 @@ program
   )
   .action(async (opts) => {
     try {
+      if (opts.deliveryWeb) {
+        const port = parseDeliveryWebPort(opts.webPort);
+        const deliveryWeb = await startDeliveryWebServer({ port });
+        process.stdout.write(
+          `Oh My CLI delivery board: ${deliveryWeb.url}\nPress Ctrl-C to stop.\n`,
+        );
+        return;
+      }
+
       // Scorecard mode: compare two saved run summaries offline (no provider
       // config needed). Exits 0 when no documented regression threshold is
       // crossed, 1 on a regression, and 2 on a usage/input error.
