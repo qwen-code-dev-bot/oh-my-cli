@@ -19,35 +19,62 @@ afterEach(async () => {
 });
 
 describe("delivery Web renderer", () => {
-  it("renders browser-native Remote Control and Dynamic Workflow demos", () => {
-    const html = renderDeliveryWebPage();
+  it("renders a compact directory linking to separate feature pages", () => {
+    const directory = renderDeliveryWebPage();
 
-    expect(html).toContain('role="tablist"');
-    expect(html).toContain('id="remote-panel"');
-    expect(html).toContain('id="workflow-panel"');
-    expect(html).toContain("Remote Control");
-    expect(html).toContain("Dynamic Workflow");
-    expect(html).toContain(
-      `https://github.com/qwen-code-dev-bot/oh-my-cli/issues/${DELIVERY_ISSUE_NUMBER}`,
-    );
-    expect(html).toContain(
-      `https://github.com/qwen-code-dev-bot/oh-my-cli/pull/${DELIVERY_PULL_REQUEST_NUMBER}`,
-    );
-    expect(html).toContain("Delivery evidence");
-    expect(html).not.toContain("Computer Use");
-    expect(html).not.toContain("macOS");
-    expect(html).not.toContain("Dock");
+    expect(directory).toContain('href="/remote-control"');
+    expect(directory).toContain('href="/dynamic-workflow"');
+    expect(directory).toContain("Feature demos");
+    expect(directory).not.toContain("See the feature.");
+    expect(directory).not.toContain('data-action="toggle-session"');
+    expect(directory).not.toContain('data-action="run-workflow"');
   });
 
-  it("includes keyboard, narrow-layout, and reduced-motion affordances", () => {
+  it("renders Remote Control as a focused feature page", () => {
+    const remote = renderDeliveryWebPage("remote-control");
+
+    expect(remote).toContain("<h1>Remote Control</h1>");
+    expect(remote).toContain('data-action="toggle-session"');
+    expect(remote).toContain("Control stays visible");
+    expect(remote).toContain("Every action leaves a trace");
+    expect(remote).not.toContain('data-action="run-workflow"');
+    expect(remote).toContain(
+      `https://github.com/qwen-code-dev-bot/oh-my-cli/issues/${DELIVERY_ISSUE_NUMBER}`,
+    );
+    expect(remote).toContain(
+      `https://github.com/qwen-code-dev-bot/oh-my-cli/pull/${DELIVERY_PULL_REQUEST_NUMBER}`,
+    );
+  });
+
+  it("renders Dynamic Workflow as a focused feature page", () => {
+    const workflow = renderDeliveryWebPage("dynamic-workflow");
+
+    expect(workflow).toContain("<h1>Dynamic Workflow</h1>");
+    expect(workflow).toContain('data-action="run-workflow"');
+    expect(workflow).toContain("The plan is inspectable");
+    expect(workflow).toContain("History is append-only");
+    expect(workflow).not.toContain('data-action="toggle-session"');
+  });
+
+  it("keeps every page browser-native", () => {
+    for (const page of [
+      renderDeliveryWebPage(),
+      renderDeliveryWebPage("remote-control"),
+      renderDeliveryWebPage("dynamic-workflow"),
+    ]) {
+      expect(page).not.toContain("Computer Use");
+      expect(page).not.toContain("macOS");
+      expect(page).not.toContain("Dock");
+    }
+  });
+
+  it("includes narrow-layout and reduced-motion affordances", () => {
     const styles = renderDeliveryWebStyles();
     const script = renderDeliveryWebScript();
 
-    expect(styles).toContain("@media (max-width: 760px)");
-    expect(styles).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(styles).toContain("@media(max-width:720px)");
+    expect(styles).toContain("@media(prefers-reduced-motion:reduce)");
     expect(styles).toContain(":focus-visible");
-    expect(script).toContain('"ArrowLeft"');
-    expect(script).toContain('"ArrowRight"');
     expect(script).toContain('data-action="toggle-session"');
     expect(script).toContain('data-action="run-workflow"');
   });
@@ -77,7 +104,15 @@ describe("delivery Web server", () => {
     expect(page.headers.get("content-security-policy")).toContain(
       "connect-src 'none'",
     );
-    expect(await page.text()).toContain("See the feature.");
+    expect(await page.text()).toContain("Feature demos");
+
+    const remote = await fetch(`${activeServer.url}/remote-control`);
+    expect(remote.status).toBe(200);
+    expect(await remote.text()).toContain("<h1>Remote Control</h1>");
+
+    const workflow = await fetch(`${activeServer.url}/dynamic-workflow`);
+    expect(workflow.status).toBe(200);
+    expect(await workflow.text()).toContain("<h1>Dynamic Workflow</h1>");
 
     const script = await fetch(`${activeServer.url}/delivery-web.js`);
     expect(script.status).toBe(200);

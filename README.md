@@ -141,9 +141,9 @@ oh-my-cli
 
 ### Web delivery board
 
-Review the post-Desktop Remote Control and Dynamic Workflow surfaces in a
-browser-native interface, with their GitHub Issue and pull-request evidence
-alongside the live demos:
+Review the post-Desktop Remote Control and Dynamic Workflow surfaces on
+separate browser-native feature pages, with their defining behavior, live
+interactions, and GitHub delivery evidence:
 
 ```bash
 oh-my-cli --delivery-web
@@ -151,9 +151,10 @@ oh-my-cli --delivery-web
 ```
 
 The server listens on the loopback interface only. Choose another available
-loopback port with `--web-port <port>`. The board contains no Computer Use demo
-and does not expose credentials, settings, workspace paths, or a general file
-server.
+loopback port with `--web-port <port>`. Open `/remote-control` or
+`/dynamic-workflow` directly to show one feature. The pages contain no Computer
+Use demo and do not expose credentials, settings, workspace paths, or a general
+file server.
 
 ### Resume a session
 
