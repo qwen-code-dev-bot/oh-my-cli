@@ -1408,22 +1408,23 @@ export function renderStatusLine(
 export interface ShortcutEntry {
   keys: string;
   action: string;
+  section: "prompt" | "view";
 }
 
 // The live shortcut set. `?` and Esc are the panel's own toggle/dismiss; the
 // rest mirror the driver's onData bindings.
 export const SHORTCUT_HELP: ReadonlyArray<ShortcutEntry> = [
-  { keys: "Enter", action: "Send the prompt" },
-  { keys: "Alt+Enter / Shift+Enter", action: "Insert a new line" },
-  { keys: "Ctrl+K", action: "Open the command palette" },
-  { keys: "Tab", action: "Expand or collapse the selected block" },
-  { keys: "Up / Down", action: "Recall a previous prompt" },
-  { keys: "PageUp / PageDown", action: "Scroll the transcript" },
-  { keys: "Ctrl+L", action: "Redraw the screen" },
-  { keys: "Ctrl+C", action: "Interrupt, clear draft, or exit" },
-  { keys: "Ctrl+D", action: "Exit" },
-  { keys: "?", action: "Toggle this help panel" },
-  { keys: "Esc", action: "Close this help panel" },
+  { keys: "Enter", action: "Send prompt", section: "prompt" },
+  { keys: "Alt/Shift+Enter", action: "Insert new line", section: "prompt" },
+  { keys: "Ctrl+K", action: "Open palette", section: "prompt" },
+  { keys: "Up / Down", action: "Recall history", section: "prompt" },
+  { keys: "?", action: "Toggle Help", section: "prompt" },
+  { keys: "Tab", action: "Expand / collapse", section: "view" },
+  { keys: "PgUp / PgDn", action: "Scroll transcript", section: "view" },
+  { keys: "Ctrl+L", action: "Redraw screen", section: "view" },
+  { keys: "Ctrl+C", action: "Cancel / clear / exit", section: "view" },
+  { keys: "Ctrl+D", action: "Exit", section: "view" },
+  { keys: "Esc", action: "Close Help", section: "view" },
 ];
 
 // Stable title naming the panel; also used by tests to assert the panel never
@@ -1454,26 +1455,60 @@ export function renderShortcutHelp(width: number, style?: ShellStyle): string[] 
     success: "",
     reset: "",
   };
-  const keyCol = SHORTCUT_HELP.reduce((m, e) => Math.max(m, visibleWidth(e.keys)), 0);
-  const out: string[] = [];
-  out.push(clipVisible(`${s.bold}${s.accent}? ${SHORTCUT_HELP_TITLE}${s.reset}`, w));
-  out.push(clipVisible(`${s.dim}Press ? or Esc to close${s.reset}`, w));
-  out.push("");
-  for (const e of SHORTCUT_HELP) {
-    const keys = e.keys.padEnd(keyCol, " ");
-    out.push(clipVisible(`  ${s.accent}${keys}${s.reset}  ${s.dim}${e.action}${s.reset}`, w));
+  const header = clipVisible(
+    `${s.bold}${s.accent}? ${SHORTCUT_HELP_TITLE}${s.reset}${s.dim}  ·  ? / Esc close${s.reset}`,
+    w,
+  );
+  const entryLine = (entry: ShortcutEntry, keyCol: number, columnWidth: number): string =>
+    clipVisible(
+      `${s.accent}${entry.keys.padEnd(keyCol, " ")}${s.reset}  ${s.dim}${entry.action}${s.reset}`,
+      columnWidth,
+    );
+
+  if (w >= 72) {
+    const gap = "  ";
+    const leftWidth = Math.floor((w - visibleWidth(gap)) / 2);
+    const rightWidth = w - visibleWidth(gap) - leftWidth;
+    const left = SHORTCUT_HELP.filter((entry) => entry.section === "prompt");
+    const right = SHORTCUT_HELP.filter((entry) => entry.section === "view");
+    const leftKeyCol = left.reduce((max, entry) => Math.max(max, visibleWidth(entry.keys)), 0);
+    const rightKeyCol = right.reduce((max, entry) => Math.max(max, visibleWidth(entry.keys)), 0);
+    const pad = (line: string, target: number): string =>
+      line + " ".repeat(Math.max(0, target - visibleWidth(line)));
+    const out = [
+      header,
+      `${s.bold}${s.accentSoft}${pad("PROMPT & DISCOVERY", leftWidth)}${s.reset}${gap}${s.bold}${s.accentWarm}VIEW & SESSION${s.reset}`,
+    ];
+    const rows = Math.max(left.length, right.length);
+    for (let index = 0; index < rows; index++) {
+      const leftLine = left[index] ? entryLine(left[index], leftKeyCol, leftWidth) : "";
+      const rightLine = right[index] ? entryLine(right[index], rightKeyCol, rightWidth) : "";
+      out.push(
+        clipVisible(
+          `${pad(leftLine, leftWidth)}${gap}${rightLine}`,
+          w,
+        ),
+      );
+    }
+    return out;
   }
+
+  const keyCol = SHORTCUT_HELP.reduce((max, entry) => Math.max(max, visibleWidth(entry.keys)), 0);
+  const out = [header];
+  for (const entry of SHORTCUT_HELP) out.push(entryLine(entry, keyCol, w));
   return out;
 }
 
-// Fill a region of `height` rows with the centered help panel, clipping the
-// content when the region is shorter than the panel so it never overflows.
+// Fill a region of `height` rows with the help dashboard directly below the
+// identity region. One breathing row separates brand and controls when space
+// allows; remaining space stays below the dense content instead of centering it
+// in an otherwise empty canvas.
 function renderShortcutHelpPanel(height: number, cols: number, style: ShellStyle): string[] {
   const h = Math.max(0, Math.floor(height));
   if (h === 0) return [];
   const content = renderShortcutHelp(cols, style);
-  const body = content.slice(0, h);
-  const padTop = Math.floor((h - body.length) / 2);
+  const padTop = h > content.length ? 1 : 0;
+  const body = content.slice(0, h - padTop);
   const out: string[] = [];
   for (let i = 0; i < padTop; i++) out.push("");
   out.push(...body);
@@ -2194,11 +2229,14 @@ export function composeScreen(state: ShellState): ComposedScreen {
       ...renderTaskPanel(layout.composer.start, layout.viewport.cols, style, state.tasks),
     );
   } else if (state.helpOpen) {
-    // The help panel takes over the main area above the composer (identity +
-    // transcript) so the full shortcut list is visible in place; the composer
-    // and status stay anchored, so dismissing it returns to the same
-    // conversation (Issue #169).
-    lines.push(...renderShortcutHelpPanel(layout.composer.start, layout.viewport.cols, style));
+    // Help replaces only the transcript region. Product identity remains visible
+    // above it while the composer and status stay anchored below; dismissing the
+    // panel restores the untouched conversation (Issues #169 and #263).
+    const identityLines = renderIdentity(layout, style, state.version, state.status, depth);
+    lines.push(
+      ...identityLines,
+      ...renderShortcutHelpPanel(layout.transcriptRows, layout.viewport.cols, style),
+    );
   } else {
     const identityLines = renderIdentity(layout, style, state.version, state.status, depth);
     const transcriptLines =

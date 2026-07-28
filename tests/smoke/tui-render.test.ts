@@ -166,7 +166,7 @@ describe("smoke: keyboard-shortcut help panel renders coherently (Issue #169)", 
       for (const line of screen.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(cols);
       const joined = screen.lines.join("\n");
       expect(joined).toContain("Keyboard shortcuts");
-      expect(joined).toContain("Open the command palette"); // Ctrl+K binding advertised
+      expect(joined).toContain("Open palette"); // Ctrl+K binding advertised
       expect(joined).toContain("approval default"); // status footer stays anchored
       publish(`help ${rows}x${cols}`, screen.lines);
     });
