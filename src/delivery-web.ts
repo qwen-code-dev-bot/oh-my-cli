@@ -1,5 +1,10 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import {
+  renderSessionTimeMachinePage,
+  renderSessionTimeMachineScript,
+  renderSessionTimeMachineStyles,
+} from "./delivery-web-session-time-machine.js";
 
 export const DEFAULT_DELIVERY_WEB_PORT = 4317;
 export const DELIVERY_WEB_HOST = "127.0.0.1";
@@ -8,7 +13,8 @@ export const DELIVERY_PULL_REQUEST_NUMBER = 272;
 export type DeliveryWebPage =
   | "index"
   | "remote-control"
-  | "dynamic-workflow";
+  | "dynamic-workflow"
+  | "session-time-machine";
 
 export interface DeliveryWebServer {
   server: Server;
@@ -56,6 +62,16 @@ function directoryPage(): string {
           <span></span><span></span><span></span><span></span>
           <i></i>
         </div>
+      </a>
+      <a class="directory-card time-card" href="/session-time-machine">
+        <div class="card-copy">
+          <span class="card-kicker"><i></i>Durable replay</span>
+          <h2>Session Time Machine</h2>
+          <p>Scrub an agent session across prompts, tools, patches, and recovery checkpoints.</p>
+          <ul><li>Durable checkpoints</li><li>Tool-result replay</li><li>Recovery-safe timeline</li></ul>
+          <span class="open-page">Open feature page <b>→</b></span>
+        </div>
+        <div class="time-thumbnail" aria-hidden="true"><span></span><span></span><span></span></div>
       </a>
     </section>
   </main>`;
@@ -166,18 +182,16 @@ function dynamicWorkflowPage(): string {
 export function renderDeliveryWebPage(
   page: DeliveryWebPage = "index",
 ): string {
-  const title =
-    page === "index"
-      ? "Feature demos"
-      : page === "remote-control"
-        ? "Remote Control"
-        : "Dynamic Workflow";
-  const content =
-    page === "index"
-      ? directoryPage()
-      : page === "remote-control"
-        ? remoteControlPage()
-        : dynamicWorkflowPage();
+  const pages = {
+    index: ["Feature demos", directoryPage()],
+    "remote-control": ["Remote Control", remoteControlPage()],
+    "dynamic-workflow": ["Dynamic Workflow", dynamicWorkflowPage()],
+    "session-time-machine": [
+      "Session Time Machine",
+      renderSessionTimeMachinePage(),
+    ],
+  } satisfies Record<DeliveryWebPage, [string, string]>;
+  const [title, content] = pages[page];
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -210,7 +224,7 @@ export function renderDeliveryWebStyles(): string {
 @media(max-width:1040px){.feature-layout{grid-template-columns:1fr}.feature-notes{display:grid;grid-template-columns:repeat(3,1fr);gap:13px}.feature-notes>.section-label,.feature-notes>.try-note{grid-column:1/-1}.feature-notes article{border:0}.directory-card{grid-template-columns:1fr}.remote-thumbnail,.workflow-thumbnail{min-height:250px;margin:0 0 24px 30px}.evidence-strip{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:720px){.page-shell{padding:0 14px}.product-header{grid-template-columns:1fr auto;height:auto;min-height:68px}.product-nav{grid-column:1/-1;grid-row:2;width:100%;margin-bottom:12px}.product-nav a{flex:1;text-align:center}.bot-identity span:last-child{display:none}.directory-page,.feature-page{padding:26px 0}.directory-heading{grid-template-columns:1fr;gap:12px}.directory-heading h1{font-size:28px}.feature-directory{grid-template-columns:1fr}.directory-card{min-height:0}.card-copy{padding:24px}.remote-thumbnail,.workflow-thumbnail{min-height:220px;margin:0 0 18px 24px}.feature-heading{display:block}.feature-heading h1{font-size:27px}.github-link{display:inline-block;margin-top:18px}.heading-meta{align-items:start;flex-direction:column}.surface-toolbar{grid-template-columns:1fr auto}.surface-toolbar .latency,.surface-toolbar .run-state{display:none}.remote-console{grid-template-columns:1fr}.session-list{display:none}.live-viewport{min-height:520px}.controlled-content{grid-template-columns:1fr}.controlled-content aside{display:none}.workflow-canvas{grid-template-columns:1fr;padding:25px}.execution-thread,.workflow-node::before{display:none}.event-ledger{grid-template-columns:1fr;gap:12px}.feature-notes{grid-template-columns:1fr}.feature-notes>.section-label,.feature-notes>.try-note{grid-column:auto}.evidence-strip{grid-template-columns:1fr}}
 @media(max-width:720px){.page-shell,.feature-page{padding:0}.directory-page{padding:10px}.phone-link-panel{min-height:470px;border-right:0;border-bottom:1px solid var(--line)}.connection-beam{top:auto;right:50%;bottom:-20px;width:40px;transform:translateX(50%) rotate(90deg)}.connection-beam span{display:none}.workflow-canvas{display:block;padding:0}.workflow-board{transform-origin:top left}.surface-toolbar>div:first-child small{max-width:170px}}
-@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition-duration:.01ms!important;animation-duration:.01ms!important;animation-iteration-count:1!important}}`;
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition-duration:.01ms!important;animation-duration:.01ms!important;animation-iteration-count:1!important}}${renderSessionTimeMachineStyles()}`;
 }
 
 export function renderDeliveryWebScript(): string {
@@ -284,7 +298,8 @@ export function renderDeliveryWebScript(): string {
     };
     advance();
   });
-})();`;
+})();
+${renderSessionTimeMachineScript()}`;
 }
 
 function send(
@@ -315,6 +330,12 @@ function pageForPath(pathname: string): DeliveryWebPage | undefined {
     pathname === "/dynamic-workflow/"
   ) {
     return "dynamic-workflow";
+  }
+  if (
+    pathname === "/session-time-machine" ||
+    pathname === "/session-time-machine/"
+  ) {
+    return "session-time-machine";
   }
   return undefined;
 }

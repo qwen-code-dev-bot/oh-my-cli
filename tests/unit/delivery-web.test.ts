@@ -23,6 +23,7 @@ describe("delivery Web renderer", () => {
 
     expect(directory).toContain('href="/remote-control"');
     expect(directory).toContain('href="/dynamic-workflow"');
+    expect(directory).toContain('href="/session-time-machine"');
     expect(directory).toContain("Feature demos");
     expect(directory).not.toContain("See the feature.");
     expect(directory).not.toContain("<h1>");
@@ -64,11 +65,25 @@ describe("delivery Web renderer", () => {
     expect(workflow).not.toContain('data-action="toggle-session"');
   });
 
+  it("renders Session Time Machine as an interactive replay surface", () => {
+    const timeMachine = renderDeliveryWebPage("session-time-machine");
+
+    expect(timeMachine).toContain('data-action="play-replay"');
+    expect(timeMachine).toContain("Checkpoint inspector");
+    expect(timeMachine).toContain('data-replay-scrubber');
+    expect(timeMachine.match(/data-checkpoint=/g)).toHaveLength(6);
+    expect(timeMachine).not.toContain("<h1>");
+    expect(timeMachine).not.toContain('class="site-footer"');
+    expect(timeMachine).not.toContain('class="product-header"');
+    expect(timeMachine).not.toContain('class="evidence-strip"');
+  });
+
   it("keeps every page browser-native", () => {
     for (const page of [
       renderDeliveryWebPage(),
       renderDeliveryWebPage("remote-control"),
       renderDeliveryWebPage("dynamic-workflow"),
+      renderDeliveryWebPage("session-time-machine"),
     ]) {
       expect(page).not.toContain("Computer Use");
       expect(page).not.toContain("macOS");
@@ -85,6 +100,7 @@ describe("delivery Web renderer", () => {
     expect(styles).toContain(":focus-visible");
     expect(script).toContain('data-action="toggle-session"');
     expect(script).toContain('data-action="run-workflow"');
+    expect(script).toContain('data-action="play-replay"');
   });
 
   it("validates an explicit CLI port", () => {
@@ -121,6 +137,10 @@ describe("delivery Web server", () => {
     const workflow = await fetch(`${activeServer.url}/dynamic-workflow`);
     expect(workflow.status).toBe(200);
     expect(await workflow.text()).toContain("Approval gate");
+
+    const timeMachine = await fetch(`${activeServer.url}/session-time-machine`);
+    expect(timeMachine.status).toBe(200);
+    expect(await timeMachine.text()).toContain("Checkpoint inspector");
 
     const script = await fetch(`${activeServer.url}/delivery-web.js`);
     expect(script.status).toBe(200);
