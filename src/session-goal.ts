@@ -34,6 +34,7 @@ export function runGoalCommand(
 
   if (input === "pause") {
     if (!current.goal) return "Goal: nothing to pause";
+    if (current.goal.status === "achieved") return formatGoal(current);
     if (current.goal.status === "paused") return formatGoal(current);
     const next: SessionGoalCheckpoint = {
       revision: current.revision + 1,
@@ -45,6 +46,7 @@ export function runGoalCommand(
 
   if (input === "resume") {
     if (!current.goal) return "Goal: nothing to resume";
+    if (current.goal.status === "achieved") return formatGoal(current);
     if (current.goal.status === "active") return formatGoal(current);
     const next: SessionGoalCheckpoint = {
       revision: current.revision + 1,
@@ -60,14 +62,27 @@ export function runGoalCommand(
     return `Goal cleared (revision ${next.revision})`;
   }
 
+  if (input === "achieve") {
+    if (!current.goal) return "Goal: nothing to achieve";
+    if (current.goal.status === "achieved") return formatGoal(current);
+    const next: SessionGoalCheckpoint = {
+      revision: current.revision + 1,
+      goal: { ...current.goal, status: "achieved", updatedAt: now },
+    };
+    store.writeGoal(sessionId, next);
+    return `Goal achieved (revision ${next.revision}): ${next.goal?.objective}`;
+  }
+
   const objective = safeObjective(input);
-  if (!objective) return "Usage: /goal <objective> | status | pause | resume | clear";
+  if (!objective) {
+    return "Usage: /goal <objective> | status | pause | resume | achieve | clear";
+  }
   const next: SessionGoalCheckpoint = {
     revision: current.revision + 1,
     goal: { objective, status: "active", createdAt: now, updatedAt: now },
   };
   store.writeGoal(sessionId, next);
-  return `Goal active (revision ${next.revision}): ${objective}`;
+  return `Goal set (revision ${next.revision}): ${objective}`;
 }
 
 export function isGoalRevisionCurrent(

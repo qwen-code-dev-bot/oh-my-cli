@@ -181,6 +181,58 @@ describe("smoke: keyboard-shortcut help panel renders coherently (Issue #169)", 
   });
 });
 
+describe("smoke: Goal mission console renders from set through achieved (Issue #266)", () => {
+  function goalState(
+    rows: number,
+    cols: number,
+    status: "active" | "achieved",
+    colorDepth: "none" | "basic" | "256" = "256",
+  ): ShellState {
+    return {
+      ...stateFor(rows, cols, { color: colorDepth !== "none", colorDepth }),
+      transcript: [],
+      turn: { phase: "idle" },
+      now: 121_000,
+      goal: {
+        objective: "Preflight workspace readiness",
+        status,
+        createdAt: 1_000,
+        updatedAt: status === "achieved" ? 121_000 : 1_000,
+        revision: status === "achieved" ? 2 : 1,
+      },
+    };
+  }
+
+  for (const { rows, cols } of [
+    { rows: 24, cols: 80 },
+    { rows: 36, cols: 120 },
+  ]) {
+    it(`keeps Banner, Goal, composer, and status visible at ${rows}x${cols}`, () => {
+      const screen = composeScreen(goalState(rows, cols, "active"));
+      expect(screen.lines).toHaveLength(rows);
+      for (const line of screen.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(cols);
+      const text = screen.lines.join("\n");
+      expect(text).toMatch(/Qwen3\.8-Max|██╔═══██╗/);
+      expect(text).toContain("Preflight workspace readiness");
+      expect(text).toContain("EXECUTE");
+      expect(text).toContain("ACHIEVE");
+      expect(text).toContain("Ask a question");
+      expect(text).toContain("approval default");
+      publish(`goal set ${rows}x${cols}`, screen.lines);
+    });
+  }
+
+  it("renders an explicit achieved terminal state without color", () => {
+    const screen = composeScreen(goalState(36, 120, "achieved", "none"));
+    const text = screen.lines.join("\n");
+    expect(text).toContain("✓ ACHIEVED");
+    expect(text).toContain("● EXECUTE");
+    expect(text).not.toContain("○ ACHIEVE");
+    expect(text).not.toMatch(/\x1b\[/);
+    publish("goal achieved 36x120 (NO_COLOR)", screen.lines);
+  });
+});
+
 // The composer `@` reference picker (Issue #196, criterion 6): the E2E harness
 // captures these renders inside a real tmux pane, so they publish the readable
 // terminal evidence for keyboard selection, insertion hints, cancellation/

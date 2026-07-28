@@ -40,7 +40,7 @@ export interface SessionMeta {
 
 export interface SessionGoal {
   objective: string;
-  status: "active" | "paused";
+  status: "active" | "paused" | "achieved";
   createdAt: number;
   updatedAt: number;
 }
@@ -92,7 +92,7 @@ function isSessionGoal(value: unknown): value is SessionGoal {
   const goal = value as Partial<SessionGoal>;
   return (
     typeof goal.objective === "string" &&
-    (goal.status === "active" || goal.status === "paused") &&
+    (goal.status === "active" || goal.status === "paused" || goal.status === "achieved") &&
     typeof goal.createdAt === "number" &&
     typeof goal.updatedAt === "number"
   );

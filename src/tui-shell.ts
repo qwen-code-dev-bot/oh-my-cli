@@ -398,8 +398,9 @@ export interface ShellState {
 
 export interface GoalRailState {
   objective: string;
-  status: "active" | "paused";
+  status: "active" | "paused" | "achieved";
   createdAt: number;
+  updatedAt: number;
   revision: number;
 }
 
@@ -407,7 +408,8 @@ export type GoalVisualState =
   | "running"
   | "paused"
   | "waiting"
-  | "completed"
+  | "ready"
+  | "achieved"
   | "failed";
 
 export function goalRailFromCheckpoint(
@@ -418,6 +420,7 @@ export function goalRailFromCheckpoint(
     objective: checkpoint.goal.objective,
     status: checkpoint.goal.status,
     createdAt: checkpoint.goal.createdAt,
+    updatedAt: checkpoint.goal.updatedAt,
     revision: checkpoint.revision,
   };
 }
@@ -426,10 +429,11 @@ export function goalVisualState(
   goal: GoalRailState,
   turn: TurnState,
 ): GoalVisualState {
+  if (goal.status === "achieved") return "achieved";
   if (goal.status === "paused") return "paused";
   if (turn.phase === "waiting" || turn.phase === "awaiting-approval") return "waiting";
   if (turn.phase === "failed" || turn.phase === "cancelled") return "failed";
-  if (turn.phase === "completed") return "completed";
+  if (turn.phase === "completed") return "ready";
   return "running";
 }
 
@@ -706,7 +710,7 @@ export function composerTotalRows(
           SLASH_PREVIEW_MAX_ITEMS,
         )
       : 0;
-  const goalRows = goal ? (cols >= 72 ? 2 : 1) : 0;
+  const goalRows = goal ? (cols >= 72 ? 4 : 2) : 0;
   return clamp(textLines + 2 + previewRows + goalRows, 3, COMPOSER_MAX_ROWS);
 }
 
@@ -1973,7 +1977,8 @@ export function renderGoalRail(
     running: "◆",
     paused: "Ⅱ",
     waiting: "◇",
-    completed: "✓",
+    ready: "◆",
+    achieved: "✓",
     failed: "✕",
   }[visual];
   const elapsedSeconds = Math.max(
@@ -1985,26 +1990,48 @@ export function renderGoalRail(
     : elapsedSeconds >= 60
       ? `${Math.floor(elapsedSeconds / 60)}m`
       : `${elapsedSeconds}s`;
-  const label = `${marker} GOAL ${visual} · ${elapsed} · iteration ${goal.revision}`;
+  const label = `${marker} GOAL ${visual} · ${elapsed} · rev ${goal.revision}`;
+  const setStage = `${style.success}●${style.reset} SET`;
+  const executeMarker = visual === "achieved" ? "●" : visual === "failed" ? "✕" : marker;
+  const executeStyle = visual === "achieved"
+    ? style.success
+    : visual === "failed"
+      ? style.accentWarm
+      : style.accentSoft;
+  const executeStage = `${executeStyle}${executeMarker}${style.reset} EXECUTE`;
+  const achieveStage = visual === "achieved"
+    ? `${style.success}✓${style.reset} ACHIEVED`
+    : `${style.dim}○ ACHIEVE${style.reset}`;
   if (cols < 72) {
-    return [clipVisible(`${style.bold}${label}${style.reset} · ${goal.objective}`, cols)];
+    return [
+      clipVisible(`${style.bold}${label}${style.reset} · ${goal.objective}`, cols),
+      clipVisible(`${setStage} ━ ${executeStage} ━ ${achieveStage}`, cols),
+    ];
   }
 
-  const railWidth = clamp(cols - 58, 12, 32);
-  const cue = visual === "running" && !opts.reducedMotion
-    ? Math.floor((opts.now ?? Date.now()) / 500) % railWidth
-    : -1;
-  const rail = Array.from({ length: railWidth }, (_, index) => {
-    const color = index < railWidth / 3
-      ? style.accent
-      : index < (railWidth * 2) / 3
-        ? style.accentSoft
-        : style.accentWarm;
-    return `${color}${index === cue ? "●" : "━"}${style.reset}`;
-  }).join("");
+  const status = visual.toUpperCase();
+  const titlePrefix = `${style.accent}╭─${style.reset} ${style.bold}GOAL / MISSION CONTROL${style.reset}  `;
+  const titleSuffix = `${style.bold}${marker} ${status}${style.reset}`;
+  const titleFill = Math.max(
+    1,
+    cols - visibleWidth(titlePrefix) - visibleWidth(titleSuffix) - 2,
+  );
+  const connectorWidth = clamp(Math.floor((cols - 54) / 2), 4, 22);
+  const connector = `${style.dim}${"━".repeat(connectorWidth)}${style.reset}`;
   return [
-    clipVisible(`${style.bold}${label}${style.reset}  ${goal.objective}`, cols),
-    clipVisible(`${rail}  ${style.dim}/goal status · pause · resume · clear${style.reset}`, cols),
+    clipVisible(
+      `${titlePrefix}${style.dim}${"─".repeat(titleFill)}${style.reset}  ${titleSuffix}`,
+      cols,
+    ),
+    clipVisible(`${style.accent}│${style.reset}  ${style.bold}${goal.objective}${style.reset}`, cols),
+    clipVisible(
+      `${style.accent}│${style.reset}  ${setStage} ${connector} ${executeStage} ${connector} ${achieveStage}  ${style.dim}· ${elapsed} · revision ${goal.revision}${style.reset}`,
+      cols,
+    ),
+    clipVisible(
+      `${style.accent}╰─${style.reset} ${style.dim}/goal status · pause · resume · achieve · clear${style.reset}`,
+      cols,
+    ),
   ];
 }
 
