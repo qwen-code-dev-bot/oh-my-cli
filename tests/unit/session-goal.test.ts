@@ -2,7 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { isGoalRevisionCurrent, runGoalCommand } from "../../src/session-goal.js";
+import {
+  goalExecutionRequest,
+  isGoalRevisionCurrent,
+  runGoalCommand,
+  settleGoalExecution,
+} from "../../src/session-goal.js";
 import { SessionStore } from "../../src/session.js";
 
 describe("session goal", () => {
@@ -83,5 +88,45 @@ describe("session goal", () => {
     expect(isGoalRevisionCurrent(store, "a", 5)).toBe(true);
     runGoalCommand(store, "a", "achieve", 1500);
     expect(isGoalRevisionCurrent(store, "a", 6)).toBe(false);
+  });
+
+  it("turns a newly set objective into one automatic agent execution", () => {
+    runGoalCommand(store, "a", "preflight workspace readiness", 1000);
+
+    expect(
+      goalExecutionRequest("preflight workspace readiness", store.readGoal("a")),
+    ).toEqual({
+      prompt: "preflight workspace readiness",
+      revision: 1,
+    });
+    for (const command of ["", "status", "pause", "resume", "achieve", "clear"]) {
+      expect(goalExecutionRequest(command, store.readGoal("a"))).toBeNull();
+    }
+  });
+
+  it("achieves only the same active goal after a successful execution", () => {
+    runGoalCommand(store, "a", "preflight workspace readiness", 1000);
+
+    expect(settleGoalExecution(store, "a", 1, true, 2000)).toBe(
+      "Goal achieved (revision 2): preflight workspace readiness",
+    );
+    expect(store.readGoal("a").goal?.status).toBe("achieved");
+
+    runGoalCommand(store, "a", "replacement", 3000);
+    expect(settleGoalExecution(store, "a", 2, true, 4000)).toBeNull();
+    expect(store.readGoal("a")).toMatchObject({
+      revision: 3,
+      goal: { objective: "replacement", status: "active" },
+    });
+  });
+
+  it("keeps the goal active when its agent execution fails", () => {
+    runGoalCommand(store, "a", "preflight workspace readiness", 1000);
+
+    expect(settleGoalExecution(store, "a", 1, false, 2000)).toBeNull();
+    expect(store.readGoal("a")).toMatchObject({
+      revision: 1,
+      goal: { objective: "preflight workspace readiness", status: "active" },
+    });
   });
 });

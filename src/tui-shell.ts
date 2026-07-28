@@ -15,6 +15,7 @@ import type { Workspace } from "./workspace.js";
 import type { ApprovalMode } from "./approval.js";
 import { promptApproval } from "./approval.js";
 import type { SessionGoalCheckpoint, SessionMessage } from "./session.js";
+import { goalExecutionRequest } from "./session-goal.js";
 import type { AgentSink, AgentUsage, AgentRetry, AgentResult } from "./agent.js";
 import { runAgent } from "./agent.js";
 import { loadImageAttachments } from "./image-input.js";
@@ -2472,6 +2473,7 @@ export interface ConversationShellOptions {
   colorDepth?: ColorDepth;
   paletteCommands: PaletteCommand[];
   loadGoal?: () => SessionGoalCheckpoint;
+  settleGoal?: (revision: number, succeeded: boolean) => string | null;
   // Computes the read-only language-server view on demand for the `/lsp` overlay
   // (Issue #202): a workspace-trust-gated discovery report plus any live servers.
   // The shell never installs a binary or performs edits; the supplier does the
@@ -3403,6 +3405,21 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   // cleared so they are not re-attached to later turns.
   const pendingImages: LoadedImage[] = [];
 
+  function queuePrompt(
+    text: string,
+    images: LoadedImage[] = [],
+    goalRevision?: number,
+  ): void {
+    state.composer.mode = "submitting";
+    state.turn = advanceTurn(state.turn, { type: "submit" });
+    state.transcript.push({ kind: "user", text });
+    state.scroll = 0;
+    history = pushPromptHistory(history, text);
+    state.hintsLearned = true;
+    scheduleRender();
+    submitChain = submitChain.then(() => runOne(text, images, goalRevision));
+  }
+
   function submit(): void {
     // Busy, empty, and repeated submissions are explicit non-destructive no-ops
     // (criterion 3): while a turn is in flight the composer is not editable, so we
@@ -3439,8 +3456,14 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       const command = opts.paletteCommands.find(
         (candidate) => candidate.name === slash.name,
       );
-      if (command) void runPaletteCommand(command, slash.args);
-      else {
+      if (command) {
+        void runPaletteCommand(command, slash.args).then((succeeded) => {
+          if (!succeeded || slash.name !== "/goal" || !opts.loadGoal) return;
+          const request = goalExecutionRequest(slash.args, opts.loadGoal());
+          if (!request) return;
+          queuePrompt(request.prompt, pendingImages.splice(0), request.revision);
+        });
+      } else {
         state.transcript.push({
           kind: "notice",
           text: `Command unavailable: ${slash.name}`,
@@ -3495,18 +3518,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     state.composer.text = "";
     state.slashPreview = undefined;
     slashPreviewDismissedFor = null;
-    state.composer.mode = "submitting";
-    state.turn = advanceTurn(state.turn, { type: "submit" });
-    state.transcript.push({ kind: "user", text });
-    // A fresh prompt re-follows the conversation from the bottom.
-    state.scroll = 0;
-    // Record the prompt for future recall and reset navigation to a fresh draft;
-    // the user has now exercised the send flow, so compress the footer hints.
-    history = pushPromptHistory(history, text);
-    state.hintsLearned = true;
-    scheduleRender();
-    const images = pendingImages.splice(0);
-    submitChain = submitChain.then(() => runOne(text, images));
+    queuePrompt(text, pendingImages.splice(0));
   }
 
   // Fold one completed turn's canonical result into the live runtime tally for
@@ -3538,7 +3550,11 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     sessionRuntime.toolFailures = failures;
   }
 
-  async function runOne(text: string, images: LoadedImage[] = []): Promise<void> {
+  async function runOne(
+    text: string,
+    images: LoadedImage[] = [],
+    goalRevision?: number,
+  ): Promise<void> {
     const generation = ++runGeneration;
     const turnStart = Date.now();
     try {
@@ -3570,6 +3586,16 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       state.composer.mode = result.ok ? "focused" : "error";
       state.turn = advanceTurn(state.turn, { type: result.ok ? "complete" : "fail" });
       if (result.tokens) state.status.contextUsage = `tokens ${result.tokens.total}`;
+      if (goalRevision !== undefined && opts.settleGoal) {
+        try {
+          const output = opts.settleGoal(goalRevision, result.ok);
+          if (opts.loadGoal) state.goal = goalRailFromCheckpoint(opts.loadGoal());
+          if (output) state.transcript.push({ kind: "notice", text: output });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          state.transcript.push({ kind: "error", text: redactSecrets(msg).text });
+        }
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (generation === runGeneration) {
@@ -3639,12 +3665,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     process.exit(code);
   }
 
-  async function runPaletteCommand(cmd: PaletteCommand, args = ""): Promise<void> {
+  async function runPaletteCommand(cmd: PaletteCommand, args = ""): Promise<boolean> {
     // Shell-specific handling for commands whose default action would otherwise
     // bypass terminal cleanup or the shell's own state.
     if (cmd.name === "/exit" || cmd.name === "/quit") {
       shutdown(0);
-      return;
+      return true;
     }
     if (cmd.name === "/clear") {
       state.transcript = [];
@@ -3652,30 +3678,30 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       expanded.clear();
       state.scroll = 0;
       scheduleRender();
-      return;
+      return true;
     }
     if (cmd.name === "/help") {
       // Show the same in-place shortcut panel the `?` key toggles (Issue #169).
       openHelp();
-      return;
+      return true;
     }
     if (cmd.name === "/stats") {
       // Open the in-place read-only stats overlay (Issue #201) instead of the
       // plain-REPL fallback action.
       openStats();
-      return;
+      return true;
     }
     if (cmd.name === "/lsp") {
       // Open the in-place read-only language-server overlay (Issue #202) instead
       // of the plain-REPL fallback action.
       openLsp();
-      return;
+      return true;
     }
     if (cmd.name === "/tasks") {
       // Open the in-place read-only background-task center (Issue #203) instead
       // of the plain-REPL fallback action.
       openTasks();
-      return;
+      return true;
     }
     const runtimeOutput = formatRuntimeSlashCommand(cmd.name, {
       model: opts.config.model,
@@ -3688,17 +3714,20 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     if (runtimeOutput !== null) {
       state.transcript.push({ kind: "notice", text: runtimeOutput });
       scheduleRender();
-      return;
+      return true;
     }
     try {
       const output = await cmd.action(args);
       if (opts.loadGoal) state.goal = goalRailFromCheckpoint(opts.loadGoal());
       state.transcript.push({ kind: "notice", text: output ?? `${cmd.name} — ${cmd.description}` });
+      scheduleRender();
+      return true;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       state.transcript.push({ kind: "error", text: redactSecrets(msg).text });
+      scheduleRender();
+      return false;
     }
-    scheduleRender();
   }
 
   async function openPalette(): Promise<void> {

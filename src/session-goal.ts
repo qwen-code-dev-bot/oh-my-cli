@@ -2,6 +2,15 @@ import { redactSecrets } from "./permission-impact.js";
 import type { SessionGoalCheckpoint } from "./session.js";
 import { SessionStore } from "./session.js";
 
+const GOAL_CONTROL_COMMANDS = new Set([
+  "",
+  "status",
+  "pause",
+  "resume",
+  "achieve",
+  "clear",
+]);
+
 function safeObjective(value: string): string {
   const terminalSafe = value
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
@@ -92,4 +101,28 @@ export function isGoalRevisionCurrent(
 ): boolean {
   const checkpoint = store.readGoal(sessionId);
   return checkpoint.revision === revision && checkpoint.goal?.status === "active";
+}
+
+export function goalExecutionRequest(
+  args: string,
+  checkpoint: SessionGoalCheckpoint,
+): { prompt: string; revision: number } | null {
+  if (GOAL_CONTROL_COMMANDS.has(args.trim())) return null;
+  if (checkpoint.goal?.status !== "active") return null;
+  return {
+    prompt: checkpoint.goal.objective,
+    revision: checkpoint.revision,
+  };
+}
+
+export function settleGoalExecution(
+  store: SessionStore,
+  sessionId: string,
+  revision: number,
+  succeeded: boolean,
+  now: number = Date.now(),
+): string | null {
+  if (!succeeded) return null;
+  if (!isGoalRevisionCurrent(store, sessionId, revision)) return null;
+  return runGoalCommand(store, sessionId, "achieve", now);
 }
