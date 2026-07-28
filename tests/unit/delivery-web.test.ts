@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DELIVERY_ISSUE_NUMBER,
+  DELIVERY_PULL_REQUEST_NUMBER,
   DELIVERY_WEB_HOST,
   parseDeliveryWebPort,
   renderDeliveryWebPage,
@@ -28,6 +29,9 @@ describe("delivery Web renderer", () => {
     expect(html).toContain("Dynamic Workflow");
     expect(html).toContain(
       `https://github.com/qwen-code-dev-bot/oh-my-cli/issues/${DELIVERY_ISSUE_NUMBER}`,
+    );
+    expect(html).toContain(
+      `https://github.com/qwen-code-dev-bot/oh-my-cli/pull/${DELIVERY_PULL_REQUEST_NUMBER}`,
     );
     expect(html).toContain("Delivery evidence");
     expect(html).not.toContain("Computer Use");

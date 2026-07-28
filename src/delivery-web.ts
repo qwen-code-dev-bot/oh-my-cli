@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 export const DEFAULT_DELIVERY_WEB_PORT = 4317;
 export const DELIVERY_WEB_HOST = "127.0.0.1";
 export const DELIVERY_ISSUE_NUMBER = 271;
-export const DELIVERY_PULL_REQUEST_NUMBER: number | null = null;
+export const DELIVERY_PULL_REQUEST_NUMBER: number | null = 272;
 
 const REPOSITORY_URL = "https://github.com/qwen-code-dev-bot/oh-my-cli";
 
