@@ -7,12 +7,21 @@ import {
   redactPromptForDisplay,
   formatWorkflowStepLine,
   formatWorkflowRun,
+  formatWorkflowStepState,
+  formatWorkflowRunHeader,
+  formatWorkflowConsoleStepLine,
+  formatWorkflowSkippedLine,
+  formatWorkflowOutcome,
+  WORKFLOW_STEP_STATES,
 } from "../../src/workflow-runner.js";
 import type {
   StepExecutor,
   StepExecutionContext,
   WorkflowStepResult,
+  WorkflowStepState,
+  WorkflowRunReport,
 } from "../../src/workflow-runner.js";
+import { createColorPalette } from "../../src/color.js";
 
 const tmpDirs: string[] = [];
 
@@ -217,5 +226,119 @@ describe("formatWorkflowStepLine and formatWorkflowRun", () => {
     expect(out).toContain("reason: boom");
     expect(out).toContain("Steps 2-3: skipped (halted)");
     expect(out).toContain("Result:    failed (1/3 steps");
+  });
+});
+
+describe("execution console formatting (#262)", () => {
+  it("renders a stable glyph + ASCII label for every step state", () => {
+    const states: WorkflowStepState[] = ["queued", "running", "completed", "failed", "skipped"];
+    for (const state of states) {
+      const rendered = formatWorkflowStepState(state);
+      expect(rendered).toBe(`${WORKFLOW_STEP_STATES[state].glyph} ${WORKFLOW_STEP_STATES[state].label}`);
+      expect(rendered).toContain(state); // ASCII label always present (understandable without color)
+    }
+    // Distinct glyphs per state.
+    const glyphs = states.map((s) => WORKFLOW_STEP_STATES[s].glyph);
+    expect(new Set(glyphs).size).toBe(glyphs.length);
+  });
+
+  it("renders the run header with the workflow identity and declared step count", () => {
+    expect(formatWorkflowRunHeader("deploy", 3)).toBe('Workflow "deploy" — 3 steps');
+    expect(formatWorkflowRunHeader("solo", 1)).toBe('Workflow "solo" — 1 step');
+  });
+
+  it("renders console step lines with state, position, and elapsed only when finished", () => {
+    const step = { index: 0, prompt: "list files", elapsedMs: 12 };
+    const running = formatWorkflowConsoleStepLine("running", step, 2);
+    expect(running).toContain("● running");
+    expect(running).toContain("Step 1/2");
+    expect(running).toContain("list files");
+    expect(running).not.toContain("ms"); // running is not finished: no elapsed
+
+    const completed = formatWorkflowConsoleStepLine("completed", step, 2);
+    expect(completed).toContain("✓ completed");
+    expect(completed).toContain("(12ms)");
+
+    const failed = formatWorkflowConsoleStepLine("failed", { ...step, index: 1 }, 2);
+    expect(failed).toContain("✗ failed");
+    expect(failed).toContain("Step 2/2");
+    expect(failed).toContain("(12ms)");
+  });
+
+  it("emits no ANSI escapes without color and adds emphasis with color", () => {
+    const step = { index: 0, prompt: "x", elapsedMs: 1 };
+    const noColor = createColorPalette(false);
+    const plain = formatWorkflowConsoleStepLine("failed", step, 1, noColor);
+    expect(plain).not.toContain("\x1b[");
+    expect(plain).toContain("✗ failed");
+
+    const color = createColorPalette(true);
+    const bold = formatWorkflowConsoleStepLine("failed", step, 1, color);
+    expect(bold).toContain("\x1b[1m"); // bold emphasis for failed
+    expect(bold).toContain("\x1b[0m"); // reset
+    const dimmed = formatWorkflowConsoleStepLine("skipped", step, 1, color);
+    expect(dimmed).toContain("\x1b[2m"); // dim emphasis for skipped
+  });
+
+  it("renders the skipped line and the terminal outcome with exact counts", () => {
+    const skipped = formatWorkflowSkippedLine(2, 3);
+    expect(skipped).toContain("- skipped");
+    expect(skipped).toContain("Steps 2-3 (halted)");
+
+    const report: WorkflowRunReport = {
+      schema: "oh-my-cli.workflow-contract",
+      version: 1,
+      contractVersion: 1,
+      workflow: "wf",
+      result: "failed",
+      stepsTotal: 3,
+      stepsRun: 1,
+      steps: [],
+      elapsedMs: 42,
+      settings: "~/.oh-my-cli/settings.json",
+      workspace: "~/ws",
+    };
+    expect(formatWorkflowOutcome(report)).toBe("Result: failed (1/3 steps, 42ms)");
+  });
+
+  it("fires onRunStart after resolution and before the first step", async () => {
+    const settings = writeSettings({
+      workflows: { contractVersion: 1, definitions: { wf: { steps: [{ prompt: "a" }, { prompt: "b" }] } } },
+    });
+    const events: string[] = [];
+    await runWorkflow({
+      name: "wf",
+      settingsPath: settings,
+      workspace: tmpDir(),
+      env: {},
+      executor: async (ctx) => {
+        events.push(`step:${ctx.prompt}`);
+        return { ok: true, exitCode: 0 };
+      },
+      onRunStart: (workflow, stepsTotal) => events.push(`run:${workflow}:${stepsTotal}`),
+    });
+    // Run header fires once, before any step.
+    expect(events[0]).toBe("run:wf:2");
+    expect(events.slice(1)).toEqual(["step:a", "step:b"]);
+  });
+
+  it("does not fire onRunStart when resolution fails", async () => {
+    const settings = writeSettings({
+      workflows: { contractVersion: 1, definitions: { wf: { steps: [{ prompt: "x" }] } } },
+    });
+    let started = false;
+    await expect(
+      runWorkflow({
+        name: "ghost",
+        settingsPath: settings,
+        workspace: tmpDir(),
+        env: {},
+        executor: async () => ({ ok: true, exitCode: 0 }),
+        onRunStart: () => {
+          started = true;
+        },
+      }),
+    ).rejects.toThrow(/workflow "ghost" is not defined/);
+    expect(started).toBe(false);
   });
 });

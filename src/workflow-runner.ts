@@ -13,6 +13,7 @@
 import { spawn } from "node:child_process";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { parseHeadlessStream, terminalRecord } from "./headless-protocol.js";
+import type { ColorPalette } from "./color.js";
 import {
   resolveWorkflow,
   WORKFLOW_CONTRACT_SCHEMA,
@@ -163,6 +164,9 @@ export interface RunWorkflowOptions {
   env?: Record<string, string | undefined>;
   /** Override the step executor (tests). Defaults to spawning the CLI -p path. */
   executor?: StepExecutor;
+  /** Invoked with the workflow identity and declared step count after resolution,
+   *  before the first step runs (so a console can print its run header/plan). */
+  onRunStart?: (workflow: string, stepsTotal: number) => void;
   /** Invoked with the redacted step view before a step runs (streaming). */
   onStepStart?: (step: WorkflowStepResult, stepsTotal: number) => void;
   /** Invoked with the redacted step result after a step completes (streaming). */
@@ -178,6 +182,10 @@ export async function runWorkflow(opts: RunWorkflowOptions): Promise<WorkflowRun
   const resolved = resolveWorkflow(opts.name, { settingsPath: opts.settingsPath });
   const definition = resolved.definition;
   const total = definition.steps.length;
+  // Run header/plan hook: fired after resolution succeeds and before the first
+  // executor call, so a console can show the workflow identity and step count up
+  // front. Resolution failures still throw before this fires.
+  opts.onRunStart?.(definition.name, total);
 
   const startedAt = Date.now();
   const steps: WorkflowStepResult[] = [];
@@ -263,4 +271,79 @@ export function formatWorkflowRun(report: WorkflowRunReport): string {
     `Result:    ${report.result} (${report.stepsRun}/${report.stepsTotal} steps, ${report.elapsedMs}ms)`,
   );
   return lines.join("\n");
+}
+
+// --- append-only execution console (#262) -----------------------------------
+//
+// The human-readable `--run-workflow` stream is presented as an append-only
+// terminal execution console: a compact run header before the first step, each
+// step rendered with an explicit state (queued/running/completed/failed/skipped)
+// using a stable glyph-plus-ASCII-label pair, exact step counts and elapsed time
+// (no invented percentages), and a visually separate terminal outcome. State is
+// always conveyed by glyph + text, so the view stays understandable without
+// color; the palette only adds emphasis (bold/dim) when color is enabled.
+
+export type WorkflowStepState = "queued" | "running" | "completed" | "failed" | "skipped";
+
+// Stable glyph + ASCII label per state. The glyph and label together convey the
+// state without color; bold/dim emphasis is applied separately when color is on.
+export const WORKFLOW_STEP_STATES: Record<WorkflowStepState, { glyph: string; label: string }> = {
+  queued: { glyph: "○", label: "queued" },
+  running: { glyph: "●", label: "running" },
+  completed: { glyph: "✓", label: "completed" },
+  failed: { glyph: "✗", label: "failed" },
+  skipped: { glyph: "-", label: "skipped" },
+};
+
+// The glyph + ASCII label for a step state (e.g. "✓ completed").
+export function formatWorkflowStepState(state: WorkflowStepState): string {
+  const s = WORKFLOW_STEP_STATES[state];
+  return `${s.glyph} ${s.label}`;
+}
+
+// Emphasis for a state when color is enabled: the active and failed steps are
+// bold, queued/skipped are dim, completed is plain. Degrades to "" without color.
+function stateEmphasis(state: WorkflowStepState, palette: ColorPalette): string {
+  if (state === "running" || state === "failed") return palette.bold;
+  if (state === "queued" || state === "skipped") return palette.dim;
+  return "";
+}
+
+// The compact run header printed before the first step executes: the workflow
+// identity and the declared step count (the plan), with no progress invented.
+export function formatWorkflowRunHeader(workflow: string, stepsTotal: number): string {
+  const noun = stepsTotal === 1 ? "step" : "steps";
+  return `Workflow "${workflow}" — ${stepsTotal} ${noun}`;
+}
+
+// One append-only console line for a step in a given state. The prompt is the
+// already-redacted/bounded display prompt; elapsed time is shown only for states
+// that have finished (completed/failed).
+export function formatWorkflowConsoleStepLine(
+  state: WorkflowStepState,
+  step: { index: number; prompt: string; elapsedMs?: number },
+  stepsTotal: number,
+  palette: ColorPalette = { bold: "", dim: "", reset: "" },
+): string {
+  const emphasis = stateEmphasis(state, palette);
+  const label = `${emphasis}${formatWorkflowStepState(state)}${palette.reset}`;
+  const finished = state === "completed" || state === "failed";
+  const elapsed = finished && typeof step.elapsedMs === "number" ? ` (${step.elapsedMs}ms)` : "";
+  return `  ${label}  Step ${step.index + 1}/${stepsTotal}: ${step.prompt}${elapsed}`;
+}
+
+// The single line marking the declared steps that never ran after a halt.
+export function formatWorkflowSkippedLine(
+  fromStep: number,
+  stepsTotal: number,
+  palette: ColorPalette = { bold: "", dim: "", reset: "" },
+): string {
+  const label = `${palette.dim}${formatWorkflowStepState("skipped")}${palette.reset}`;
+  return `  ${label}  Steps ${fromStep}-${stepsTotal} (halted)`;
+}
+
+// The terminal outcome line: exact completed/run count and elapsed time for the
+// whole run. Truthful counts only — no percentages or invented progress.
+export function formatWorkflowOutcome(report: WorkflowRunReport): string {
+  return `Result: ${report.result} (${report.stepsRun}/${report.stepsTotal} steps, ${report.elapsedMs}ms)`;
 }

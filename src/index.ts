@@ -17,7 +17,13 @@ import {
   resolvePreToolUseHooks,
   type PreToolUseHook,
 } from "./hook-contract.js";
-import { runWorkflow, formatWorkflowStepLine } from "./workflow-runner.js";
+import {
+  runWorkflow,
+  formatWorkflowRunHeader,
+  formatWorkflowConsoleStepLine,
+  formatWorkflowSkippedLine,
+  formatWorkflowOutcome,
+} from "./workflow-runner.js";
 import {
   collectProfileList,
   formatProfileList,
@@ -1864,16 +1870,34 @@ program
           process.exit(2);
         }
         let report;
+        const palette = createColorPalette(colorEnabled({ noColor: opts.color === false, env: process.env }));
         try {
           report = await runWorkflow({
             name,
             settingsPath: resolveSettingsPath(opts.settings),
             workspace: opts.workspace,
             env: process.env,
+            onRunStart:
+              format === "text"
+                ? (workflow, stepsTotal) => {
+                    process.stdout.write(formatWorkflowRunHeader(workflow, stepsTotal) + "\n");
+                  }
+                : undefined,
+            onStepStart:
+              format === "text"
+                ? (step, stepsTotal) => {
+                    process.stdout.write(
+                      formatWorkflowConsoleStepLine("running", step, stepsTotal, palette) + "\n",
+                    );
+                  }
+                : undefined,
             onStepEnd:
               format === "text"
                 ? (step, stepsTotal) => {
-                    process.stdout.write(formatWorkflowStepLine(step, stepsTotal) + "\n");
+                    const state = step.ok ? "completed" : "failed";
+                    process.stdout.write(
+                      formatWorkflowConsoleStepLine(state, step, stepsTotal, palette) + "\n",
+                    );
                     if (!step.ok && step.reason) {
                       process.stdout.write(`    reason: ${step.reason}\n`);
                     }
@@ -1890,13 +1914,10 @@ program
         } else {
           if (report.stepsRun < report.stepsTotal) {
             process.stdout.write(
-              `  Steps ${report.stepsRun + 1}-${report.stepsTotal}: skipped (halted)\n`,
+              formatWorkflowSkippedLine(report.stepsRun + 1, report.stepsTotal, palette) + "\n",
             );
           }
-          process.stdout.write(
-            `Workflow "${report.workflow}": ${report.result} ` +
-              `(${report.stepsRun}/${report.stepsTotal} steps, ${report.elapsedMs}ms)\n`,
-          );
+          process.stdout.write(formatWorkflowOutcome(report) + "\n");
         }
         process.exit(report.result === "completed" ? 0 : 1);
       }

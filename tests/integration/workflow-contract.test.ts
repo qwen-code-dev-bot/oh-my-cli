@@ -191,7 +191,10 @@ describe("Integration: workflow contract", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("Step 1/2");
     expect(r.stdout).toContain("Step 2/2");
-    expect(r.stdout).toContain('Workflow "ci-readonly": completed (2/2 steps');
+    // Execution console (#262): run header before the first step, then a terminal
+    // outcome line with the exact completed count.
+    expect(r.stdout).toContain('Workflow "ci-readonly" — 2 steps');
+    expect(r.stdout).toContain("Result: completed (2/2 steps");
   });
 
   it("exits 2 on an unknown workflow name", async () => {
