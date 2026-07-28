@@ -26,6 +26,8 @@ describe("delivery Web renderer", () => {
     expect(directory).toContain('href="/dynamic-workflow"');
     expect(directory).toContain("Feature demos");
     expect(directory).not.toContain("See the feature.");
+    expect(directory).not.toContain("<h1>");
+    expect(directory).not.toContain('class="site-footer"');
     expect(directory).not.toContain('data-action="toggle-session"');
     expect(directory).not.toContain('data-action="run-workflow"');
   });
@@ -33,10 +35,13 @@ describe("delivery Web renderer", () => {
   it("renders Remote Control as a focused feature page", () => {
     const remote = renderDeliveryWebPage("remote-control");
 
-    expect(remote).toContain("<h1>Remote Control</h1>");
     expect(remote).toContain('data-action="toggle-session"');
-    expect(remote).toContain("Control stays visible");
-    expect(remote).toContain("Every action leaves a trace");
+    expect(remote).toContain('data-phone-status');
+    expect(remote).toContain("iPhone 16 Pro");
+    expect(remote).toContain("Device verified");
+    expect(remote).toContain("Handshake before control");
+    expect(remote).not.toContain("<h1>");
+    expect(remote).not.toContain('class="site-footer"');
     expect(remote).not.toContain('data-action="run-workflow"');
     expect(remote).toContain(
       `https://github.com/qwen-code-dev-bot/oh-my-cli/issues/${DELIVERY_ISSUE_NUMBER}`,
@@ -49,10 +54,13 @@ describe("delivery Web renderer", () => {
   it("renders Dynamic Workflow as a focused feature page", () => {
     const workflow = renderDeliveryWebPage("dynamic-workflow");
 
-    expect(workflow).toContain("<h1>Dynamic Workflow</h1>");
     expect(workflow).toContain('data-action="run-workflow"');
-    expect(workflow).toContain("The plan is inspectable");
-    expect(workflow).toContain("History is append-only");
+    expect(workflow).toContain('class="workflow-links"');
+    expect(workflow).toContain("Parallelize");
+    expect(workflow).toContain("Approval gate");
+    expect(workflow.match(/data-workflow-step=/g)).toHaveLength(7);
+    expect(workflow).not.toContain("<h1>");
+    expect(workflow).not.toContain('class="site-footer"');
     expect(workflow).not.toContain('data-action="toggle-session"');
   });
 
@@ -108,11 +116,11 @@ describe("delivery Web server", () => {
 
     const remote = await fetch(`${activeServer.url}/remote-control`);
     expect(remote.status).toBe(200);
-    expect(await remote.text()).toContain("<h1>Remote Control</h1>");
+    expect(await remote.text()).toContain("iPhone 16 Pro");
 
     const workflow = await fetch(`${activeServer.url}/dynamic-workflow`);
     expect(workflow.status).toBe(200);
-    expect(await workflow.text()).toContain("<h1>Dynamic Workflow</h1>");
+    expect(await workflow.text()).toContain("Approval gate");
 
     const script = await fetch(`${activeServer.url}/delivery-web.js`);
     expect(script.status).toBe(200);

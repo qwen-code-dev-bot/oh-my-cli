@@ -143,7 +143,9 @@ oh-my-cli
 
 Review the post-Desktop Remote Control and Dynamic Workflow surfaces on
 separate browser-native feature pages, with their defining behavior, live
-interactions, and GitHub delivery evidence:
+interactions, and GitHub delivery evidence. Remote Control shows the connected
+phone and secure session handshake; Dynamic Workflow shows a branching,
+parallel execution graph with an approval gate:
 
 ```bash
 oh-my-cli --delivery-web
