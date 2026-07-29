@@ -25,6 +25,7 @@ describe("delivery Web renderer", () => {
     expect(directory).toContain('href="/dynamic-workflow"');
     expect(directory).toContain('href="/session-time-machine"');
     expect(directory).toContain('href="/parallel-workspace-radar"');
+    expect(directory).toContain('href="/mcp-observatory"');
     expect(directory).toContain("Feature demos");
     expect(directory).not.toContain("See the feature.");
     expect(directory).not.toContain("<h1>");
@@ -92,6 +93,19 @@ describe("delivery Web renderer", () => {
     expect(radar).not.toContain('class="evidence-strip"');
   });
 
+  it("renders MCP Observatory as a protocol trace surface", () => {
+    const observatory = renderDeliveryWebPage("mcp-observatory");
+
+    expect(observatory).toContain('data-action="send-mcp-probe"');
+    expect(observatory).toContain("TRACE WATERFALL");
+    expect(observatory).toContain("Secrets redacted");
+    expect(observatory.match(/class="mcp-server /g)).toHaveLength(3);
+    expect(observatory).not.toContain("<h1>");
+    expect(observatory).not.toContain('class="site-footer"');
+    expect(observatory).not.toContain('class="product-header"');
+    expect(observatory).not.toContain('class="evidence-strip"');
+  });
+
   it("keeps every page browser-native", () => {
     for (const page of [
       renderDeliveryWebPage(),
@@ -99,6 +113,7 @@ describe("delivery Web renderer", () => {
       renderDeliveryWebPage("dynamic-workflow"),
       renderDeliveryWebPage("session-time-machine"),
       renderDeliveryWebPage("parallel-workspace-radar"),
+      renderDeliveryWebPage("mcp-observatory"),
     ]) {
       expect(page).not.toContain("Computer Use");
       expect(page).not.toContain("macOS");
@@ -117,6 +132,7 @@ describe("delivery Web renderer", () => {
     expect(script).toContain('data-action="run-workflow"');
     expect(script).toContain('data-action="play-replay"');
     expect(script).toContain('data-action="dispatch-fleet"');
+    expect(script).toContain('data-action="send-mcp-probe"');
   });
 
   it("validates an explicit CLI port", () => {
@@ -163,6 +179,10 @@ describe("delivery Web server", () => {
     );
     expect(radar.status).toBe(200);
     expect(await radar.text()).toContain("Merge-path forecast");
+
+    const observatory = await fetch(`${activeServer.url}/mcp-observatory`);
+    expect(observatory.status).toBe(200);
+    expect(await observatory.text()).toContain("TRACE WATERFALL");
 
     const script = await fetch(`${activeServer.url}/delivery-web.js`);
     expect(script.status).toBe(200);
