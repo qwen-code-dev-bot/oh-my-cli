@@ -24,6 +24,7 @@ describe("delivery Web renderer", () => {
     expect(directory).toContain('href="/remote-control"');
     expect(directory).toContain('href="/dynamic-workflow"');
     expect(directory).toContain('href="/session-time-machine"');
+    expect(directory).toContain('href="/parallel-workspace-radar"');
     expect(directory).toContain("Feature demos");
     expect(directory).not.toContain("See the feature.");
     expect(directory).not.toContain("<h1>");
@@ -78,12 +79,26 @@ describe("delivery Web renderer", () => {
     expect(timeMachine).not.toContain('class="evidence-strip"');
   });
 
+  it("renders Parallel Workspace Radar as a live coordination topology", () => {
+    const radar = renderDeliveryWebPage("parallel-workspace-radar");
+
+    expect(radar).toContain('data-action="dispatch-fleet"');
+    expect(radar).toContain("Merge-path forecast");
+    expect(radar).toContain("Worktree leases");
+    expect(radar.match(/data-fleet-agent=/g)).toHaveLength(5);
+    expect(radar).not.toContain("<h1>");
+    expect(radar).not.toContain('class="site-footer"');
+    expect(radar).not.toContain('class="product-header"');
+    expect(radar).not.toContain('class="evidence-strip"');
+  });
+
   it("keeps every page browser-native", () => {
     for (const page of [
       renderDeliveryWebPage(),
       renderDeliveryWebPage("remote-control"),
       renderDeliveryWebPage("dynamic-workflow"),
       renderDeliveryWebPage("session-time-machine"),
+      renderDeliveryWebPage("parallel-workspace-radar"),
     ]) {
       expect(page).not.toContain("Computer Use");
       expect(page).not.toContain("macOS");
@@ -101,6 +116,7 @@ describe("delivery Web renderer", () => {
     expect(script).toContain('data-action="toggle-session"');
     expect(script).toContain('data-action="run-workflow"');
     expect(script).toContain('data-action="play-replay"');
+    expect(script).toContain('data-action="dispatch-fleet"');
   });
 
   it("validates an explicit CLI port", () => {
@@ -141,6 +157,12 @@ describe("delivery Web server", () => {
     const timeMachine = await fetch(`${activeServer.url}/session-time-machine`);
     expect(timeMachine.status).toBe(200);
     expect(await timeMachine.text()).toContain("Checkpoint inspector");
+
+    const radar = await fetch(
+      `${activeServer.url}/parallel-workspace-radar`,
+    );
+    expect(radar.status).toBe(200);
+    expect(await radar.text()).toContain("Merge-path forecast");
 
     const script = await fetch(`${activeServer.url}/delivery-web.js`);
     expect(script.status).toBe(200);
