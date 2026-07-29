@@ -139,6 +139,25 @@ oh-my-cli -p "List the files in this directory"
 oh-my-cli
 ```
 
+### Web delivery board
+
+Review the post-Desktop Remote Control and Dynamic Workflow surfaces on
+separate browser-native feature pages, with their defining behavior, live
+interactions, and GitHub delivery evidence. Remote Control shows the connected
+phone and secure session handshake; Dynamic Workflow shows a branching,
+parallel execution graph with an approval gate:
+
+```bash
+oh-my-cli --delivery-web
+# open http://127.0.0.1:4317
+```
+
+The server listens on the loopback interface only. Choose another available
+loopback port with `--web-port <port>`. Open `/remote-control` or
+`/dynamic-workflow` directly to show one feature. The pages contain no Computer
+Use demo and do not expose credentials, settings, workspace paths, or a general
+file server.
+
 ### Resume a session
 
 ```bash
