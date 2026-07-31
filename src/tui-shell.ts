@@ -41,6 +41,14 @@ import type { LspView } from "./lsp-runtime.js";
 import { formatLifecycleView } from "./lifecycle-render.js";
 import { emptyLifecycleModel } from "./lifecycle-projection.js";
 import type { LifecycleModel } from "./lifecycle-projection.js";
+import {
+  formatActivityView,
+  initialActivityViewState,
+  toggleExpandAll,
+  setFollowMode,
+} from "./activity-render.js";
+import type { ActivityViewState } from "./activity-render.js";
+import type { PresentedEvent } from "./event-presentation.js";
 import { emptyTaskView, formatTaskView } from "./task-runtime.js";
 import type { TaskView } from "./task-runtime.js";
 import {
@@ -403,8 +411,23 @@ export interface ShellState {
   // mutates the mission it inspects and performs no edits. Optional so pure
   // render callers and tests can omit it.
   lifecycle?: LifecycleModel;
+  // Read-only activity view (Issue #307): the #306 presented event stream
+  // rendered as progressive-disclosure cards, plus the interactive view state
+  // (which cards are expanded, follow-mode, unread). It opens as an overlay over
+  // the main area exactly like the mission lifecycle view; the composer and
+  // status stay anchored. The events are a snapshot from the supplier; the view
+  // state is updated by the panel's key handler. Optional so pure render callers
+  // and tests can omit it.
+  activity?: ActivityOverlay;
   now?: number;
   reducedMotion?: boolean;
+}
+
+// The activity overlay snapshot: the presented event stream plus its interactive
+// view state (Issue #307).
+export interface ActivityOverlay {
+  events: PresentedEvent[];
+  view: ActivityViewState;
 }
 
 export interface GoalRailState {
@@ -1758,6 +1781,47 @@ export function renderLifecyclePanel(
   return clipped;
 }
 
+// Render the read-only activity overlay (Issue #307) — the #306 presented event
+// stream as progressive-disclosure cards. Read-only: it renders the snapshot the
+// supplier returned and performs no edits, exactly like the mission lifecycle
+// panel above. The footer documents the panel's expand/follow gestures.
+export function renderActivityPanel(
+  height: number,
+  cols: number,
+  style: ShellStyle,
+  overlay: ActivityOverlay,
+): string[] {
+  const h = Math.max(0, Math.floor(height));
+  if (h === 0) return [];
+  const w = Math.max(0, Math.floor(cols));
+
+  const head: string[] = [
+    clipVisible(
+      `${style.bold}${style.accent}▤ Activity${style.reset}  ${style.dim}(read-only · no edits performed)${style.reset}`,
+      w,
+    ),
+    renderRule("cards · elapsed · liveness · status", w, style),
+  ];
+
+  const body = formatActivityView(overlay.events, overlay.view).map((line) => clipVisible(line, w));
+
+  const foot: string[] = [
+    "",
+    clipVisible(`${style.dim}e expand/collapse · f follow · Esc close${style.reset}`, w),
+  ];
+
+  const out: string[] = [];
+  const bodyBudget = h - head.length - foot.length;
+  if (bodyBudget <= 0) {
+    out.push(...head.slice(0, h));
+  } else {
+    out.push(...head, ...body.slice(0, bodyBudget), ...foot);
+  }
+  const clipped = out.slice(0, h);
+  while (clipped.length < h) clipped.push("");
+  return clipped;
+}
+
 function renderEmptyTranscript(region: Region, _cols: number, _style: ShellStyle): string[] {
   const height = Math.max(0, region.end - region.start);
   if (height === 0) return [];
@@ -2313,6 +2377,16 @@ export function composeScreen(state: ShellState): ComposedScreen {
     lines.push(
       ...renderLifecyclePanel(layout.composer.start, layout.viewport.cols, style, state.lifecycle),
     );
+  } else if (state.activity) {
+    // The activity view (Issue #307) takes over the main area the same way: a
+    // read-only rendering of the #306 presented event stream as
+    // progressive-disclosure cards, so the transcript underneath is untouched and
+    // closing it returns to the same conversation. An active side question,
+    // stats, language-server, task, or lifecycle view (above) wins so it is never
+    // hidden.
+    lines.push(
+      ...renderActivityPanel(layout.composer.start, layout.viewport.cols, style, state.activity),
+    );
   } else if (state.helpOpen) {
     // Help replaces only the transcript region. Product identity remains visible
     // above it while the composer and status stay anchored below; dismissing the
@@ -2546,6 +2620,11 @@ export interface ConversationShellOptions {
   // supplier reads durable state. Optional so a shell without a mission source
   // still renders (an empty model is used).
   loadLifecycle?: () => LifecycleModel;
+  // Optional supplier of the read-only #306 presented activity stream (Issue
+  // #307) for the /activity overlay. The shell never mutates the run here; the
+  // supplier reads presented events. Optional so a shell without an activity
+  // source still renders (an empty stream is used).
+  loadActivity?: () => PresentedEvent[];
   settingsPath: string;
   tools: readonly string[];
   stdin?: NodeJS.ReadStream;
@@ -3180,6 +3259,48 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     if (b === 0x1b || b === 0x03 || b === 0x71 || b === 0x3f || b === 0x64) closeLifecycle();
   }
 
+  // Activity view (Issue #307): open a read-only overlay rendering the #306
+  // presented event stream as progressive-disclosure cards. Isolation is
+  // structural — it reads the snapshot the supplier returns (or an empty stream
+  // when there is no activity source yet), never mutates the run, appends to the
+  // transcript, or performs an edit. The view state (expand/collapse, follow-mode)
+  // is interactive and updated by handleActivityKey.
+  function openActivity(): void {
+    const events = opts.loadActivity ? opts.loadActivity() : [];
+    state.activity = { events, view: initialActivityViewState() };
+    scheduleRender();
+  }
+
+  function closeActivity(): void {
+    if (!state.activity) return;
+    state.activity = undefined;
+    scheduleRender();
+  }
+
+  // Route a key while the activity view is open. Modal like the other overlays:
+  // `e` toggles expand/collapse-all, `f` toggles follow-mode, and the dismiss
+  // gestures close; nothing is typed behind it.
+  function handleActivityKey(buf: Buffer): void {
+    if (buf.length !== 1 || !state.activity) return;
+    const b = buf[0];
+    if (b === 0x65) {
+      // 'e' — expand/collapse all cards.
+      const view = toggleExpandAll(state.activity.view, state.activity.events.length);
+      state.activity = { ...state.activity, view };
+      scheduleRender();
+      return;
+    }
+    if (b === 0x66) {
+      // 'f' — toggle follow-mode.
+      const view = setFollowMode(state.activity.view, !state.activity.view.followMode);
+      state.activity = { ...state.activity, view };
+      scheduleRender();
+      return;
+    }
+    // Esc, Ctrl+C, q, ?, d
+    if (b === 0x1b || b === 0x03 || b === 0x71 || b === 0x3f || b === 0x64) closeActivity();
+  }
+
   // Prompt-history recall (criterion 2). This slice keeps the caret at
   // end-of-input (no intra-text cursor movement), so Up/Down recall previous
   // prompts without hijacking cursor movement; the in-progress draft is preserved
@@ -3796,6 +3917,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       openLifecycle();
       return true;
     }
+    if (cmd.name === "/activity") {
+      // Open the in-place read-only activity view (Issue #307) instead of the
+      // plain-REPL fallback action.
+      openActivity();
+      return true;
+    }
     const runtimeOutput = formatRuntimeSlashCommand(cmd.name, {
       model: opts.config.model,
       workspace: opts.workspace.root,
@@ -3914,6 +4041,14 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // dismiss gestures act, and nothing is typed behind it.
     if (state.lifecycle) {
       handleLifecycleKey(buf);
+      return;
+    }
+
+    // While the activity view is open it is modal (Issue #307): expand/collapse
+    // (`e`), follow-mode (`f`), and the dismiss gestures act; nothing is typed
+    // behind it.
+    if (state.activity) {
+      handleActivityKey(buf);
       return;
     }
 
