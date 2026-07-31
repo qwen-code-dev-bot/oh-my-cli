@@ -1,5 +1,6 @@
 import { redactSecrets } from "./permission-impact.js";
 import { collectConceptCapabilities, formatConceptCapabilitiesCompact } from "./concept-contract.js";
+import { collectContinuity, formatContinuityCompact } from "./session-continuity.js";
 
 export type SlashCommandResolution =
   | { kind: "prompt" }
@@ -18,6 +19,7 @@ export const RUNTIME_SLASH_COMMAND_DESCRIPTORS = [
   { name: "/settings", description: "Show the redacted settings path" },
   { name: "/tools", description: "List available agent tools" },
   { name: "/capabilities", description: "Show the shared concept capability matrix across TUI and Desktop" },
+  { name: "/continuity", description: "Show the real session-continuity state (bound head, pending approvals, surface)" },
 ] as const;
 
 export const RUNTIME_SLASH_COMMANDS = RUNTIME_SLASH_COMMAND_DESCRIPTORS.map(
@@ -124,6 +126,9 @@ export function formatRuntimeSlashCommand(
   }
   if (name === "/capabilities") {
     return formatConceptCapabilitiesCompact(collectConceptCapabilities());
+  }
+  if (name === "/continuity") {
+    return formatContinuityCompact(collectContinuity());
   }
   return null;
 }
