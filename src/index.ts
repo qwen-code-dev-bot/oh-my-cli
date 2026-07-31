@@ -99,6 +99,7 @@ import {
   emptyLifecycleModel,
 } from "./lifecycle-projection.js";
 import { formatLifecycleView } from "./lifecycle-render.js";
+import { formatActivityView, initialActivityViewState } from "./activity-render.js";
 import {
   collectMissionStatusDescriptor,
   formatMissionStatusDescriptor,
@@ -2757,6 +2758,17 @@ program
             description: "Show the mission lifecycle timeline and graph (read-only)",
             action: () => formatLifecycleView(emptyLifecycleModel()).join("\n"),
           },
+          {
+            // Activity view (Issue #307) for the plain readline REPL. The
+            // full-screen shell opens a dedicated overlay for `/activity`; this
+            // action covers the non-full-screen fallback and a palette selection.
+            // It is read-only: it renders the #306 presented event stream as
+            // progressive-disclosure cards. Until a live activity source exists it
+            // renders an empty stream ("no activity"); it never simulates activity.
+            name: "/activity",
+            description: "Show the activity stream as progressive-disclosure cards (read-only)",
+            action: () => formatActivityView([], initialActivityViewState()).join("\n"),
+          },
         ];
 
         // Prefer the stable full-screen conversation shell (regions + fixed
@@ -2794,6 +2806,10 @@ program
             // exists (#319) this supplies an empty model, so the /mission overlay
             // shows "no mission activity" rather than simulated state.
             loadLifecycle: () => emptyLifecycleModel(),
+            // Activity source (Issue #307). Until a live activity source exists
+            // this supplies an empty stream, so the /activity overlay shows "no
+            // activity" rather than simulated activity.
+            loadActivity: () => [],
             settingsPath,
             tools: toolNames,
           });
