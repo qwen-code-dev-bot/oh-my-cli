@@ -94,6 +94,10 @@ import { collectContinuity, formatContinuity, assertHeadCurrent } from "./sessio
 import { collectActivityModel, formatActivityModel } from "./event-presentation.js";
 import { collectFailureModel, formatFailureModel } from "./failure-presentation.js";
 import { collectLifecycleModel, formatLifecycleModel } from "./lifecycle-projection.js";
+import {
+  collectMissionStatusDescriptor,
+  formatMissionStatusDescriptor,
+} from "./mission-status.js";
 import { collectTrustPosture, formatTrustPosture } from "./trust-posture.js";
 import { predictMergeConflict, formatConflictPrediction } from "./conflict-prediction.js";
 import { integrateBranch, formatIntegrationResult } from "./selective-integration.js";
@@ -458,6 +462,7 @@ program
   .option("--activity-model", "Report the canonical activity event presentation model (event kinds, statuses, and the real runtime condition each status maps to) (read-only) and exit")
   .option("--failure-model", "Report the canonical failure/waiting presentation guidance (categories, outcome class, retryable, and actionable next step) (read-only) and exit")
   .option("--lifecycle-model", "Report the canonical Goal/Workflow lifecycle projection model (node kinds, node states, terminal states, and event types) (read-only) and exit")
+  .option("--mission-status", "Report the mission-status surfacing contract (the gate/retry/budget/waiting/failed categories surfaced from the lifecycle projection and what each means) (read-only) and exit")
   .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract / --tool-contract / --discover-extensions / --trust-posture and report the declared state")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
@@ -1522,6 +1527,27 @@ program
           process.stdout.write(JSON.stringify(model) + "\n");
         } else {
           process.stdout.write(formatLifecycleModel(model) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Mission-status mode: publish the mission-status surfacing contract — the
+      // gate/retry/budget/waiting/failed categories surfaced from the lifecycle
+      // projection and what each means. Fixed product metadata (the surfacing
+      // contract, not a mission's runtime state) — reads nothing, never throws —
+      // so a valid invocation always exits 0; only an invalid --output value
+      // fails closed (exit 2).
+      if (opts.missionStatus) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const descriptor = collectMissionStatusDescriptor();
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(descriptor) + "\n");
+        } else {
+          process.stdout.write(formatMissionStatusDescriptor(descriptor) + "\n");
         }
         process.exit(0);
       }
