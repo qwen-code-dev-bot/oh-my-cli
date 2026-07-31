@@ -38,6 +38,9 @@ import { buildSessionStats, formatSessionStats } from "./session-stats.js";
 import type { SessionStats, SessionStatsRuntime } from "./session-stats.js";
 import { emptyLspView, formatLspView } from "./lsp-runtime.js";
 import type { LspView } from "./lsp-runtime.js";
+import { formatLifecycleView } from "./lifecycle-render.js";
+import { emptyLifecycleModel } from "./lifecycle-projection.js";
+import type { LifecycleModel } from "./lifecycle-projection.js";
 import { emptyTaskView, formatTaskView } from "./task-runtime.js";
 import type { TaskView } from "./task-runtime.js";
 import {
@@ -393,6 +396,13 @@ export interface ShellState {
   // open, so it never mutates the session it inspects and performs no edits.
   // Optional so pure render callers and tests can omit it.
   tasks?: TaskView;
+  // Read-only mission lifecycle view (Issue #314): a snapshot of the durable
+  // lifecycle projection (#313) rendered as a timeline and dependency graph. It
+  // opens as an overlay over the main area exactly like the task center; the
+  // composer and status stay anchored. A snapshot computed on open, so it never
+  // mutates the mission it inspects and performs no edits. Optional so pure
+  // render callers and tests can omit it.
+  lifecycle?: LifecycleModel;
   now?: number;
   reducedMotion?: boolean;
 }
@@ -1710,6 +1720,44 @@ export function renderTaskPanel(
   return clipped;
 }
 
+// Render the read-only mission lifecycle overlay (Issue #314) — a timeline and
+// dependency graph of the durable lifecycle projection (#313). Read-only: it
+// renders the snapshot the supplier returned and performs no edits, exactly like
+// the background-task panel above.
+export function renderLifecyclePanel(
+  height: number,
+  cols: number,
+  style: ShellStyle,
+  model: LifecycleModel,
+): string[] {
+  const h = Math.max(0, Math.floor(height));
+  if (h === 0) return [];
+  const w = Math.max(0, Math.floor(cols));
+
+  const head: string[] = [
+    clipVisible(
+      `${style.bold}${style.accent}▤ Mission lifecycle${style.reset}  ${style.dim}(read-only · no edits performed)${style.reset}`,
+      w,
+    ),
+    renderRule("nodes · states · dependencies · revision", w, style),
+  ];
+
+  const body = formatLifecycleView(model).map((line) => clipVisible(line, w));
+
+  const foot: string[] = ["", clipVisible(`${style.dim}Esc close${style.reset}`, w)];
+
+  const out: string[] = [];
+  const bodyBudget = h - head.length - foot.length;
+  if (bodyBudget <= 0) {
+    out.push(...head.slice(0, h));
+  } else {
+    out.push(...head, ...body.slice(0, bodyBudget), ...foot);
+  }
+  const clipped = out.slice(0, h);
+  while (clipped.length < h) clipped.push("");
+  return clipped;
+}
+
 function renderEmptyTranscript(region: Region, _cols: number, _style: ShellStyle): string[] {
   const height = Math.max(0, region.end - region.start);
   if (height === 0) return [];
@@ -2256,6 +2304,15 @@ export function composeScreen(state: ShellState): ComposedScreen {
     lines.push(
       ...renderTaskPanel(layout.composer.start, layout.viewport.cols, style, state.tasks),
     );
+  } else if (state.lifecycle) {
+    // The mission lifecycle view (Issue #314) takes over the main area the same
+    // way: a read-only snapshot of the durable lifecycle projection (#313) as a
+    // timeline and dependency graph, so the transcript underneath is untouched
+    // and closing it returns to the same conversation. An active side question,
+    // stats, language-server, or task view (above) wins so it is never hidden.
+    lines.push(
+      ...renderLifecyclePanel(layout.composer.start, layout.viewport.cols, style, state.lifecycle),
+    );
   } else if (state.helpOpen) {
     // Help replaces only the transcript region. Product identity remains visible
     // above it while the composer and status stay anchored below; dismissing the
@@ -2484,6 +2541,11 @@ export interface ConversationShellOptions {
   // The shell never spawns or cancels work here; the supplier reads the durable
   // receipts. Optional so a shell without task receipts still renders.
   loadTasks?: () => TaskView;
+  // Optional supplier of the read-only mission lifecycle projection (Issue #314)
+  // for the /mission overlay. The shell never mutates the mission here; the
+  // supplier reads durable state. Optional so a shell without a mission source
+  // still renders (an empty model is used).
+  loadLifecycle?: () => LifecycleModel;
   settingsPath: string;
   tools: readonly string[];
   stdin?: NodeJS.ReadStream;
@@ -3091,6 +3153,31 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     const b = buf[0];
     // Esc, Ctrl+C, q, ?, d
     if (b === 0x1b || b === 0x03 || b === 0x71 || b === 0x3f || b === 0x64) closeTasks();
+  }
+
+  // Mission lifecycle view (Issue #314): open a read-only overlay computed from
+  // the durable lifecycle projection (#313). Isolation is structural — it reads
+  // the snapshot the supplier returns (or an empty model when there is no mission
+  // source yet), never mutates the mission, appends to the transcript, or
+  // performs an edit.
+  function openLifecycle(): void {
+    state.lifecycle = opts.loadLifecycle ? opts.loadLifecycle() : emptyLifecycleModel();
+    scheduleRender();
+  }
+
+  function closeLifecycle(): void {
+    if (!state.lifecycle) return;
+    state.lifecycle = undefined;
+    scheduleRender();
+  }
+
+  // Route a key while the lifecycle view is open. Modal like the other overlays:
+  // only the dismiss gestures act, and nothing is typed behind it.
+  function handleLifecycleKey(buf: Buffer): void {
+    if (buf.length !== 1) return;
+    const b = buf[0];
+    // Esc, Ctrl+C, q, ?, d
+    if (b === 0x1b || b === 0x03 || b === 0x71 || b === 0x3f || b === 0x64) closeLifecycle();
   }
 
   // Prompt-history recall (criterion 2). This slice keeps the caret at
@@ -3703,6 +3790,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       openTasks();
       return true;
     }
+    if (cmd.name === "/mission") {
+      // Open the in-place read-only mission lifecycle view (Issue #314) instead
+      // of the plain-REPL fallback action.
+      openLifecycle();
+      return true;
+    }
     const runtimeOutput = formatRuntimeSlashCommand(cmd.name, {
       model: opts.config.model,
       workspace: opts.workspace.root,
@@ -3814,6 +3907,13 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // dismiss gestures act, and nothing is typed behind it.
     if (state.tasks) {
       handleTasksKey(buf);
+      return;
+    }
+
+    // While the mission lifecycle view is open it is modal (Issue #314): only the
+    // dismiss gestures act, and nothing is typed behind it.
+    if (state.lifecycle) {
+      handleLifecycleKey(buf);
       return;
     }
 

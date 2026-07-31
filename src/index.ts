@@ -93,7 +93,12 @@ import { collectConceptCapabilities, formatConceptCapabilities } from "./concept
 import { collectContinuity, formatContinuity, assertHeadCurrent } from "./session-continuity.js";
 import { collectActivityModel, formatActivityModel } from "./event-presentation.js";
 import { collectFailureModel, formatFailureModel } from "./failure-presentation.js";
-import { collectLifecycleModel, formatLifecycleModel } from "./lifecycle-projection.js";
+import {
+  collectLifecycleModel,
+  formatLifecycleModel,
+  emptyLifecycleModel,
+} from "./lifecycle-projection.js";
+import { formatLifecycleView } from "./lifecycle-render.js";
 import {
   collectMissionStatusDescriptor,
   formatMissionStatusDescriptor,
@@ -2741,6 +2746,17 @@ program
             description: "Show background tasks and durable receipts (read-only)",
             action: () => formatTaskView(buildTaskView(store, sessionId, workspace.root)).join("\n"),
           },
+          {
+            // Mission lifecycle view (Issue #314) for the plain readline REPL. The
+            // full-screen shell opens a dedicated overlay for `/mission`; this
+            // action covers the non-full-screen fallback and a palette selection.
+            // It is read-only: it renders the durable lifecycle projection (#313).
+            // Until a live mission source exists (#319) it renders an empty model
+            // ("no mission activity"); it never simulates mission state.
+            name: "/mission",
+            description: "Show the mission lifecycle timeline and graph (read-only)",
+            action: () => formatLifecycleView(emptyLifecycleModel()).join("\n"),
+          },
         ];
 
         // Prefer the stable full-screen conversation shell (regions + fixed
@@ -2774,6 +2790,10 @@ program
               settleGoalExecution(store, sessionId, revision, succeeded),
             loadLsp: () => buildLspView(workspace.root),
             loadTasks: () => buildTaskView(store, sessionId, workspace.root),
+            // Mission lifecycle source (Issue #314). Until a live mission source
+            // exists (#319) this supplies an empty model, so the /mission overlay
+            // shows "no mission activity" rather than simulated state.
+            loadLifecycle: () => emptyLifecycleModel(),
             settingsPath,
             tools: toolNames,
           });
