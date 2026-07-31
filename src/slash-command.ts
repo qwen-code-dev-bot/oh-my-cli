@@ -1,4 +1,5 @@
 import { redactSecrets } from "./permission-impact.js";
+import { collectConceptCapabilities, formatConceptCapabilitiesCompact } from "./concept-contract.js";
 
 export type SlashCommandResolution =
   | { kind: "prompt" }
@@ -16,6 +17,7 @@ export const RUNTIME_SLASH_COMMAND_DESCRIPTORS = [
   { name: "/model", description: "Show the active model and configuration path" },
   { name: "/settings", description: "Show the redacted settings path" },
   { name: "/tools", description: "List available agent tools" },
+  { name: "/capabilities", description: "Show the shared concept capability matrix across TUI and Desktop" },
 ] as const;
 
 export const RUNTIME_SLASH_COMMANDS = RUNTIME_SLASH_COMMAND_DESCRIPTORS.map(
@@ -119,6 +121,9 @@ export function formatRuntimeSlashCommand(
     const overflow = context.tools.length - visible.length;
     const suffix = overflow > 0 ? ` · … +${overflow} more` : "";
     return `Tools (${context.tools.length}): ${visible.join(" · ")}${suffix}`;
+  }
+  if (name === "/capabilities") {
+    return formatConceptCapabilitiesCompact(collectConceptCapabilities());
   }
   return null;
 }

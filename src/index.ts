@@ -89,6 +89,7 @@ import {
 } from "./provider-invocation.js";
 import { collectExtensionDiscovery, formatExtensionDiscovery } from "./extension-discovery.js";
 import { collectExtensionCompat, formatExtensionCompat } from "./extension-compat.js";
+import { collectConceptCapabilities, formatConceptCapabilities } from "./concept-contract.js";
 import { collectTrustPosture, formatTrustPosture } from "./trust-posture.js";
 import { predictMergeConflict, formatConflictPrediction } from "./conflict-prediction.js";
 import { integrateBranch, formatIntegrationResult } from "./selective-integration.js";
@@ -447,6 +448,7 @@ program
   .option("--invoke-timeout <ms>", "Hard timeout in milliseconds for --invoke-tool / --invoke-mcp / --invoke-provider (default 30000, max 300000)")
   .option("--discover-extensions", "Discover the declared provider, MCP, and tool extension contracts and readiness from settings (read-only, redacted) and exit")
   .option("--extension-compat", "Report the supported provider, tool, MCP, and workflow contract versions and a redacted settings-file compatibility verdict (read-only) and exit")
+  .option("--capabilities", "Report the shared workbench concept contract and the per-surface (TUI/Desktop) capability matrix with explicit parity gaps (read-only) and exit")
   .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract / --tool-contract / --discover-extensions / --trust-posture and report the declared state")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
@@ -1397,6 +1399,26 @@ program
           process.stdout.write(JSON.stringify(report) + "\n");
         } else {
           process.stdout.write(formatExtensionCompat(report) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Concept-capability mode: publish the shared workbench concept contract
+      // and the per-surface (TUI/Desktop) capability matrix with explicit parity
+      // gaps. Fixed product metadata — it reads no settings, probes nothing, and
+      // never throws for a supported concept — so a valid invocation always exits
+      // 0; only an invalid --output value fails closed (exit 2).
+      if (opts.capabilities) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const report = collectConceptCapabilities();
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatConceptCapabilities(report) + "\n");
         }
         process.exit(0);
       }
