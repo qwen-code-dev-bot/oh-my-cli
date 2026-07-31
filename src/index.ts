@@ -91,6 +91,7 @@ import { collectExtensionDiscovery, formatExtensionDiscovery } from "./extension
 import { collectExtensionCompat, formatExtensionCompat } from "./extension-compat.js";
 import { collectConceptCapabilities, formatConceptCapabilities } from "./concept-contract.js";
 import { collectContinuity, formatContinuity, assertHeadCurrent } from "./session-continuity.js";
+import { collectActivityModel, formatActivityModel } from "./event-presentation.js";
 import { collectTrustPosture, formatTrustPosture } from "./trust-posture.js";
 import { predictMergeConflict, formatConflictPrediction } from "./conflict-prediction.js";
 import { integrateBranch, formatIntegrationResult } from "./selective-integration.js";
@@ -452,6 +453,7 @@ program
   .option("--capabilities", "Report the shared workbench concept contract and the per-surface (TUI/Desktop) capability matrix with explicit parity gaps (read-only) and exit")
   .option("--continuity", "Report the real session-continuity state (bound head, branch, pending approvals, surface of origin) rendered from the shared concept contract (read-only) and exit")
   .option("--assert-head <sha>", "With --continuity, refuse (exit 1) when the workspace head has moved away from the given bound head sha; exits 0 when current")
+  .option("--activity-model", "Report the canonical activity event presentation model (event kinds, statuses, and the real runtime condition each status maps to) (read-only) and exit")
   .option("--no-probe", "Skip the bounded lifecycle probe for --mcp-contract / --tool-contract / --discover-extensions / --trust-posture and report the declared state")
   .option("--recover", "Resume an interrupted task from a recovery checkpoint (read-only) and exit")
   .option("--checkpoint <file>", "Recovery checkpoint file for --recover")
@@ -1456,6 +1458,26 @@ program
           process.stdout.write(JSON.stringify(state) + "\n");
         } else {
           process.stdout.write(formatContinuity(state) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Activity-model mode: publish the canonical activity event presentation
+      // model (event kinds, statuses, and the real runtime condition each status
+      // maps to). Fixed product metadata — reads nothing, never throws — so a
+      // valid invocation always exits 0; only an invalid --output value fails
+      // closed (exit 2).
+      if (opts.activityModel) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const model = collectActivityModel();
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(model) + "\n");
+        } else {
+          process.stdout.write(formatActivityModel(model) + "\n");
         }
         process.exit(0);
       }
