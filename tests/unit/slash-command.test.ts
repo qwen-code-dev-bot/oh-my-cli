@@ -147,6 +147,7 @@ describe("interactive slash command inventory", () => {
       "/model",
       "/settings",
       "/tools",
+      "/capabilities",
     ]);
     expect(INTERACTIVE_SLASH_COMMANDS).toEqual([
       "/help",
@@ -156,6 +157,7 @@ describe("interactive slash command inventory", () => {
       "/model",
       "/settings",
       "/tools",
+      "/capabilities",
     ]);
     expect(RUNTIME_SLASH_COMMAND_DESCRIPTORS.map(({ name }) => name)).toEqual(
       RUNTIME_SLASH_COMMANDS,
