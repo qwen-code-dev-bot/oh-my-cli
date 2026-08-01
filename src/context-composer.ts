@@ -156,6 +156,25 @@ const SECRET_BASENAME_RE = new RegExp(
 
 const SNIFF_BYTES = 8_000;
 
+// Generated / tooling directories excluded when ignore rules are active.
+// Mirrors discovery.ts, workspace-reference.ts, and workspace-navigator.ts.
+const DEFAULT_SKIP_DIRS = new Set([
+  "node_modules", "dist", "build", "out", "target", "vendor",
+  "__pycache__", "venv", "env", "coverage", ".git",
+]);
+
+// Whether a workspace-relative path falls under a built-in skip directory.
+// Only directory segments (all but the last) are checked: hidden files like
+// `.env` are handled by the secret check, not the skip-dir check.
+function isUnderSkipDir(relPath: string): boolean {
+  const segments = relPath.split("/");
+  // Check only directory segments (exclude the final file basename).
+  for (let i = 0; i < segments.length - 1; i++) {
+    if (DEFAULT_SKIP_DIRS.has(segments[i]) || segments[i].startsWith(".")) return true;
+  }
+  return false;
+}
+
 function hasBinaryExtension(relPath: string): boolean {
   const ext = path.extname(relPath).toLowerCase();
   return BINARY_EXTENSIONS.has(ext);
@@ -230,8 +249,8 @@ export function composeContext(
       continue;
     }
 
-    // Ignore check.
-    if (ignore && ignoreSet.isIgnored(ref.path, false)) {
+    // Ignore check: .gitignore rules and built-in skip directories.
+    if (ignore && (ignoreSet.isIgnored(ref.path, false) || isUnderSkipDir(ref.path))) {
       exclusions.push({
         path: ref.path,
         reason: "ignored",
