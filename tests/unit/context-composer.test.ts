@@ -126,6 +126,23 @@ describe("exclusions", () => {
     expect(ctx.exclusions[0].reason).toBe("ignored");
   });
 
+  it("excludes paths under built-in skip directories", () => {
+    write("node_modules/pkg/index.js", "module.exports = {}");
+    write("src/app.ts", "code");
+
+    const refs = [
+      createContextReference("node_modules/pkg/index.js", "picker"),
+      createContextReference("src/app.ts", "tree"),
+    ];
+    const ctx = composeContext(ws, refs, DEFAULT_OPTS);
+
+    expect(ctx.items.length).toBe(1);
+    expect(ctx.items[0].ref.path).toBe("src/app.ts");
+    expect(ctx.exclusions.length).toBe(1);
+    expect(ctx.exclusions[0].path).toBe("node_modules/pkg/index.js");
+    expect(ctx.exclusions[0].reason).toBe("ignored");
+  });
+
   it("excludes binary files with reason", () => {
     writeBinary("image.png");
 
