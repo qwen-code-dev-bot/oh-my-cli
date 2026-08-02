@@ -15,6 +15,11 @@ export const GOAL_REVISION_VERSION = 1;
 
 export type GoalStatus = "active" | "paused" | "achieved";
 
+/** Who made a Goal lifecycle transition. */
+export type TransitionActor = "user" | "agent" | "system";
+
+const VALID_ACTORS: ReadonlySet<string> = new Set(["user", "agent", "system"]);
+
 export interface GoalRevisionEntry {
   /** Monotonic revision number. */
   revision: number;
@@ -23,6 +28,10 @@ export interface GoalRevisionEntry {
   /** The objective text (bounded and redacted). */
   objective: string;
   status: GoalStatus;
+  /** Who made the last transition (backward compatible: undefined = unknown). */
+  transitionActor?: TransitionActor;
+  /** Why the last transition was made (max 200 chars, bounded and redacted). */
+  transitionReason?: string;
   /** Epoch ms when this revision was created. */
   createdAt: number;
   /** Epoch ms when this revision was last updated. */
@@ -45,6 +54,29 @@ export function safeObjective(value: string): string {
   return redacted.length <= MAX_OBJECTIVE_LENGTH
     ? redacted
     : `${redacted.slice(0, MAX_OBJECTIVE_LENGTH - 1)}…`;
+}
+
+// --- transition reason safety -----------------------------------------------
+
+const MAX_REASON_LENGTH = 200;
+
+// Sanitize and bound a transition reason (max 200 chars, redacted).
+export function safeReason(value: string): string {
+  const terminalSafe = value
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const redacted = redactSecrets(terminalSafe).text;
+  return redacted.length <= MAX_REASON_LENGTH
+    ? redacted
+    : `${redacted.slice(0, MAX_REASON_LENGTH - 1)}…`;
+}
+
+// Validate a transition actor string.
+export function validateActor(actor: string): TransitionActor {
+  if (VALID_ACTORS.has(actor)) return actor as TransitionActor;
+  return "system"; // Default to system for unknown actors.
 }
 
 // --- title safety -----------------------------------------------------------
@@ -117,13 +149,25 @@ export class GoalRevisionHistory {
     return active;
   }
 
-  /** Update the status of the active revision (pause/resume/achieve). */
-  updateStatus(status: GoalStatus, now: number = Date.now()): GoalRevisionEntry | null {
+  /** Update the status of the active revision (pause/resume/achieve).
+   *  Records the actor and reason for the transition. */
+  updateStatus(
+    status: GoalStatus,
+    now: number = Date.now(),
+    actor?: string,
+    reason?: string,
+  ): GoalRevisionEntry | null {
     const active = this.getActive();
     if (!active) return null;
 
     active.status = status;
     active.updatedAt = now;
+    if (actor !== undefined) {
+      active.transitionActor = validateActor(actor);
+    }
+    if (reason !== undefined) {
+      active.transitionReason = safeReason(reason);
+    }
     return active;
   }
 
@@ -170,6 +214,7 @@ export function formatGoalStatus(history: GoalRevisionHistory): string {
     `  set: ${new Date(active.createdAt).toISOString()}`,
     `  updated: ${new Date(active.updatedAt).toISOString()}`,
     `  revision: ${active.revision}`,
+    `  transition: ${active.transitionActor ?? "unknown"}${active.transitionReason ? ` — ${active.transitionReason}` : ""}`,
     `  history: ${history.size} revision(s)`,
   );
   return lines.join("\n");
@@ -188,6 +233,9 @@ export function formatRevisionHistory(history: GoalRevisionHistory): string {
     const titlePart = rev.title ? `${rev.title} — ` : "";
     lines.push(`${icon} rev ${rev.revision} [${rev.status}] ${statusGlyph} ${titlePart}${rev.objective}`);
     lines.push(`  set: ${new Date(rev.createdAt).toISOString()}  updated: ${new Date(rev.updatedAt).toISOString()}`);
+    const actor = rev.transitionActor ?? "unknown";
+    const reason = rev.transitionReason ? ` — ${rev.transitionReason}` : "";
+    lines.push(`  by: ${actor}${reason}`);
   }
 
   lines.push("");

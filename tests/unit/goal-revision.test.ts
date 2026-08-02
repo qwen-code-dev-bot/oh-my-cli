@@ -3,6 +3,8 @@ import {
   GoalRevisionHistory,
   safeObjective,
   safeTitle,
+  safeReason,
+  validateActor,
   deriveTitle,
   formatGoalStatus,
   formatRevisionHistory,
@@ -291,5 +293,94 @@ describe("title in formatting", () => {
     const output = formatRevisionHistory(history);
     expect(output).toContain("Goal A");
     expect(output).toContain("Goal B");
+  });
+});
+
+// --- Transition reasons (Issue #397) ----------------------------------------
+
+describe("safeReason", () => {
+  it("bounds reason at 200 chars", () => {
+    const long = "x".repeat(500);
+    expect(safeReason(long).length).toBeLessThanOrEqual(200);
+  });
+
+  it("redacts secrets in reason", () => {
+    const safe = safeReason("Failed because --token=supersecretvalue123 expired");
+    expect(safe).toContain("[REDACTED]");
+    expect(safe).not.toContain("supersecretvalue123");
+  });
+});
+
+describe("validateActor", () => {
+  it("accepts valid actors", () => {
+    expect(validateActor("user")).toBe("user");
+    expect(validateActor("agent")).toBe("agent");
+    expect(validateActor("system")).toBe("system");
+  });
+
+  it("defaults to system for unknown actors", () => {
+    expect(validateActor("unknown")).toBe("system");
+    expect(validateActor("")).toBe("system");
+  });
+});
+
+describe("transition recording", () => {
+  it("records actor and reason on status update", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+    history.updateStatus("paused", 2000, "user", "Need to review first");
+
+    const active = history.getActive()!;
+    expect(active.status).toBe("paused");
+    expect(active.transitionActor).toBe("user");
+    expect(active.transitionReason).toBe("Need to review first");
+  });
+
+  it("works without actor/reason (backward compatible)", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+    history.updateStatus("paused", 2000);
+
+    const active = history.getActive()!;
+    expect(active.transitionActor).toBeUndefined();
+    expect(active.transitionReason).toBeUndefined();
+  });
+
+  it("validates actor enum", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+    history.updateStatus("achieved", 2000, "invalid-actor", "Done");
+
+    expect(history.getActive()!.transitionActor).toBe("system");
+  });
+});
+
+describe("transition formatting", () => {
+  it("shows transition in goal status", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+    history.updateStatus("paused", 2000, "user", "Reviewing PRs");
+
+    const output = formatGoalStatus(history);
+    expect(output).toContain("transition: user");
+    expect(output).toContain("Reviewing PRs");
+  });
+
+  it("shows unknown for backward-compatible revisions", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+
+    const output = formatGoalStatus(history);
+    expect(output).toContain("transition: unknown");
+  });
+
+  it("shows actor/reason in revision history", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+    history.updateStatus("paused", 2000, "agent", "Blocked by CI failure");
+
+    const output = formatRevisionHistory(history);
+    expect(output).toContain("by: agent");
+    expect(output).toContain("Blocked by CI failure");
   });
 });
