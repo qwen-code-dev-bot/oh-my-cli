@@ -5,6 +5,7 @@ import {
   safeTitle,
   safeReason,
   validateActor,
+  isTerminalState,
   deriveTitle,
   formatGoalStatus,
   formatRevisionHistory,
@@ -382,5 +383,113 @@ describe("transition formatting", () => {
     const output = formatRevisionHistory(history);
     expect(output).toContain("by: agent");
     expect(output).toContain("Blocked by CI failure");
+  });
+});
+
+// --- Terminal states (Issue #399) -------------------------------------------
+
+describe("isTerminalState", () => {
+  it("identifies terminal states", () => {
+    expect(isTerminalState("achieved")).toBe(true);
+    expect(isTerminalState("failed")).toBe(true);
+    expect(isTerminalState("cancelled")).toBe(true);
+    expect(isTerminalState("superseded")).toBe(true);
+  });
+
+  it("identifies non-terminal states", () => {
+    expect(isTerminalState("active")).toBe(false);
+    expect(isTerminalState("paused")).toBe(false);
+  });
+});
+
+describe("terminal state transitions", () => {
+  it("allows transitioning to failed", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+    const result = history.updateStatus("failed", 2000, "agent", "CI failed 3 times");
+
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe("failed");
+    expect(result!.transitionActor).toBe("agent");
+    expect(result!.transitionReason).toBe("CI failed 3 times");
+  });
+
+  it("allows transitioning to cancelled", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+    const result = history.updateStatus("cancelled", 2000, "user", "No longer needed");
+
+    expect(result!.status).toBe("cancelled");
+  });
+
+  it("allows transitioning to superseded", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API v1", 1000);
+    const result = history.updateStatus("superseded", 2000, "user", "Replaced by v2 goal");
+
+    expect(result!.status).toBe("superseded");
+  });
+});
+
+describe("terminal state finality", () => {
+  it("prevents transition from terminal state", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+    history.updateStatus("achieved", 2000, "agent", "Done");
+
+    // Try to transition back to active — should fail.
+    const result = history.updateStatus("active", 3000);
+    expect(result).toBeNull();
+    expect(history.getActive()!.status).toBe("achieved");
+  });
+
+  it("prevents transition from failed state", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+    history.updateStatus("failed", 2000, "agent", "CI failed");
+
+    const result = history.updateStatus("paused", 3000);
+    expect(result).toBeNull();
+  });
+
+  it("allows new revision after terminal state", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API v1", 1000);
+    history.updateStatus("failed", 2000, "agent", "CI failed");
+
+    // Create a new revision — this should work.
+    const r2 = history.setObjective("Build API v2", 3000);
+    expect(r2.revision).toBe(2);
+    expect(r2.status).toBe("active");
+  });
+});
+
+describe("terminal state formatting", () => {
+  it("shows distinct glyphs for terminal states", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+    history.updateStatus("failed", 2000, "agent", "CI failed");
+
+    const output = formatRevisionHistory(history);
+    expect(output).toContain("✗"); // failed glyph
+    expect(output).toContain("[failed]");
+  });
+
+  it("shows cancelled glyph", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+    history.updateStatus("cancelled", 2000, "user", "Stopped");
+
+    const output = formatRevisionHistory(history);
+    expect(output).toContain("⊘"); // cancelled glyph
+  });
+
+  it("shows superseded glyph", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API v1", 1000);
+    history.updateStatus("superseded", 2000, "user", "Replaced");
+
+    const output = formatRevisionHistory(history);
+    expect(output).toContain("↗"); // superseded glyph
   });
 });

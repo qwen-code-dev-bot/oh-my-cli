@@ -13,7 +13,14 @@ export const GOAL_REVISION_VERSION = 1;
 
 // --- types ------------------------------------------------------------------
 
-export type GoalStatus = "active" | "paused" | "achieved";
+export type GoalStatus = "active" | "paused" | "achieved" | "failed" | "cancelled" | "superseded";
+
+/** Terminal states are final: no transition back to active. */
+const TERMINAL_STATES: ReadonlySet<GoalStatus> = new Set(["achieved", "failed", "cancelled", "superseded"]);
+
+export function isTerminalState(status: GoalStatus): boolean {
+  return TERMINAL_STATES.has(status);
+}
 
 /** Who made a Goal lifecycle transition. */
 export type TransitionActor = "user" | "agent" | "system";
@@ -149,8 +156,10 @@ export class GoalRevisionHistory {
     return active;
   }
 
-  /** Update the status of the active revision (pause/resume/achieve).
-   *  Records the actor and reason for the transition. */
+  /** Update the status of the active revision (pause/resume/achieve/fail/
+   *  cancel/supersede). Records the actor and reason for the transition.
+   *  Terminal states are final: once reached, no further transitions are
+   *  allowed on the same revision (create a new revision instead). */
   updateStatus(
     status: GoalStatus,
     now: number = Date.now(),
@@ -159,6 +168,11 @@ export class GoalRevisionHistory {
   ): GoalRevisionEntry | null {
     const active = this.getActive();
     if (!active) return null;
+
+    // Enforce terminal state finality.
+    if (isTerminalState(active.status)) {
+      return null;
+    }
 
     active.status = status;
     active.updatedAt = now;
@@ -249,5 +263,8 @@ function statusGlyphFor(status: GoalStatus): string {
     case "active": return "▶";
     case "paused": return "‖";
     case "achieved": return "✓";
+    case "failed": return "✗";
+    case "cancelled": return "⊘";
+    case "superseded": return "↗";
   }
 }
