@@ -18,6 +18,8 @@ export type GoalStatus = "active" | "paused" | "achieved";
 export interface GoalRevisionEntry {
   /** Monotonic revision number. */
   revision: number;
+  /** Optional concise title (max 80 chars, bounded and redacted). */
+  title?: string;
   /** The objective text (bounded and redacted). */
   objective: string;
   status: GoalStatus;
@@ -45,6 +47,28 @@ export function safeObjective(value: string): string {
     : `${redacted.slice(0, MAX_OBJECTIVE_LENGTH - 1)}…`;
 }
 
+// --- title safety -----------------------------------------------------------
+
+const MAX_TITLE_LENGTH = 80;
+
+// Sanitize and bound a Goal title (max 80 chars, redacted).
+export function safeTitle(value: string): string {
+  const terminalSafe = value
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const redacted = redactSecrets(terminalSafe).text;
+  return redacted.length <= MAX_TITLE_LENGTH
+    ? redacted
+    : `${redacted.slice(0, MAX_TITLE_LENGTH - 1)}…`;
+}
+
+// Auto-derive a concise title from the objective (first 80 chars).
+export function deriveTitle(objective: string): string {
+  return safeTitle(objective);
+}
+
 // --- revision history -------------------------------------------------------
 
 const MAX_REVISIONS = 50;
@@ -53,8 +77,10 @@ export class GoalRevisionHistory {
   private readonly revisions: GoalRevisionEntry[] = [];
   private currentRevision = 0;
 
-  /** Set a new objective, creating a new revision and preserving prior ones. */
-  setObjective(objective: string, now: number = Date.now()): GoalRevisionEntry {
+  /** Set a new objective, creating a new revision and preserving prior ones.
+   *  An optional title can be provided; otherwise it is auto-derived from
+   *  the first 80 characters of the objective. */
+  setObjective(objective: string, now: number = Date.now(), title?: string): GoalRevisionEntry {
     // Deactivate the current active revision.
     for (const rev of this.revisions) {
       rev.isActive = false;
@@ -62,8 +88,10 @@ export class GoalRevisionHistory {
 
     this.currentRevision++;
     const safe = safeObjective(objective);
+    const safeTitleValue = title !== undefined ? safeTitle(title) : deriveTitle(safe);
     const entry: GoalRevisionEntry = {
       revision: this.currentRevision,
+      title: safeTitleValue,
       objective: safe,
       status: "active",
       createdAt: now,
@@ -77,6 +105,16 @@ export class GoalRevisionHistory {
     }
 
     return entry;
+  }
+
+  /** Set or update the title of the active revision. */
+  setTitle(title: string, now: number = Date.now()): GoalRevisionEntry | null {
+    const active = this.getActive();
+    if (!active) return null;
+
+    active.title = safeTitle(title);
+    active.updatedAt = now;
+    return active;
   }
 
   /** Update the status of the active revision (pause/resume/achieve). */
@@ -121,14 +159,20 @@ export function formatGoalStatus(history: GoalRevisionHistory): string {
   const active = history.getActive();
   if (!active) return `Goal: none (revision ${history.revision})`;
 
-  return [
+  const lines = [
     `Goal: ${active.status}`,
+  ];
+  if (active.title) {
+    lines.push(`  title: ${active.title}`);
+  }
+  lines.push(
     `  objective: ${active.objective}`,
     `  set: ${new Date(active.createdAt).toISOString()}`,
     `  updated: ${new Date(active.updatedAt).toISOString()}`,
     `  revision: ${active.revision}`,
     `  history: ${history.size} revision(s)`,
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 // Format the full revision history with the active revision identified.
@@ -141,7 +185,8 @@ export function formatRevisionHistory(history: GoalRevisionHistory): string {
   for (const rev of history.list()) {
     const icon = rev.isActive ? "●" : "○";
     const statusGlyph = statusGlyphFor(rev.status);
-    lines.push(`${icon} rev ${rev.revision} [${rev.status}] ${statusGlyph} ${rev.objective}`);
+    const titlePart = rev.title ? `${rev.title} — ` : "";
+    lines.push(`${icon} rev ${rev.revision} [${rev.status}] ${statusGlyph} ${titlePart}${rev.objective}`);
     lines.push(`  set: ${new Date(rev.createdAt).toISOString()}  updated: ${new Date(rev.updatedAt).toISOString()}`);
   }
 
