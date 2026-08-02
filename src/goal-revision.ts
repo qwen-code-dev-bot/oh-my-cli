@@ -112,6 +112,21 @@ export function deriveTitle(objective: string): string {
 
 const MAX_REVISIONS = 50;
 
+// --- replacement confirmation (Issue #401) ----------------------------------
+
+export interface ReplacementWarning {
+  /** Whether confirmation is required before replacing. */
+  confirmationRequired: boolean;
+  /** The current objective that would be deactivated. */
+  currentObjective?: string;
+  /** The current revision number. */
+  currentRevision?: number;
+  /** The current status. */
+  currentStatus?: GoalStatus;
+  /** Human-readable warning message. */
+  message: string;
+}
+
 export class GoalRevisionHistory {
   private readonly revisions: GoalRevisionEntry[] = [];
   private currentRevision = 0;
@@ -154,6 +169,45 @@ export class GoalRevisionHistory {
     active.title = safeTitle(title);
     active.updatedAt = now;
     return active;
+  }
+
+  /** Check whether replacing the current Goal requires confirmation.
+   *  Confirmation is required when the current Goal is active (not paused
+   *  or terminal). */
+  checkReplacement(): ReplacementWarning {
+    const active = this.getActive();
+    if (!active) {
+      return { confirmationRequired: false, message: "No active Goal to replace." };
+    }
+
+    if (active.status !== "active") {
+      return {
+        confirmationRequired: false,
+        currentObjective: active.objective,
+        currentRevision: active.revision,
+        currentStatus: active.status,
+        message: `Current Goal is ${active.status}; replacement does not require confirmation.`,
+      };
+    }
+
+    return {
+      confirmationRequired: true,
+      currentObjective: active.objective,
+      currentRevision: active.revision,
+      currentStatus: active.status,
+      message: `Active Goal "${active.objective}" (rev ${active.revision}) will be deactivated. Confirm to replace.`,
+    };
+  }
+
+  /** Confirm a destructive replacement, recording the confirmation as a
+   *  transition reason on the deactivated revision. */
+  confirmReplacement(now: number = Date.now(), actor: string = "user"): void {
+    const active = this.getActive();
+    if (active && active.status === "active") {
+      active.transitionActor = validateActor(actor);
+      active.transitionReason = safeReason("Replaced by new Goal (confirmed)");
+      active.updatedAt = now;
+    }
   }
 
   /** Update the status of the active revision (pause/resume/achieve/fail/
