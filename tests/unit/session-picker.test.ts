@@ -366,6 +366,18 @@ describe("session picker: resolveResumeFlagTarget", () => {
     expect(t.reason).toContain("was not found");
   });
 
+  it("does not enforce the declared workspace (flag path resumes into the caller's workspace)", () => {
+    const id = store.newId();
+    store.writeMeta(id, { model: "m", workspace: "/no/such/workspace/here", createdAt: 1 });
+    store.append(id, { role: "user", content: "hi" });
+    // The picker path rejects this (resolveResumeTarget), but the flag path
+    // resumes into opts.workspace, so a stale declared workspace must not block.
+    expect(resolveResumeTarget(id, store).ok).toBe(false);
+    const t = resolveResumeFlagTarget(id, store);
+    expect(t.ok).toBe(true);
+    expect(t.sessionId).toBe(id);
+  });
+
   it("fails closed for a corrupt checkpoint and preserves the bytes", () => {
     const id = "corrupt-flag-1";
     fs.writeFileSync(path.join(tmpDir, `${id}.jsonl`), "{bad}\n{worse}\n");

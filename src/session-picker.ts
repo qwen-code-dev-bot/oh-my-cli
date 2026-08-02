@@ -190,13 +190,15 @@ export function resolveResumeTarget(id: string, store: SessionStore): ResumeTarg
 }
 
 // Resolve a command-line `--resume <id>` target fail-closed. Unlike the picker
-// path (which validates a checkpoint that was just listed), a flag-provided id
-// may point at an interrupted write, so heal that session's checkpoint first
-// (idempotent, scoped to this session alone), then apply the same fail-closed
-// rules: an empty id, a missing session, or a checkpoint that cannot be
-// resumed safely yields an actionable reason and nothing is resumed. A corrupt
-// checkpoint is reported as corrupt even though healing quarantined it aside.
-// Never substitutes a different session or workspace.
+// path (which validates a checkpoint that was just listed and restores its
+// declared workspace), a flag-provided id resumes into the caller's workspace,
+// so the session's declared workspace is not enforced here. Heal the target
+// checkpoint first (idempotent, scoped to this session alone) so a complete
+// temp left by an interrupted write is promoted rather than misreported as
+// missing, then fail closed when the id is empty, the session is missing, or
+// the checkpoint cannot be resumed safely. A corrupt checkpoint is reported as
+// corrupt even though healing quarantined it aside. Never substitutes a
+// different session.
 export function resolveResumeFlagTarget(id: string, store: SessionStore): ResumeTarget {
   const target = id.trim();
   if (!target) {
@@ -210,7 +212,23 @@ export function resolveResumeFlagTarget(id: string, store: SessionStore): Resume
       reason: `session ${shortSessionId(target)} is corrupt and cannot be resumed safely`,
     };
   }
-  return resolveResumeTarget(target, store);
+  const status = store.integrity(target).status;
+  if (status === "missing") {
+    return {
+      ok: false,
+      sessionId: target,
+      reason: `session ${shortSessionId(target)} was not found`,
+    };
+  }
+  if (status === "corrupt") {
+    return {
+      ok: false,
+      sessionId: target,
+      reason: `session ${shortSessionId(target)} is corrupt and cannot be resumed safely`,
+    };
+  }
+  const workspace = store.readMeta(target)?.workspace;
+  return { ok: true, sessionId: target, workspace };
 }
 
 export interface SessionPickerRenderState {
