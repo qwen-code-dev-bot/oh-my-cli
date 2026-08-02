@@ -9,6 +9,7 @@ import {
   deriveTitle,
   formatGoalStatus,
   formatRevisionHistory,
+  type ReplacementWarning,
 } from "../../src/goal-revision.js";
 
 // Pure-function coverage for Goal revision history (Issue #289): revision
@@ -491,5 +492,66 @@ describe("terminal state formatting", () => {
 
     const output = formatRevisionHistory(history);
     expect(output).toContain("↗"); // superseded glyph
+  });
+});
+
+// --- Replacement confirmation (Issue #401) ----------------------------------
+
+describe("checkReplacement", () => {
+  it("requires confirmation for active Goal", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+
+    const warning = history.checkReplacement();
+    expect(warning.confirmationRequired).toBe(true);
+    expect(warning.currentObjective).toBe("Build API");
+    expect(warning.currentRevision).toBe(1);
+    expect(warning.currentStatus).toBe("active");
+    expect(warning.message).toContain("will be deactivated");
+  });
+
+  it("does not require confirmation for paused Goal", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+    history.updateStatus("paused", 2000);
+
+    const warning = history.checkReplacement();
+    expect(warning.confirmationRequired).toBe(false);
+    expect(warning.message).toContain("paused");
+  });
+
+  it("does not require confirmation for terminal Goal", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API", 1000);
+    history.updateStatus("achieved", 2000);
+
+    const warning = history.checkReplacement();
+    expect(warning.confirmationRequired).toBe(false);
+  });
+
+  it("does not require confirmation when no Goal exists", () => {
+    const history = new GoalRevisionHistory();
+    const warning = history.checkReplacement();
+    expect(warning.confirmationRequired).toBe(false);
+    expect(warning.message).toContain("No active Goal");
+  });
+});
+
+describe("confirmReplacement", () => {
+  it("records confirmation on the deactivated revision", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build API v1", 1000);
+    history.confirmReplacement(2000, "user");
+    history.setObjective("Build API v2", 3000);
+
+    const r1 = history.getRevision(1)!;
+    expect(r1.transitionReason).toContain("confirmed");
+    expect(r1.transitionActor).toBe("user");
+  });
+
+  it("does nothing when no active Goal", () => {
+    const history = new GoalRevisionHistory();
+    history.confirmReplacement(); // Should not throw.
+    expect(history.size).toBe(0);
   });
 });
