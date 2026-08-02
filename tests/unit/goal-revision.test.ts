@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   GoalRevisionHistory,
   safeObjective,
+  safeTitle,
+  deriveTitle,
   formatGoalStatus,
   formatRevisionHistory,
 } from "../../src/goal-revision.js";
@@ -194,5 +196,100 @@ describe("read-only guarantee", () => {
     formatGoalStatus(history);
     formatRevisionHistory(history);
     expect(history.size).toBe(before);
+  });
+});
+
+// --- Goal title (Issue #395) ------------------------------------------------
+
+describe("safeTitle", () => {
+  it("bounds title at 80 chars", () => {
+    const long = "x".repeat(200);
+    const safe = safeTitle(long);
+    expect(safe.length).toBeLessThanOrEqual(80);
+  });
+
+  it("redacts secrets in title", () => {
+    const safe = safeTitle("Deploy with --token=supersecretvalue123");
+    expect(safe).toContain("[REDACTED]");
+    expect(safe).not.toContain("supersecretvalue123");
+  });
+
+  it("strips control characters", () => {
+    const safe = safeTitle("hello\u0000world");
+    expect(safe).not.toContain("\u0000");
+  });
+});
+
+describe("deriveTitle", () => {
+  it("auto-derives title from objective", () => {
+    const title = deriveTitle("Build the REST API with authentication and rate limiting");
+    expect(title).toBe("Build the REST API with authentication and rate limiting");
+    expect(title.length).toBeLessThanOrEqual(80);
+  });
+
+  it("truncates long objectives to 80 chars", () => {
+    const long = "A very long objective ".repeat(10);
+    const title = deriveTitle(long);
+    expect(title.length).toBeLessThanOrEqual(80);
+  });
+});
+
+describe("title in revisions", () => {
+  it("auto-derives title when not provided", () => {
+    const history = new GoalRevisionHistory();
+    const entry = history.setObjective("Build the API", 1000);
+    expect(entry.title).toBe("Build the API");
+  });
+
+  it("uses explicit title when provided", () => {
+    const history = new GoalRevisionHistory();
+    const entry = history.setObjective("Build the REST API with OAuth2 and rate limiting", 1000, "API OAuth2");
+    expect(entry.title).toBe("API OAuth2");
+    expect(entry.objective).toContain("OAuth2");
+  });
+
+  it("preserves title across revisions", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("First objective", 1000, "My Goal");
+    history.setObjective("Second objective", 2000, "My Goal");
+
+    const r1 = history.getRevision(1)!;
+    const r2 = history.getRevision(2)!;
+    expect(r1.title).toBe("My Goal");
+    expect(r2.title).toBe("My Goal");
+  });
+
+  it("updates title via setTitle", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build the API", 1000);
+    history.setTitle("API Build", 2000);
+
+    expect(history.getActive()!.title).toBe("API Build");
+  });
+
+  it("setTitle returns null when no active goal", () => {
+    const history = new GoalRevisionHistory();
+    expect(history.setTitle("Title")).toBeNull();
+  });
+});
+
+describe("title in formatting", () => {
+  it("shows title in goal status", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("Build the REST API with authentication", 1000, "Auth API");
+
+    const output = formatGoalStatus(history);
+    expect(output).toContain("title: Auth API");
+    expect(output).toContain("objective: Build the REST API");
+  });
+
+  it("shows title in revision history", () => {
+    const history = new GoalRevisionHistory();
+    history.setObjective("First objective", 1000, "Goal A");
+    history.setObjective("Second objective", 2000, "Goal B");
+
+    const output = formatRevisionHistory(history);
+    expect(output).toContain("Goal A");
+    expect(output).toContain("Goal B");
   });
 });
