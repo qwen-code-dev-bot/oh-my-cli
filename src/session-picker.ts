@@ -189,6 +189,30 @@ export function resolveResumeTarget(id: string, store: SessionStore): ResumeTarg
   return { ok: true, sessionId: target, workspace };
 }
 
+// Resolve a command-line `--resume <id>` target fail-closed. Unlike the picker
+// path (which validates a checkpoint that was just listed), a flag-provided id
+// may point at an interrupted write, so heal that session's checkpoint first
+// (idempotent, scoped to this session alone), then apply the same fail-closed
+// rules: an empty id, a missing session, or a checkpoint that cannot be
+// resumed safely yields an actionable reason and nothing is resumed. A corrupt
+// checkpoint is reported as corrupt even though healing quarantined it aside.
+// Never substitutes a different session or workspace.
+export function resolveResumeFlagTarget(id: string, store: SessionStore): ResumeTarget {
+  const target = id.trim();
+  if (!target) {
+    return { ok: false, sessionId: id, reason: "no session id was provided" };
+  }
+  const recovery = store.recover(target);
+  if (recovery.action === "quarantined") {
+    return {
+      ok: false,
+      sessionId: target,
+      reason: `session ${shortSessionId(target)} is corrupt and cannot be resumed safely`,
+    };
+  }
+  return resolveResumeTarget(target, store);
+}
+
 export interface SessionPickerRenderState {
   query: string;
   selected: number;

@@ -11,6 +11,7 @@ import {
   orderSessionRows,
   filterSessionRows,
   resolveResumeTarget,
+  resolveResumeFlagTarget,
   collectSessionPickerRows,
   renderSessionPickerLines,
   runSessionPicker,
@@ -328,6 +329,85 @@ describe("session picker: resolveResumeTarget", () => {
     const t = resolveResumeTarget("   ", store);
     expect(t.ok).toBe(false);
     expect(t.reason).toContain("no session id");
+  });
+});
+
+describe("session picker: resolveResumeFlagTarget", () => {
+  let tmpDir: string;
+  let store: SessionStore;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "oh-my-cli-flag-resume-"));
+    store = new SessionStore(tmpDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("resolves a healthy session to its exact id", () => {
+    const id = store.newId();
+    store.writeMeta(id, { model: "m", workspace: tmpDir, createdAt: 1 });
+    store.append(id, { role: "user", content: "hi" });
+    const t = resolveResumeFlagTarget(id, store);
+    expect(t.ok).toBe(true);
+    expect(t.sessionId).toBe(id);
+  });
+
+  it("rejects an empty id", () => {
+    const t = resolveResumeFlagTarget("   ", store);
+    expect(t.ok).toBe(false);
+    expect(t.reason).toContain("no session id");
+  });
+
+  it("fails closed for a missing session", () => {
+    const t = resolveResumeFlagTarget("does-not-exist", store);
+    expect(t.ok).toBe(false);
+    expect(t.reason).toContain("was not found");
+  });
+
+  it("fails closed for a corrupt checkpoint and preserves the bytes", () => {
+    const id = "corrupt-flag-1";
+    fs.writeFileSync(path.join(tmpDir, `${id}.jsonl`), "{bad}\n{worse}\n");
+    const t = resolveResumeFlagTarget(id, store);
+    expect(t.ok).toBe(false);
+    expect(t.reason).toContain("corrupt");
+    // The corrupt checkpoint is quarantined aside, never deleted.
+    const preserved = fs
+      .readdirSync(tmpDir)
+      .filter((f) => f.startsWith(`${id}.jsonl.corrupt-`));
+    expect(preserved.length).toBe(1);
+  });
+
+  it("heals a complete temp left by an interrupted write instead of reporting it missing", () => {
+    const id = store.newId();
+    const line = JSON.stringify({ role: "user", content: "interrupted" });
+    fs.writeFileSync(path.join(tmpDir, `${id}.jsonl.tmp`), `${line}\n`);
+    expect(fs.existsSync(path.join(tmpDir, `${id}.jsonl`))).toBe(false);
+    const t = resolveResumeFlagTarget(id, store);
+    expect(t.ok).toBe(true);
+    expect(t.sessionId).toBe(id);
+    expect(fs.existsSync(path.join(tmpDir, `${id}.jsonl`))).toBe(true);
+  });
+
+  it("fails closed when only a partial temp exists and there is no canonical", () => {
+    const id = store.newId();
+    fs.writeFileSync(path.join(tmpDir, `${id}.jsonl.tmp`), "{partial\n");
+    const t = resolveResumeFlagTarget(id, store);
+    expect(t.ok).toBe(false);
+    expect(t.reason).toContain("was not found");
+  });
+
+  it("is deterministic across repeated calls on a corrupt checkpoint", () => {
+    const id = "corrupt-flag-2";
+    fs.writeFileSync(path.join(tmpDir, `${id}.jsonl`), "{bad}\n{worse}\n");
+    const first = resolveResumeFlagTarget(id, store);
+    const second = resolveResumeFlagTarget(id, store);
+    expect(first.ok).toBe(false);
+    expect(first.reason).toContain("corrupt");
+    // The first call quarantined the checkpoint, so the second sees it as gone.
+    expect(second.ok).toBe(false);
+    expect(second.reason).toContain("was not found");
   });
 });
 
