@@ -69,7 +69,7 @@ export class IdempotencyGuard {
 
     this.records.set(key, record);
     this.evictIfNeeded();
-    return record;
+    return { ...record };
   }
 
   /** Update the execution state for a key. */
