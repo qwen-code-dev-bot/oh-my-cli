@@ -91,10 +91,35 @@ const MAX_DIAGNOSTICS = 50;
 
 // --- policy enforcement (mirrors #332) --------------------------------------
 
-const SECRET_KEY_PATTERNS = [
-  /api[_-]?key/i, /secret/i, /token/i, /password/i,
-  /credential/i, /auth/i, /private[_-]?key/i,
-];
+// Precise basename patterns for secret-bearing files (mirrors #332).
+// Matches .env, credentials.json, api_key.txt, id_rsa, etc. — not
+// normal source files like auth.ts or token.service.ts.
+const SECRET_BASENAME_RE = new RegExp(
+  "^(?:" +
+    [
+      "\\.env(?:\\..+)?",
+      "\\.netrc",
+      "\\.pgpass",
+      "\\.htpasswd",
+      "id_(?:rsa|dsa|ecdsa|ed25519)",
+      ".+_rsa",
+      ".+_ed25519",
+      ".+\\.pem",
+      ".+\\.pfx",
+      ".+\\.p12",
+      ".+\\.p8",
+      ".+\\.ppk",
+      ".+\\.key",
+      ".+\\.keystore",
+      ".+\\.jks",
+      ".+\\.tfstate(?:\\.json)?",
+      "credentials(?:\\.json)?",
+      "(?:.*[_-])?secrets?(?:[_-].*)?\\.(?:json|ya?ml|txt|env|toml)",
+      "(?:.*[_-])?(?:api[_-]?key|access[_-]?token|auth[_-]?token)(?:[_-].*)?\\.(?:json|ya?ml|txt|env|toml)",
+    ].join("|") +
+  ")$",
+  "i",
+);
 
 const BINARY_EXTENSIONS = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp",
@@ -134,7 +159,7 @@ export function checkNavigationPolicy(
   }
 
   const basename = segments[segments.length - 1];
-  if (SECRET_KEY_PATTERNS.some((re) => re.test(basename))) {
+  if (SECRET_BASENAME_RE.test(basename)) {
     return { allowed: false, refusal: "secret" };
   }
 

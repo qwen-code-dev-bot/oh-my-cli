@@ -42,9 +42,14 @@ describe("policy enforcement", () => {
   });
 
   it("blocks secret-bearing files", () => {
-    const result = checkNavigationPolicy("config/api_key.json", TRUSTED);
-    expect(result.allowed).toBe(false);
-    expect(result.refusal).toBe("secret");
+    expect(checkNavigationPolicy("config/.env", TRUSTED).allowed).toBe(false);
+    expect(checkNavigationPolicy("config/api_key.json", TRUSTED).allowed).toBe(false);
+    expect(checkNavigationPolicy("secrets/credentials.json", TRUSTED).allowed).toBe(false);
+  });
+
+  it("allows normal source files with auth-like names", () => {
+    expect(checkNavigationPolicy("src/auth.ts", TRUSTED).allowed).toBe(true);
+    expect(checkNavigationPolicy("src/token.service.ts", TRUSTED).allowed).toBe(true);
   });
 });
 
@@ -61,7 +66,7 @@ describe("symbol results", () => {
       symbols: [
         { name: "main", kind: "function", filePath: "src/app.ts", range: { start: 1, end: 10 } },
         { name: "helper", kind: "function", filePath: "src/util.ts", range: { start: 5, end: 15 } },
-        { name: "secret", kind: "variable", filePath: "config/api_key.ts", range: { start: 1, end: 1 } },
+        { name: "secret", kind: "variable", filePath: "config/.env", range: { start: 1, end: 1 } },
       ],
       references: [],
       diagnostics: [],
@@ -142,7 +147,7 @@ describe("canonical reference conversion", () => {
   it("returns null for policy-blocked symbol", () => {
     const result = assembleNavigationResult({
       symbols: [
-        { name: "key", kind: "variable", filePath: "config/api_key.ts", range: { start: 1, end: 1 } },
+        { name: "key", kind: "variable", filePath: "config/.env", range: { start: 1, end: 1 } },
       ],
       references: [],
       diagnostics: [],
