@@ -92,7 +92,7 @@ describe("Integration: session checkpoint recovery on resume", () => {
     expect(contents).toContain("next turn");
   });
 
-  it("quarantines a corrupt checkpoint and preserves a neighboring session", async () => {
+  it("fails closed on a corrupt checkpoint, preserving it and the neighbor", async () => {
     const badId = "corrupt-1";
     const goodId = "neighbor-1";
     // Corrupt canonical: a mid-file unparseable line (not a benign trailing one).
@@ -113,18 +113,18 @@ describe("Integration: session checkpoint recovery on resume", () => {
 
     const r = await runCli(["--resume", badId, "-p", "fresh start"], baseEnv);
 
-    expect(r.code).toBe(0);
-    expect(r.stdout).toContain("Recovered response");
-    // Actionable warning surfaced on stderr (stdout stays clean).
-    expect(r.stderr).toContain("corrupt checkpoint");
-    expect(r.stderr).toContain("isolated");
+    // Fail closed (Issue #454): a corrupt checkpoint is refused before any
+    // provider interaction instead of silently starting a fresh session.
+    expect(r.code).toBe(1);
+    expect(r.stdout).not.toContain("Recovered response");
+    expect(r.stderr).toContain("Cannot resume");
+    expect(r.stderr).toContain("corrupt");
     // The corrupt bytes were preserved in a quarantine sidecar, not deleted.
     const quarantined = fs.readdirSync(sessDir).filter((f) => f.startsWith(`${badId}.jsonl.corrupt-`));
     expect(quarantined.length).toBe(1);
     expect(fs.readFileSync(path.join(sessDir, quarantined[0]), "utf-8")).toContain("not json");
-    // The fresh session that replaced it carries none of the corruption.
-    const fresh = fs.readFileSync(path.join(sessDir, `${badId}.jsonl`), "utf-8");
-    expect(fresh).not.toContain("not json");
+    // No fresh session replaced the corrupt one.
+    expect(fs.existsSync(path.join(sessDir, `${badId}.jsonl`))).toBe(false);
     // The neighbor is byte-for-byte untouched.
     expect(fs.readFileSync(goodPath).equals(goodBytes)).toBe(true);
   });

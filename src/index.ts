@@ -47,7 +47,12 @@ import { runPreflight, formatPreflight } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
 import { collectSessionSummaries, formatSessionList } from "./session-summary.js";
-import { runSessionPicker, resolveResumeTarget, shortSessionId } from "./session-picker.js";
+import {
+  runSessionPicker,
+  resolveResumeTarget,
+  resolveResumeFlagTarget,
+  shortSessionId,
+} from "./session-picker.js";
 import { normalizeSessionName } from "./session-name.js";
 import {
   compactMessages,
@@ -374,7 +379,10 @@ program
     "--image <paths...>",
     "Attach image file(s) by path for vision-capable analysis (PNG, JPEG, GIF, or WebP)",
   )
-  .option("--resume <session-id>", "Resume a persisted session")
+  .option(
+    "--resume <session-id>",
+    "Resume a persisted session (fails closed when the id is empty or the session is missing, corrupt, or unreadable)",
+  )
   .option(
     "--approval-mode <mode>",
     "Approval mode: default, auto-edit, or yolo (yolo is unsafe - allows all tools)",
@@ -2326,25 +2334,36 @@ program
       let sessionId: string;
       let existingMessages: SessionMessage[] = [];
 
-      // A picker selection resumes the exact chosen session; --resume <id> keeps
-      // working unchanged. Both share the same heal-then-load path.
+      // A picker selection resumes the exact chosen session (validated fail-closed
+      // at selection time). A --resume <id> given on the command line must also
+      // resolve to a readable session: fail closed before any provider interaction
+      // when the id is empty, the session is missing, or the checkpoint cannot be
+      // resumed safely — silently starting fresh would drop the context the user
+      // asked to resume.
+      if (browseResume === null && opts.resume !== undefined) {
+        const target = resolveResumeFlagTarget(String(opts.resume), store);
+        if (!target.ok) {
+          process.stderr.write(`Cannot resume: ${target.reason}\n`);
+          process.exit(1);
+        }
+      }
       const resumeId = browseResume?.sessionId ?? opts.resume;
       if (resumeId) {
         sessionId = resumeId;
-        // Heal an interrupted or corrupt checkpoint before loading. Recovery is
-        // scoped to this session and never touches sibling sessions.
+        // Heal an interrupted checkpoint before loading (promotes a complete temp
+        // left by an interrupted write). Recovery is scoped to this session and
+        // never touches sibling sessions. A checkpoint that cannot be healed fails
+        // closed instead of silently starting fresh.
         const recovery = store.recover(sessionId);
         if (recovery.action === "quarantined") {
-          const where = recovery.quarantinePath
-            ? path.basename(recovery.quarantinePath)
-            : "a sidecar file";
           process.stderr.write(
-            `Warning: session ${sessionId} had a corrupt checkpoint; it was preserved as ${where} and isolated. Starting fresh.\n`,
+            `Cannot resume: session ${shortSessionId(sessionId)} is corrupt and cannot be resumed safely\n`,
           );
+          process.exit(1);
         }
         existingMessages = loadSessionMessages(store, sessionId);
         if (existingMessages.length === 0) {
-          process.stderr.write(`Warning: session ${sessionId} is empty or not found\n`);
+          process.stderr.write(`Warning: session ${sessionId} is empty\n`);
         }
         // A resumed run may select a different profile (or model) than the session
         // was created under. Explain the change visibly before continuing; the
