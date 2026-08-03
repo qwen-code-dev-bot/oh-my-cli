@@ -99,6 +99,16 @@ describe("Tools", () => {
       await toolMap.get("write")!.execute({ path: "overwrite.txt", content: "new" }, workspace);
       expect(fs.readFileSync(path.join(tmpDir, "overwrite.txt"), "utf-8")).toBe("new");
     });
+
+    it("preserves the mode of an overwritten file and leaves no temp litter", async () => {
+      const target = path.join(tmpDir, "run.sh");
+      fs.writeFileSync(target, "#!/bin/sh\necho old\n");
+      fs.chmodSync(target, 0o755);
+      await toolMap.get("write")!.execute({ path: "run.sh", content: "#!/bin/sh\necho new\n" }, workspace);
+      expect(fs.readFileSync(target, "utf-8")).toContain("echo new");
+      expect(fs.statSync(target).mode & 0o777).toBe(0o755);
+      expect(fs.readdirSync(tmpDir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    });
   });
 
   describe("edit", () => {
@@ -160,6 +170,19 @@ describe("Tools", () => {
       expect(fs.readFileSync(path.join(tmpDir, "edit.sh"), "utf-8")).toBe(
         "echo $$ # shell PID, $& stays, so does $1\n",
       );
+    });
+
+    it("preserves the file mode of an edited executable script", async () => {
+      const target = path.join(tmpDir, "deploy.sh");
+      fs.writeFileSync(target, "#!/bin/sh\necho v1\n");
+      fs.chmodSync(target, 0o755);
+      const result = await toolMap.get("edit")!.execute(
+        { path: "deploy.sh", oldText: "v1", newText: "v2" },
+        workspace,
+      );
+      expect(result.isError).toBeUndefined();
+      expect(fs.readFileSync(target, "utf-8")).toContain("echo v2");
+      expect(fs.statSync(target).mode & 0o777).toBe(0o755);
     });
   });
 

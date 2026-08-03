@@ -24,6 +24,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { atomicWriteFile } from "./atomic-write.js";
 import type { Workspace } from "./workspace.js";
 import type { SessionStore, SessionMessage } from "./session.js";
 
@@ -396,10 +397,9 @@ export interface ApplyResult {
 }
 
 function atomicWrite(absTarget: string, content: string): void {
-  fs.mkdirSync(path.dirname(absTarget), { recursive: true });
-  const tmp = `${absTarget}.turn.tmp`;
-  fs.writeFileSync(tmp, content, "utf8");
-  fs.renameSync(tmp, absTarget);
+  // Shared atomic temp+rename helper (#506): identical crash-safety for
+  // checkpoint restores as for the primary tool write path.
+  atomicWriteFile(absTarget, content);
 }
 
 function applyFileOps(fileOps: FileOp[]): void {
