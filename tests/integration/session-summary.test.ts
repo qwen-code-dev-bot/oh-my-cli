@@ -146,4 +146,45 @@ describe("Integration: session listing and resume", () => {
     expect(resumed.stdout).toContain("still works");
     expect(resumed.code).toBe(0);
   });
+
+  it("shows user-owned session names in the list output (Issue #530)", async () => {
+    // Produce a session, then name it through the documented surface.
+    server.setResponses([{ type: "text", content: "answer for naming" }]);
+    const r = await runCli(["-p", "Naming task", "--workspace", workspaceDir], baseEnv);
+    expect(r.code).toBe(0);
+    // Newest session by mtime is the one just sealed (earlier tests in this
+    // file leave other sessions behind, including a corrupt one).
+    const sessDir = path.join(sessionDir, ".oh-my-cli", "sessions");
+    const id = sessionIds(sessionDir).sort(
+      (a, b) =>
+        fs.statSync(path.join(sessDir, `${b}.jsonl`)).mtimeMs -
+        fs.statSync(path.join(sessDir, `${a}.jsonl`)).mtimeMs,
+    )[0];
+
+    const renamed = await runCli(
+      ["--rename-session", id, "--session-name", "auth refactor"],
+      baseEnv,
+    );
+    expect(renamed.code).toBe(0);
+
+    const list = await runCli(["--list-sessions"], baseEnv);
+    expect(list.code).toBe(0);
+    expect(list.stdout).toContain(id);
+    expect(list.stdout).toContain('"auth refactor"');
+
+    // Secret-shaped names are rejected at the rename boundary (#249), so they
+    // can never reach a rendered surface; render-time redaction stays pinned
+    // by the unit tests as a second layer.
+    const secret = ["ghp", "_", "c".repeat(24)].join("");
+    const again = await runCli(
+      ["--rename-session", id, "--session-name", `release ${secret}`],
+      baseEnv,
+    );
+    expect(again.code).toBe(2);
+    expect(again.stderr).toContain("secret-like");
+    // The previous name survives the rejected rename.
+    const listed = await runCli(["--list-sessions"], baseEnv);
+    expect(listed.stdout).not.toContain(secret);
+    expect(listed.stdout).toContain('"auth refactor"');
+  });
 });

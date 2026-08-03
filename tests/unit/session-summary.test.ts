@@ -131,6 +131,30 @@ describe("session summary: collectSessionSummaries", () => {
     expect(summaries.find((s) => s.id === good)!.corrupt).toBe(false);
     expect(summaries.find((s) => s.id === bad)!.corrupt).toBe(true);
   });
+
+  it("carries user-owned session names from the store (Issue #530)", () => {
+    const id = store.newId();
+    store.append(id, { role: "user", content: "hi" });
+    store.writeName(id, "auth refactor");
+    const s = collectSessionSummaries(store).find((x) => x.id === id)!;
+    expect(s.name).toBe("auth refactor");
+  });
+
+  it("leaves unnamed sessions without a name field", () => {
+    const id = store.newId();
+    store.append(id, { role: "user", content: "hi" });
+    const s = collectSessionSummaries(store).find((x) => x.id === id)!;
+    expect(s.name).toBeUndefined();
+  });
+
+  it("corrupt transcripts still carry their name sidecar (Issue #530)", () => {
+    const id = "named-corrupt";
+    fs.writeFileSync(path.join(tmpDir, `${id}.jsonl`), "{broken}\n{still broken}\n");
+    store.writeName(id, "old experiment");
+    const s = collectSessionSummaries(store).find((x) => x.id === id)!;
+    expect(s.corrupt).toBe(true);
+    expect(s.name).toBe("old experiment");
+  });
 });
 
 describe("session summary: formatSessionList", () => {
@@ -171,6 +195,29 @@ describe("session summary: formatSessionList", () => {
     expect(out).toContain("repo unknown");
     expect(out).toMatch(/Summary: 1 resumable, 1 corrupt \(2 total\)/);
     expect(out).toContain("--resume");
+  });
+
+  it("renders the user-owned name next to the id (Issue #530)", () => {
+    const out = formatSessionList([mk({ id: "abc", name: "auth refactor" })]);
+    expect(out).toContain('✓ abc  "auth refactor"');
+  });
+
+  it("renders unnamed sessions exactly as before (Issue #530)", () => {
+    const out = formatSessionList([mk({ id: "abc" })]);
+    expect(out).toContain("✓ abc");
+    expect(out).not.toContain('abc  "');
+  });
+
+  it("redacts secret-shaped session names (Issue #530)", () => {
+    const token = ["ghp", "_", "b".repeat(24)].join("");
+    const out = formatSessionList([mk({ id: "abc", name: `release ${token}` })]);
+    expect(out).not.toContain(token);
+    expect(out).toContain("[REDACTED]");
+  });
+
+  it("shows a corrupt session's name alongside the corrupt flag (Issue #530)", () => {
+    const out = formatSessionList([mk({ id: "def", name: "old run", corrupt: true })]);
+    expect(out).toContain('✗ def  "old run"  (corrupt — partial recovery)');
   });
 
   it("redacts secret-like values in model and workspace", () => {
