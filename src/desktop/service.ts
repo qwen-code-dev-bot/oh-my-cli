@@ -11,6 +11,7 @@ import {
   MAX_IMAGES_PER_MESSAGE,
 } from "../image-input.js";
 import { collectProfileList, resolveModelProfileConfig } from "../model-profiles.js";
+import { loadWorkspaceEnv } from "../workspace-env.js";
 import { redactEndpointHost, redactSecrets } from "../permission-impact.js";
 import { SessionStore, type SessionMessage } from "../session.js";
 import { normalizeSessionName, sessionDisplayTitle } from "../session-name.js";
@@ -127,7 +128,13 @@ export class DesktopService {
     this.store = opts.store ?? new SessionStore();
     this.run = opts.run ?? runAgent;
     this.resolveConfig =
-      opts.resolveConfig ?? (() => resolveModelProfileConfig().config);
+      opts.resolveConfig ??
+      (() =>
+        resolveModelProfileConfig({
+          // Issue #509: a trusted workspace's `.env` feeds model-config
+          // resolution as the layer under the real environment.
+          workspaceEnv: loadWorkspaceEnv({ workspacePath: this.workspace.root }),
+        }).config);
     this.settingsPath = opts.settingsPath;
     this.uiStatePath =
       opts.uiStatePath ??
@@ -560,6 +567,8 @@ export class DesktopService {
       const resolved = resolveModelProfileConfig({
         settingsPath: this.settingsPath,
         ...(selected ? { profile: selected } : {}),
+        // Issue #509: a trusted workspace's `.env` participates in resolution.
+        workspaceEnv: loadWorkspaceEnv({ workspacePath: this.workspace.root }),
       });
       return {
         model: resolved.config.model,

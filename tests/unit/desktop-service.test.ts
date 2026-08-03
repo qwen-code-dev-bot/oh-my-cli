@@ -9,6 +9,12 @@ import {
   type DesktopServiceOptions,
 } from "../../src/desktop/service.js";
 import { SessionStore } from "../../src/session.js";
+import {
+  addTrusted,
+  emptyTrustStore,
+  saveTrustStore,
+  workspaceTrustKey,
+} from "../../src/folder-trust.js";
 
 let root: string;
 let sessions: string;
@@ -624,6 +630,89 @@ describe("DesktopService", () => {
         ).toBe("local");
       } finally {
         delete process.env.OMC_TEST_KEY_489;
+      }
+    });
+  });
+
+  describe("workspace .env wiring (#509)", () => {
+    function withIsolatedEnvHome<T>(home: string, fn: () => T): T {
+      const prevHome = process.env.HOME;
+      const saved = {
+        model: process.env.OPENAI_MODEL,
+        key: process.env.OPENAI_API_KEY,
+        baseUrl: process.env.OPENAI_BASE_URL,
+      };
+      delete process.env.OPENAI_MODEL;
+      delete process.env.OPENAI_API_KEY;
+      delete process.env.OPENAI_BASE_URL;
+      process.env.HOME = home;
+      try {
+        return fn();
+      } finally {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+        for (const [name, value] of Object.entries({
+          OPENAI_MODEL: saved.model,
+          OPENAI_API_KEY: saved.key,
+          OPENAI_BASE_URL: saved.baseUrl,
+        })) {
+          if (value === undefined) delete process.env[name];
+          else process.env[name] = value;
+        }
+      }
+    }
+
+    function fakeHomeWithTrust(workspaceRoot: string): string {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "omc-desktop-home-"));
+      fs.mkdirSync(path.join(home, ".oh-my-cli"), { recursive: true });
+      saveTrustStore(
+        path.join(home, ".oh-my-cli", "trust.json"),
+        addTrusted(emptyTrustStore(), workspaceTrustKey(workspaceRoot)),
+      );
+      return home;
+    }
+
+    it("default config resolution loads a trusted workspace .env", () => {
+      fs.writeFileSync(
+        path.join(root, ".env"),
+        "OPENAI_MODEL=ws-desktop-model\nOPENAI_API_KEY=sk-ws-desktop\n",
+      );
+      const home = fakeHomeWithTrust(root);
+      try {
+        withIsolatedEnvHome(home, () => {
+          const service = new DesktopService({
+            workspaceRoot: root,
+            store: new SessionStore(sessions),
+            uiStatePath,
+            recentsPath,
+          });
+          const info = service.getRuntimeInfo();
+          expect(info.model).toBe("ws-desktop-model");
+        });
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it("an untrusted workspace .env does not feed resolution", () => {
+      fs.writeFileSync(
+        path.join(root, ".env"),
+        "OPENAI_MODEL=ws-desktop-model\nOPENAI_API_KEY=sk-ws-desktop\n",
+      );
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "omc-desktop-home-"));
+      try {
+        withIsolatedEnvHome(home, () => {
+          const service = new DesktopService({
+            workspaceRoot: root,
+            store: new SessionStore(sessions),
+            uiStatePath,
+            recentsPath,
+          });
+          // No trusted .env and no other model source: truthful degradation.
+          expect(service.getRuntimeInfo().model).toBeNull();
+        });
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
       }
     });
   });

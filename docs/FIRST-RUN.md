@@ -54,6 +54,14 @@ settings file is only read from the user-owned default or an explicit
 `--settings <path>` — never auto-discovered inside a project. See
 [../README.md](../README.md#configuration) for the full precedence table.
 
+A third option keeps credentials in a project-local `.env` file at the
+workspace root (`OPENAI_API_KEY=...`, `OPENAI_BASE_URL=...`,
+`OPENAI_MODEL=...`). This is gated by folder trust: only a workspace trusted
+with `--trust-workspace` (or `--trust` for one run) has its `.env` read, and
+real environment variables always win over `.env` values. The file feeds
+model-config resolution only — it never mutates the process environment, so
+its values are not inherited by spawned tools.
+
 Secrets are kept out of output: the CLI redacts key-like tokens before printing.
 
 ## 3. Verify your setup
@@ -153,6 +161,7 @@ oh-my-cli -p "Summarize README.md" --output json
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `Configuration error: OPENAI_API_KEY is required` | Missing env var | Export `OPENAI_API_KEY` (and `OPENAI_MODEL`) |
+| Workspace `.env` is ignored | Workspace not trusted | Run `oh-my-cli --trust-workspace` once (or add `--trust` to the run) |
 | `--doctor` reports the Node runtime failed | Node older than 22 | Upgrade to Node.js 22+ |
 | `interactive mode requires a TTY` | No terminal attached | Use `-p "<prompt>"` for non-interactive runs |
 | `Provider error` / connection failure | Wrong base URL or key, or network down | Check `OPENAI_BASE_URL`/`OPENAI_API_KEY`, then run `--preflight` |

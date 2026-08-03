@@ -30,6 +30,7 @@ import {
   formatProfileList,
   resolveModelProfileConfig,
 } from "./model-profiles.js";
+import { loadWorkspaceEnv } from "./workspace-env.js";
 import { Workspace } from "./workspace.js";
 import { SessionStore } from "./session.js";
 import {
@@ -2179,6 +2180,10 @@ program
           settingsPath: resolveSettingsPath(opts.settings),
           env: process.env,
           profile: opts.profile,
+          workspaceEnv: loadWorkspaceEnv({
+            workspacePath: opts.workspace,
+            trustThisRun: Boolean(opts.trust),
+          }),
         });
         process.stderr.write(describeResolvedConfig(resolved) + "\n");
         const result = await runPreflight(resolved.config);
@@ -2191,6 +2196,12 @@ program
         settingsPath,
         env: process.env,
         profile: opts.profile,
+        // Issue #509: a trusted workspace's `.env` feeds model-config
+        // resolution as the layer under the real environment.
+        workspaceEnv: loadWorkspaceEnv({
+          workspacePath: opts.workspace,
+          trustThisRun: Boolean(opts.trust),
+        }),
       });
       const config = resolved.config;
       const store = new SessionStore();

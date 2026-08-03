@@ -10,6 +10,7 @@ import {
   resolveModelProfileConfig,
 } from "../../src/model-profiles.js";
 import { describeResolvedConfig } from "../../src/settings.js";
+import type { WorkspaceEnvLoad } from "../../src/workspace-env.js";
 
 const tmpDirs: string[] = [];
 
@@ -258,6 +259,52 @@ describe("resolveModelProfileConfig: selection", () => {
     });
     // The profile is still recorded as the selection that fed resolution.
     expect(resolved.profile).toBe("qwen");
+  });
+
+  it("a trusted workspace .env satisfies a profile's apiKeyEnv under the real environment", () => {
+    const settings = writeSettings({
+      profiles: {
+        qwen: { name: "qwen-model", baseUrl: "https://settings.example/v1", apiKeyEnv: "DASHSCOPE_API_KEY" },
+      },
+    });
+    const workspaceEnv: WorkspaceEnvLoad = {
+      envPath: "/ws/.env",
+      loaded: true,
+      values: { DASHSCOPE_API_KEY: "sk-ws-profile" },
+    };
+    const resolved = resolveModelProfileConfig({
+      settingsPath: settings,
+      env: {},
+      profile: "qwen",
+      workspaceEnv,
+    });
+    // The .env supplies the credential the profile names; the profile keeps
+    // providing the model name and endpoint.
+    expect(resolved.config.model).toBe("qwen-model");
+    expect(resolved.config.apiKey).toBe("sk-ws-profile");
+    expect(resolved.modelSource).toBe("settings");
+    expect(resolved.profile).toBe("qwen");
+    expect(resolved.workspaceEnvPath).toBe("/ws/.env");
+
+    // The real environment still beats the workspace .env.
+    const overridden = resolveModelProfileConfig({
+      settingsPath: settings,
+      env: { DASHSCOPE_API_KEY: "sk-real" },
+      profile: "qwen",
+      workspaceEnv,
+    });
+    expect(overridden.config.apiKey).toBe("sk-real");
+
+    // Like real env vars, OPENAI_MODEL in the workspace .env overrides the
+    // profile's model name.
+    const wsModel = resolveModelProfileConfig({
+      settingsPath: settings,
+      env: {},
+      profile: "qwen",
+      workspaceEnv: { ...workspaceEnv, values: { ...workspaceEnv.values, OPENAI_MODEL: "ws-model" } },
+    });
+    expect(wsModel.config.model).toBe("ws-model");
+    expect(wsModel.modelSource).toBe("workspace-env");
   });
 });
 

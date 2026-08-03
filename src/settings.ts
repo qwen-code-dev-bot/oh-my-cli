@@ -19,6 +19,7 @@ import { z } from "zod";
 import type { Config } from "./config.js";
 import { DEFAULT_BASE_URL } from "./config.js";
 import { redactHomePath, redactEndpointHost } from "./permission-impact.js";
+import type { WorkspaceEnvLoad } from "./workspace-env.js";
 
 // The user-owned default settings file. Never a project-local path.
 export function defaultUserSettingsPath(): string {
@@ -71,7 +72,7 @@ const ModelSettingsSchema = z.object({
     .optional(),
 });
 
-export type ConfigSource = "env" | "settings" | "default";
+export type ConfigSource = "env" | "workspace-env" | "settings" | "default";
 
 // The resolved configuration plus non-secret provenance: which source won for
 // each field and which environment variable holds the credential. The credential
@@ -81,13 +82,16 @@ export interface ResolvedConfig {
   settingsPath: string;
   settingsFound: boolean;
   baseUrlSource: ConfigSource;
-  modelSource: "env" | "settings";
+  modelSource: "env" | "workspace-env" | "settings";
   credentialVariable: string;
   credentialFromSettings: boolean;
   // The named model profile that produced this configuration, when one was
   // selected (via --profile or settings.defaultProfile). Absent for the legacy
   // single `model` section. Never carries a credential value.
   profile?: string;
+  // The trusted workspace `.env` file that participated in resolution, when one
+  // was loaded (Issue #509). Path only — never carries a value.
+  workspaceEnvPath?: string;
 }
 
 interface ModelSection {
@@ -154,9 +158,12 @@ function readModelSection(settingsPath: string): ModelSection {
 // Resolve a validated model configuration from a settings-provided model section
 // (or a selected model profile, which has the same shape) layered under
 // environment variables. Precedence, highest first:
-//   baseUrl:    OPENAI_BASE_URL > model.baseUrl > built-in default
-//   model name: OPENAI_MODEL    > model.name    > (required)
-//   credential: OPENAI_API_KEY  > env[model.apiKeyEnv] > (required)
+//   baseUrl:    OPENAI_BASE_URL > workspace .env OPENAI_BASE_URL > model.baseUrl > built-in default
+//   model name: OPENAI_MODEL    > workspace .env OPENAI_MODEL    > model.name    > (required)
+//   credential: OPENAI_API_KEY  > workspace .env OPENAI_API_KEY  > env[model.apiKeyEnv] > (required)
+// The workspace `.env` layer (Issue #509) is the parsed content of a trusted
+// workspace's `.env` file (see workspace-env.ts); it sits under the real
+// environment and over settings defaults, and never mutates `process.env`.
 // Every failure raises a redacted error before any network request. `model` may
 // be undefined (no settings model section): resolution then falls back to the
 // environment and built-in defaults. `profile`, when given, is recorded as
@@ -168,16 +175,24 @@ export function resolveModelFromSettings(
     settingsPath: string;
     settingsFound: boolean;
     profile?: string;
+    workspaceEnv?: WorkspaceEnvLoad;
   },
 ): ResolvedConfig {
   const env = opts.env;
+  const workspaceEnv = opts.workspaceEnv?.loaded === true ? opts.workspaceEnv : undefined;
+  const wsValue = (name: string): string | undefined =>
+    workspaceEnv ? envValue(workspaceEnv.values, name) : undefined;
 
   let baseUrl: string;
   let baseUrlSource: ConfigSource;
   const envBaseUrl = envValue(env, "OPENAI_BASE_URL");
+  const wsBaseUrl = wsValue("OPENAI_BASE_URL");
   if (envBaseUrl !== undefined) {
     baseUrl = envBaseUrl;
     baseUrlSource = "env";
+  } else if (wsBaseUrl !== undefined) {
+    baseUrl = wsBaseUrl;
+    baseUrlSource = "workspace-env";
   } else if (model?.baseUrl) {
     baseUrl = model.baseUrl;
     baseUrlSource = "settings";
@@ -187,11 +202,15 @@ export function resolveModelFromSettings(
   }
 
   let modelName: string;
-  let modelSource: "env" | "settings";
+  let modelSource: "env" | "workspace-env" | "settings";
   const envModel = envValue(env, "OPENAI_MODEL");
+  const wsModel = wsValue("OPENAI_MODEL");
   if (envModel !== undefined) {
     modelName = envModel;
     modelSource = "env";
+  } else if (wsModel !== undefined) {
+    modelName = wsModel;
+    modelSource = "workspace-env";
   } else if (model?.name) {
     modelName = model.name;
     modelSource = "settings";
@@ -205,13 +224,17 @@ export function resolveModelFromSettings(
   let credentialVariable: string;
   let credentialFromSettings = false;
   const envKey = envValue(env, "OPENAI_API_KEY");
+  const wsKey = wsValue("OPENAI_API_KEY");
   if (envKey !== undefined) {
     apiKey = envKey;
+    credentialVariable = "OPENAI_API_KEY";
+  } else if (wsKey !== undefined) {
+    apiKey = wsKey;
     credentialVariable = "OPENAI_API_KEY";
   } else if (model?.apiKeyEnv) {
     credentialVariable = model.apiKeyEnv;
     credentialFromSettings = true;
-    const named = envValue(env, model.apiKeyEnv);
+    const named = envValue(env, model.apiKeyEnv) ?? wsValue(model.apiKeyEnv);
     if (named === undefined) {
       throw new Error(
         `Configuration error: credential environment variable ${model.apiKeyEnv} ` +
@@ -239,6 +262,7 @@ export function resolveModelFromSettings(
     credentialVariable,
     credentialFromSettings,
     ...(opts.profile ? { profile: opts.profile } : {}),
+    ...(workspaceEnv ? { workspaceEnvPath: workspaceEnv.envPath } : {}),
   };
 }
 
@@ -247,12 +271,21 @@ export function resolveModelFromSettings(
 // This is the legacy single-`model`-section path; model-profiles.ts layers named
 // profile selection on top of the same resolver.
 export function resolveModelConfig(
-  opts: { settingsPath?: string; env?: Record<string, string | undefined> } = {},
+  opts: {
+    settingsPath?: string;
+    env?: Record<string, string | undefined>;
+    workspaceEnv?: WorkspaceEnvLoad;
+  } = {},
 ): ResolvedConfig {
   const env = opts.env ?? process.env;
   const settingsPath = resolveSettingsPath(opts.settingsPath);
   const { found, model } = readModelSection(settingsPath);
-  return resolveModelFromSettings(model, { env, settingsPath, settingsFound: found });
+  return resolveModelFromSettings(model, {
+    env,
+    settingsPath,
+    settingsFound: found,
+    ...(opts.workspaceEnv ? { workspaceEnv: opts.workspaceEnv } : {}),
+  });
 }
 
 function isValidUrl(u: string): boolean {
@@ -267,7 +300,8 @@ function isValidUrl(u: string): boolean {
 // A redacted, human-readable summary of the resolved configuration: the selected
 // model, endpoint host, settings source, and credential environment-variable
 // name. Never the credential value, URL userinfo, sensitive query parameters, or
-// an unredacted home path.
+// an unredacted home path. A loaded workspace `.env` is reported by path only —
+// never by value (Issue #509).
 export function describeResolvedConfig(resolved: ResolvedConfig): string {
   const settings = resolved.settingsFound
     ? redactHomePath(resolved.settingsPath)
@@ -276,8 +310,11 @@ export function describeResolvedConfig(resolved: ResolvedConfig): string {
     `Model:      ${resolved.config.model} (${resolved.modelSource})`,
     `Endpoint:   ${redactEndpointHost(resolved.config.baseUrl)} (${resolved.baseUrlSource})`,
     `Settings:   ${settings}`,
-    `Credential: ${resolved.credentialVariable}`,
   ];
+  if (resolved.workspaceEnvPath) {
+    lines.push(`Env file:   ${redactHomePath(resolved.workspaceEnvPath)}`);
+  }
+  lines.push(`Credential: ${resolved.credentialVariable}`);
   // The profile name is a settings map key (non-secret), so it is safe to show.
   if (resolved.profile) {
     lines.unshift(`Profile:    ${resolved.profile}`);

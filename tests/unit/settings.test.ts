@@ -8,6 +8,7 @@ import {
   defaultUserSettingsPath,
   describeResolvedConfig,
 } from "../../src/settings.js";
+import type { WorkspaceEnvLoad } from "../../src/workspace-env.js";
 
 const tmpDirs: string[] = [];
 
@@ -237,5 +238,142 @@ describe("describeResolvedConfig: redaction", () => {
     } finally {
       process.env.HOME = prevHome;
     }
+  });
+});
+
+// Issue #509: a trusted workspace `.env` participates in resolution as the
+// layer under the real environment and over settings values.
+function wsLoad(values: Record<string, string>, envPath = "/ws/.env"): WorkspaceEnvLoad {
+  return { envPath, loaded: true, values };
+}
+
+describe("resolveModelConfig: workspace .env layer", () => {
+  it("workspace .env wins over settings and reports workspace-env provenance", () => {
+    const settings = writeSettings({
+      model: {
+        baseUrl: "https://settings.example/v1",
+        name: "settings-model",
+        apiKeyEnv: "NAMED_KEY",
+      },
+    });
+    const resolved = resolveModelConfig({
+      settingsPath: settings,
+      env: {},
+      workspaceEnv: wsLoad({
+        OPENAI_BASE_URL: "https://ws.example/v1",
+        OPENAI_MODEL: "ws-model",
+        NAMED_KEY: "sk-from-ws-env",
+      }),
+    });
+    expect(resolved.config).toEqual({
+      apiKey: "sk-from-ws-env",
+      baseUrl: "https://ws.example/v1",
+      model: "ws-model",
+    });
+    expect(resolved.baseUrlSource).toBe("workspace-env");
+    expect(resolved.modelSource).toBe("workspace-env");
+    expect(resolved.credentialVariable).toBe("NAMED_KEY");
+    expect(resolved.credentialFromSettings).toBe(true);
+    expect(resolved.workspaceEnvPath).toBe("/ws/.env");
+  });
+
+  it("real environment variables still take precedence over workspace .env", () => {
+    const settings = writeSettings({ model: { name: "m", apiKeyEnv: "K" } });
+    const resolved = resolveModelConfig({
+      settingsPath: settings,
+      env: { OPENAI_MODEL: "env-model", OPENAI_API_KEY: "env-key" },
+      workspaceEnv: wsLoad({ OPENAI_MODEL: "ws-model", OPENAI_API_KEY: "ws-key" }),
+    });
+    expect(resolved.config.model).toBe("env-model");
+    expect(resolved.config.apiKey).toBe("env-key");
+    expect(resolved.modelSource).toBe("env");
+    expect(resolved.credentialVariable).toBe("OPENAI_API_KEY");
+  });
+
+  it("OPENAI_API_KEY from workspace .env wins over the settings-named variable", () => {
+    const settings = writeSettings({ model: { name: "m", apiKeyEnv: "NAMED_KEY" } });
+    const resolved = resolveModelConfig({
+      settingsPath: settings,
+      env: { NAMED_KEY: "named-value" },
+      workspaceEnv: wsLoad({ OPENAI_API_KEY: "ws-primary" }),
+    });
+    expect(resolved.config.apiKey).toBe("ws-primary");
+    expect(resolved.credentialVariable).toBe("OPENAI_API_KEY");
+    expect(resolved.credentialFromSettings).toBe(false);
+  });
+
+  it("satisfies a settings-named apiKeyEnv credential from workspace .env", () => {
+    const settings = writeSettings({ model: { name: "m", apiKeyEnv: "DASHSCOPE_API_KEY" } });
+    const resolved = resolveModelConfig({
+      settingsPath: settings,
+      env: {},
+      workspaceEnv: wsLoad({ DASHSCOPE_API_KEY: "sk-ws-named" }),
+    });
+    expect(resolved.config.apiKey).toBe("sk-ws-named");
+    expect(resolved.credentialVariable).toBe("DASHSCOPE_API_KEY");
+    expect(resolved.credentialFromSettings).toBe(true);
+  });
+
+  it("a workspace .env value beats settings defaults but not the built-in URL order", () => {
+    const settings = writeSettings({ model: { name: "m", apiKeyEnv: "K" } });
+    const resolved = resolveModelConfig({
+      settingsPath: settings,
+      env: { K: "v" },
+      workspaceEnv: wsLoad({}),
+    });
+    expect(resolved.config.baseUrl).toBe("https://api.openai.com/v1");
+    expect(resolved.baseUrlSource).toBe("default");
+    expect(resolved.modelSource).toBe("settings");
+  });
+
+  it("ignores a load that was not loaded (untrusted or missing)", () => {
+    const settings = writeSettings({ model: { name: "settings-model", apiKeyEnv: "K" } });
+    const resolved = resolveModelConfig({
+      settingsPath: settings,
+      env: { K: "v" },
+      workspaceEnv: {
+        envPath: "/ws/.env",
+        loaded: false,
+        values: { OPENAI_MODEL: "must-not-appear" },
+      },
+    });
+    expect(resolved.config.model).toBe("settings-model");
+    expect(resolved.modelSource).toBe("settings");
+    expect(resolved.workspaceEnvPath).toBeUndefined();
+  });
+
+  it("empty-string .env values are treated as unset, like the real environment", () => {
+    const settings = writeSettings({ model: { name: "settings-model", apiKeyEnv: "K" } });
+    const resolved = resolveModelConfig({
+      settingsPath: settings,
+      env: { K: "v" },
+      workspaceEnv: wsLoad({ OPENAI_MODEL: "" }),
+    });
+    expect(resolved.config.model).toBe("settings-model");
+    expect(resolved.modelSource).toBe("settings");
+  });
+
+  it("fails when the settings-named credential exists in neither env nor .env", () => {
+    const settings = writeSettings({ model: { name: "m", apiKeyEnv: "MISSING_KEY" } });
+    expect(() =>
+      resolveModelConfig({ settingsPath: settings, env: {}, workspaceEnv: wsLoad({}) }),
+    ).toThrow(/MISSING_KEY/);
+  });
+
+  it("describeResolvedConfig shows the workspace-env source and path, never values", () => {
+    const settings = writeSettings({ model: { name: "m" } });
+    const resolved = resolveModelConfig({
+      settingsPath: settings,
+      env: {},
+      workspaceEnv: wsLoad(
+        { OPENAI_MODEL: "ws-model", OPENAI_API_KEY: "sk-ws-super-secret" },
+        "/srv/projects/demo/.env",
+      ),
+    });
+    const out = describeResolvedConfig(resolved);
+    expect(out).toContain("ws-model (workspace-env)");
+    expect(out).toContain("/srv/projects/demo/.env");
+    expect(out).toContain("OPENAI_API_KEY");
+    expect(out).not.toContain("sk-ws-super-secret");
   });
 });
