@@ -252,6 +252,13 @@ shared by several sessions fails closed listing their short ids, and corrupt
 or unknown values fail closed with an actionable reason — it never resumes a
 different session.
 
+The same id-or-name targeting applies to every other session-targeted flag:
+`--session-stats`, `--tasks`, `--export-session`, `--rename-session`,
+`--compact`, `--undo-turn`, `--redo-turn`, and `--session` all accept an
+exact session id or a user-owned name, with the same fail-closed semantics
+(exact id wins; ambiguous, corrupt, and unknown values are reported, never
+substituted).
+
 Prefer one step? `oh-my-cli --continue` resumes the most recent healthy
 session declared for the current workspace — no id needed (workspace aliases
 and linked worktrees match the same sessions). With no matching session it
@@ -508,22 +515,22 @@ focused tests and the end-to-end receipt.
 |---|---|
 | `-p, --prompt <prompt>` | Run a single non-interactive request |
 | `--image <paths...>` | Attach image file(s) by path for vision-capable analysis (PNG, JPEG, GIF, or WebP); also `/attach` in interactive mode |
-| `--resume <session-id>` | Resume a persisted session |
+| `--resume <id-or-name>` | Resume a persisted session by exact id or user-owned name |
 | `--browse-sessions` | Interactively browse, search, and resume a previous session (requires a terminal) |
 | `--list-sessions` | List resumable sessions with a redacted usage summary and exit |
-| `--session-stats <session-id>` | Show a read-only, deterministic activity/efficiency stats view for a session (add `--output json` for automation) and exit; also `/stats` in interactive mode |
+| `--session-stats <id-or-name>` | Show a read-only, deterministic activity/efficiency stats view for a session by exact id or user-owned name (add `--output json` for automation) and exit; also `/stats` in interactive mode |
 | `--lsp-status` | Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add `--output json` for automation) and exit; also `/lsp` in interactive mode |
-| `--tasks <session-id>` | Show the read-only background-task center for a session — lifecycle states, durable receipts, and restart reconciliation (add `--output json` for automation) and exit; also `/tasks` in interactive mode |
-| `--export-session <session-id>` | Export a session locally as redacted Markdown + a deterministic JSON manifest and exit |
+| `--tasks <id-or-name>` | Show the read-only background-task center for a session, by exact id or user-owned name — lifecycle states, durable receipts, and restart reconciliation (add `--output json` for automation) and exit; also `/tasks` in interactive mode |
+| `--export-session <id-or-name>` | Export a session locally as redacted Markdown + a deterministic JSON manifest, by exact id or user-owned name, and exit |
 | `--out <dir>` | Output directory for `--export-session` (default: current directory) |
 | `--force` | Overwrite existing `--export-session` output files |
-| `--compact <session-id>` | Compact a session into a bounded summary sidecar (original transcript preserved) and exit |
+| `--compact <id-or-name>` | Compact a session into a bounded summary sidecar (original transcript preserved), targeted by exact id or user-owned name, and exit |
 | `--compact-threshold <tokens>` | Auto-compact the in-memory transcript when the latest prompt size reaches this (also honors `OMC_COMPACT_THRESHOLD`) |
-| `--undo-turn <session-id>` | Safely undo the most recent completed agent turn of a session (restores its files + transcript) and exit |
-| `--redo-turn <session-id>` | Redo the most recent undone agent turn of a session and exit |
+| `--undo-turn <id-or-name>` | Safely undo the most recent completed agent turn of a session (restores its files + transcript), targeted by exact id or user-owned name, and exit |
+| `--redo-turn <id-or-name>` | Redo the most recent undone agent turn of a session, targeted by exact id or user-owned name, and exit |
 | `--dry-run` | Preview an `--undo-turn`/`--redo-turn` plan without changing the workspace or transcript |
 | `--side-question <text>` | Ask a side question against a session's bounded, read-only context (no tools, no mutation, nothing persisted) and exit; also `/ask` in interactive mode |
-| `--session <session-id>` | Source session whose read-only context seeds `--side-question` |
+| `--session <id-or-name>` | Source session whose read-only context seeds `--side-question`, by exact id or user-owned name |
 | `--approval-mode <mode>` | `default`, `auto-edit`, or `yolo` |
 | `--workspace <dir>` | Workspace directory (default: cwd) |
 | `--doctor` | Run read-only installation/platform readiness checks and exit |
