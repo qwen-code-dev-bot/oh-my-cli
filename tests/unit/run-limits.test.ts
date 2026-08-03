@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseMaxTurns, parseWallTimeMs } from "../../src/run-limits.js";
+import { parseMaxTurns, parseWallTimeMs, parseMaxToolCalls } from "../../src/run-limits.js";
 
 describe("run limits: parseMaxTurns (Issue #515)", () => {
   it("returns null when unset or blank (no cap)", () => {
@@ -20,6 +20,28 @@ describe("run limits: parseMaxTurns (Issue #515)", () => {
     expect(() => parseMaxTurns("-2")).toThrow(/positive integer/);
     expect(() => parseMaxTurns("1.5")).toThrow(/positive integer/);
     expect(() => parseMaxTurns("abc")).toThrow(/Invalid max turns "abc"/);
+  });
+});
+
+describe("run limits: parseMaxToolCalls (Issue #517)", () => {
+  it("returns null when unset or blank (no cap)", () => {
+    expect(parseMaxToolCalls(undefined)).toBeNull();
+    expect(parseMaxToolCalls(null)).toBeNull();
+    expect(parseMaxToolCalls("")).toBeNull();
+    expect(parseMaxToolCalls("   ")).toBeNull();
+  });
+
+  it("parses a positive integer with surrounding whitespace", () => {
+    expect(parseMaxToolCalls("50")).toBe(50);
+    expect(parseMaxToolCalls(" 1 ")).toBe(1);
+    expect(parseMaxToolCalls("1000")).toBe(1000);
+  });
+
+  it("throws an actionable error on invalid values", () => {
+    expect(() => parseMaxToolCalls("0")).toThrow(/Invalid max tool calls/);
+    expect(() => parseMaxToolCalls("-3")).toThrow(/positive integer/);
+    expect(() => parseMaxToolCalls("2.5")).toThrow(/positive integer/);
+    expect(() => parseMaxToolCalls("many")).toThrow(/Invalid max tool calls "many"/);
   });
 });
 

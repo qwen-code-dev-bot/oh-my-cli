@@ -2599,6 +2599,10 @@ export interface ConversationShellOptions {
   // Operator wall-time cap in milliseconds (Issue #515): stop at the first round
   // boundary after this much wall time has elapsed. Null/undefined disables it.
   maxWallTimeMs?: number | null;
+  // Operator tool-call cap (Issue #517): stop at the first round boundary after
+  // the cumulative processed tool-call count reaches it. Null/undefined
+  // disables it.
+  maxToolCalls?: number | null;
   // Context-pressure auto-compaction threshold (tokens); undefined disables it.
   compactThreshold?: number;
   // Folder-trust enforcement: when false, mutating tools fail closed in the
@@ -3832,6 +3836,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         budgetUsd: opts.budgetUsd ?? null,
         maxTurns: opts.maxTurns ?? null,
         maxWallTimeMs: opts.maxWallTimeMs ?? null,
+        maxToolCalls: opts.maxToolCalls ?? null,
         compactThreshold: opts.compactThreshold,
         mutatingAllowed: opts.mutatingAllowed ?? true,
         images,
@@ -3862,6 +3867,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         state.transcript.push({
           kind: "notice",
           text: "wall-time budget reached; stopped before further provider calls",
+        });
+        scheduleRender();
+      } else if (result.reason === "tool_call_budget_reached") {
+        state.transcript.push({
+          kind: "notice",
+          text: "tool-call budget reached; stopped before further provider calls",
         });
         scheduleRender();
       }

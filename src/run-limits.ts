@@ -1,11 +1,13 @@
-// Operator-settable run caps for bounded unattended execution (Issue #515).
+// Operator-settable run caps for bounded unattended execution (Issues #515,
+// #517).
 //
 // Cost budgeting (`--budget`) only bounds a run when a model price is known,
 // and the internal MAX_ROUNDS ceiling is a fixed safety bound, not user
-// policy. These parsers give automation authors declarative turn and
-// wall-time caps. They follow the `parseBudgetUsd` convention (src/cost.ts):
-// unset/blank means "no cap" (null); an invalid value throws so the CLI can
-// report an actionable usage error instead of silently disabling the cap.
+// policy. These parsers give automation authors declarative turn, wall-time,
+// and tool-call caps. They follow the `parseBudgetUsd` convention
+// (src/cost.ts): unset/blank means "no cap" (null); an invalid value throws
+// so the CLI can report an actionable usage error instead of silently
+// disabling the cap.
 
 // Parse a turn cap from a flag or env value. Returns null when unset. The cap
 // stops the run before the (n+1)th provider round. Throws on a non-positive
@@ -18,6 +20,23 @@ export function parseMaxTurns(value: string | undefined | null): number | null {
   if (!Number.isInteger(n) || n <= 0) {
     throw new Error(
       `Invalid max turns "${value}": expected a positive integer (e.g. 30)`,
+    );
+  }
+  return n;
+}
+
+// Parse a cumulative tool-call cap from a flag or env value (Issue #517).
+// Returns null when unset. Once the run's processed tool-call count reaches
+// the cap, the run stops at the next round boundary. Throws on a non-positive
+// or non-integer value.
+export function parseMaxToolCalls(value: string | undefined | null): number | null {
+  if (value === undefined || value === null) return null;
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(
+      `Invalid max tool calls "${value}": expected a positive integer (e.g. 50)`,
     );
   }
   return n;

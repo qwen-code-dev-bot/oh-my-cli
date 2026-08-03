@@ -63,6 +63,7 @@ function loopingProvider(toolRounds: number): { provider: StreamProvider; calls:
 interface RunOpts {
   maxTurns?: number | null;
   maxWallTimeMs?: number | null;
+  maxToolCalls?: number | null;
   runClock?: () => number;
 }
 
@@ -78,6 +79,7 @@ async function run(provider: StreamProvider, opts: RunOpts = {}) {
     streamProvider: provider,
     ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
     ...(opts.maxWallTimeMs !== undefined ? { maxWallTimeMs: opts.maxWallTimeMs } : {}),
+    ...(opts.maxToolCalls !== undefined ? { maxToolCalls: opts.maxToolCalls } : {}),
     ...(opts.runClock ? { runClock: opts.runClock } : {}),
   });
   return result;
@@ -148,5 +150,58 @@ describe("runAgent operator run caps (Issue #515)", () => {
     const result = await run(provider, { maxTurns: 50, maxWallTimeMs: 60_000 });
     expect(result.ok).toBe(true);
     expect(result.reason).toBe("completed");
+  });
+});
+
+// A scripted provider whose first round emits two read tool calls in one
+// batch, then answers with text on every later round.
+function batchProvider(): { provider: StreamProvider; calls: () => number } {
+  let call = 0;
+  const provider: StreamProvider = async function* () {
+    const index = call;
+    call++;
+    if (index === 0) {
+      yield readCallEvent("b1");
+      yield readCallEvent("b2");
+      yield USAGE;
+    } else {
+      yield { type: "text", delta: "done" } as StreamEvent;
+      yield USAGE;
+    }
+  };
+  return { provider, calls: () => call };
+}
+
+describe("runAgent tool-call cap (Issue #517)", () => {
+  it("stops at the first round boundary after the cumulative tool-call count reaches the cap", async () => {
+    const { provider, calls } = loopingProvider(10);
+    const result = await run(provider, { maxToolCalls: 2 });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("tool_call_budget_reached");
+    // Rounds 0 and 1 each executed one tool call; round 2's boundary stops.
+    expect(result.rounds).toBe(2);
+    expect(calls()).toBe(2);
+    expect(result.stats.toolCalls.read).toBe(2);
+  });
+
+  it("a round batch that crosses the cap completes all of its results before the stop", async () => {
+    const { provider, calls } = batchProvider();
+    const result = await run(provider, { maxToolCalls: 1 });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("tool_call_budget_reached");
+    // Round 0's batch of two calls ran to completion (transcript stays
+    // complete — no orphan tool_call), then round 1's boundary stopped.
+    expect(result.rounds).toBe(1);
+    expect(calls()).toBe(1);
+    expect(result.stats.toolCalls.read).toBe(2);
+    expect(result.stats.toolFailures.read ?? 0).toBe(0);
+  });
+
+  it("a run that finishes under the cap is unchanged", async () => {
+    const { provider } = loopingProvider(1);
+    const result = await run(provider, { maxToolCalls: 10 });
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBe("completed");
+    expect(result.stats.toolCalls.read).toBe(1);
   });
 });

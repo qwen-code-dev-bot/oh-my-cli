@@ -206,7 +206,7 @@ import { loadImageAttachments, imageRef } from "./image-input.js";
 import type { LoadedImage } from "./image-input.js";
 import { createTools } from "./tools.js";
 import { parseBudgetUsd } from "./cost.js";
-import { parseMaxTurns, parseWallTimeMs } from "./run-limits.js";
+import { parseMaxTurns, parseWallTimeMs, parseMaxToolCalls } from "./run-limits.js";
 import {
   readRunSummaryFile,
   compareRunSummaries,
@@ -547,6 +547,10 @@ program
   .option(
     "--max-wall-time <duration>",
     "Wall-time budget for the run, e.g. 90, 30s, 5m, 1h, 1.5h; the run stops at the first round boundary after it elapses (also honors OMC_MAX_WALL_TIME)",
+  )
+  .option(
+    "--max-tool-calls <n>",
+    "Cumulative tool-call budget; the run stops at the first round boundary after the processed tool-call count reaches it (also honors OMC_MAX_TOOL_CALLS)",
   )
   .option("--baseline <file>", "Baseline run-summary file to compare in scorecard mode")
   .option("--candidate <file>", "Candidate run-summary file to compare in scorecard mode")
@@ -2360,6 +2364,16 @@ program
         process.stderr.write(`${msg}\n`);
         process.exit(1);
       }
+      // Tool-call cap (Issue #517): same convention; bounds cumulative tool
+      // activity for runs where turns and wall time alone are not enough.
+      let maxToolCalls: number | null = null;
+      try {
+        maxToolCalls = parseMaxToolCalls(opts.maxToolCalls ?? process.env.OMC_MAX_TOOL_CALLS);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`${msg}\n`);
+        process.exit(1);
+      }
 
       // Context-pressure auto-compaction threshold (tokens). Honors the flag then
       // the env var; absent/blank disables it, an unparseable value is a usage
@@ -2593,6 +2607,7 @@ program
               budgetUsd,
               maxTurns,
               maxWallTimeMs,
+              maxToolCalls,
               compactThreshold,
               mutatingAllowed,
               images,
@@ -2695,6 +2710,7 @@ program
           budgetUsd,
           maxTurns,
           maxWallTimeMs,
+          maxToolCalls,
           compactThreshold,
           mutatingAllowed,
           images,
@@ -2896,6 +2912,7 @@ program
             budgetUsd,
             maxTurns,
             maxWallTimeMs,
+            maxToolCalls,
             compactThreshold,
             mutatingAllowed,
             color: useColor,
@@ -3067,6 +3084,7 @@ program
                 budgetUsd,
                 maxTurns,
                 maxWallTimeMs,
+                maxToolCalls,
                 compactThreshold,
                 mutatingAllowed,
                 images,

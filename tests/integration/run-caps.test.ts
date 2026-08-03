@@ -112,4 +112,35 @@ describe("Integration: --max-turns and --max-wall-time bound headless runs (#515
     expect(r.stderr).toContain("Invalid wall-time budget");
     expect(server.requests.length).toBe(requestCountBefore);
   });
+
+  it("--max-tool-calls 1 stops a tool-looping run at the first boundary after one call", async () => {
+    server.setResponse({
+      type: "tool_calls",
+      toolCalls: [{ id: "c1", name: "read", arguments: JSON.stringify({ path: "x.txt" }) }],
+    });
+    const requestCountBefore = server.requests.length;
+    const r = await runCli(
+      ["-p", "keep reading", "--output", "json", "--max-tool-calls", "1", "--workspace", wsDir],
+      baseEnv,
+    );
+    expect(r.code).toBe(1);
+    const complete = completeEvent(r.stdout);
+    expect(complete).not.toBeNull();
+    expect(complete!.ok).toBe(false);
+    expect(complete!.reason).toBe("tool_call_budget_reached");
+    // Exactly one provider round happened: its tool call ran, then the
+    // boundary stopped the run.
+    expect(server.requests.length).toBe(requestCountBefore + 1);
+  });
+
+  it("an invalid --max-tool-calls value is a usage error before any provider call", async () => {
+    const requestCountBefore = server.requests.length;
+    const r = await runCli(
+      ["-p", "hello", "--output", "json", "--max-tool-calls", "many", "--workspace", wsDir],
+      baseEnv,
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("Invalid max tool calls");
+    expect(server.requests.length).toBe(requestCountBefore);
+  });
 });
