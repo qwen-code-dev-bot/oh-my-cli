@@ -52,6 +52,7 @@ import {
   runSessionPicker,
   resolveResumeTarget,
   resolveResumeFlagTarget,
+  resolveResumeByName,
   shortSessionId,
 } from "./session-picker.js";
 import { normalizeSessionName } from "./session-name.js";
@@ -382,8 +383,8 @@ program
     "Attach image file(s) by path for vision-capable analysis (PNG, JPEG, GIF, or WebP)",
   )
   .option(
-    "--resume <session-id>",
-    "Resume a persisted session (fails closed when the id is empty or the session is missing, corrupt, or unreadable)",
+    "--resume <id-or-name>",
+    "Resume a persisted session by exact id or by its user-owned name (fails closed when the value is empty or the session is missing, corrupt, ambiguous, or unreadable)",
   )
   .option(
     "--continue",
@@ -2452,15 +2453,24 @@ program
       // resolve to a readable session: fail closed before any provider interaction
       // when the id is empty, the session is missing, or the checkpoint cannot be
       // resumed safely — silently starting fresh would drop the context the user
-      // asked to resume.
+      // asked to resume. An exact session id wins; when no session exists under
+      // the id, the value resolves as a user-owned session name (#534) with the
+      // same fail-closed semantics (ambiguous and corrupt matches are reported,
+      // never substituted).
+      let resumeFlagSessionId: string | undefined;
       if (browseResume === null && opts.resume !== undefined) {
-        const target = resolveResumeFlagTarget(String(opts.resume), store);
+        const raw = String(opts.resume);
+        let target = resolveResumeFlagTarget(raw, store);
+        if (!target.ok) {
+          target = resolveResumeByName(raw, store);
+        }
         if (!target.ok) {
           process.stderr.write(`Cannot resume: ${target.reason}\n`);
           process.exit(1);
         }
+        resumeFlagSessionId = target.sessionId;
       }
-      const resumeId = browseResume?.sessionId ?? opts.resume ?? continueResumeId;
+      const resumeId = browseResume?.sessionId ?? resumeFlagSessionId ?? continueResumeId;
       if (resumeId) {
         sessionId = resumeId;
         // Heal an interrupted checkpoint before loading (promotes a complete temp

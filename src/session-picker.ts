@@ -231,6 +231,53 @@ export function resolveResumeFlagTarget(id: string, store: SessionStore): Resume
   return { ok: true, sessionId: target, workspace };
 }
 
+// Resolve a user-owned session name (#534) to a resume target, fail-closed.
+// Names are the identifying metadata users set with --rename-session precisely
+// to find a session again; this makes --resume accept them. Exact match only
+// (names are already validated: trimmed, bounded, no secret-like content).
+// Ambiguous matches fail closed listing the short ids; matches that are
+// corrupt are skipped, and when only corrupt sessions match the corrupt reason
+// is reported. Never substitutes a different session.
+export function resolveResumeByName(name: string, store: SessionStore): ResumeTarget {
+  const target = name.trim();
+  const display = redactSecrets(target).text;
+  if (!target) {
+    return { ok: false, sessionId: name, reason: `no session named "${display}" was found` };
+  }
+  const healthy: string[] = [];
+  const corrupt: string[] = [];
+  for (const id of store.listIds()) {
+    const stored = store.readName(id);
+    if (stored === null || stored.trim() !== target) continue;
+    const status = store.integrity(id).status;
+    if (status === "corrupt" || status === "missing") corrupt.push(id);
+    else healthy.push(id);
+  }
+  if (healthy.length === 0) {
+    if (corrupt.length > 0) {
+      return {
+        ok: false,
+        sessionId: name,
+        reason: `the session${corrupt.length > 1 ? "s" : ""} named "${display}" ${
+          corrupt.length > 1 ? "are" : "is"
+        } corrupt and cannot be resumed safely`,
+      };
+    }
+    return { ok: false, sessionId: name, reason: `no session named "${display}" was found` };
+  }
+  if (healthy.length > 1) {
+    const shorts = healthy.map((id) => shortSessionId(id)).join(", ");
+    return {
+      ok: false,
+      sessionId: name,
+      reason: `${healthy.length} sessions are named "${display}"; resume by exact session id (${shorts})`,
+    };
+  }
+  const sessionId = healthy[0];
+  const workspace = store.readMeta(sessionId)?.workspace;
+  return { ok: true, sessionId, workspace };
+}
+
 export interface SessionPickerRenderState {
   query: string;
   selected: number;
