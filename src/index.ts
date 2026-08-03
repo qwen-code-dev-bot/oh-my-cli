@@ -51,8 +51,7 @@ import { collectSessionSummaries, formatSessionList, pickContinueSession } from 
 import {
   runSessionPicker,
   resolveResumeTarget,
-  resolveResumeFlagTarget,
-  resolveResumeByName,
+  resolveSessionTarget,
   shortSessionId,
 } from "./session-picker.js";
 import { normalizeSessionName } from "./session-name.js";
@@ -431,22 +430,22 @@ program
   .option("--list-profiles", "List declared model profiles from user settings (read-only, redacted) and exit")
   .option("--profile <name>", "Select a named model profile from user settings (overrides settings.defaultProfile)")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
-  .option("--session-stats <session-id>", "Show a read-only, deterministic activity/efficiency stats view for a session (add --output json for automation) and exit")
+  .option("--session-stats <id-or-name>", "Show a read-only, deterministic activity/efficiency stats view for a session by exact id or user-owned name (add --output json for automation) and exit")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
-  .option("--tasks <session-id>", "Show a session's read-only background-task center with durable receipts, reconciled against real process state (add --output json for automation) and exit")
+  .option("--tasks <id-or-name>", "Show a session's read-only background-task center with durable receipts, reconciled against real process state, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
-  .option("--export-session <session-id>", "Export a session locally as redacted Markdown + a deterministic JSON manifest and exit")
+  .option("--export-session <id-or-name>", "Export a session locally as redacted Markdown + a deterministic JSON manifest, by exact id or user-owned name, and exit")
   .option("--out <dir>", "Output directory for --export-session (default: current directory)")
   .option("--force", "Overwrite existing output files (--export-session, --summary-out)")
-  .option("--rename-session <session-id>", "Set, replace, or clear a user-owned name for an exact session (with --session-name) and exit")
+  .option("--rename-session <id-or-name>", "Set, replace, or clear a user-owned name for an exact session, targeted by exact id or its current user-owned name (with --session-name), and exit")
   .option("--session-name <name>", "The name for --rename-session; empty/whitespace clears the override")
-  .option("--compact <session-id>", "Compact a session into a bounded summary sidecar (original preserved) and exit")
+  .option("--compact <id-or-name>", "Compact a session into a bounded summary sidecar (original preserved), targeted by exact id or user-owned name, and exit")
   .option("--compact-threshold <tokens>", "Auto-compact the in-memory transcript when the latest prompt size reaches this (env: OMC_COMPACT_THRESHOLD)")
-  .option("--undo-turn <session-id>", "Safely undo the most recent completed agent turn of a session (restores its files + transcript) and exit")
-  .option("--redo-turn <session-id>", "Redo the most recent undone agent turn of a session and exit")
+  .option("--undo-turn <id-or-name>", "Safely undo the most recent completed agent turn of a session (restores its files + transcript), targeted by exact id or user-owned name, and exit")
+  .option("--redo-turn <id-or-name>", "Redo the most recent undone agent turn of a session, targeted by exact id or user-owned name, and exit")
   .option("--dry-run", "Preview an --undo-turn/--redo-turn plan without changing the workspace or transcript")
   .option("--side-question <text>", "Ask a side question against a session's bounded, read-only context (no tools, no mutation, nothing persisted) and exit")
-  .option("--session <session-id>", "Source session whose read-only context seeds --side-question")
+  .option("--session <id-or-name>", "Source session whose read-only context seeds --side-question, by exact id or user-owned name")
   .option("--doctor", "Run read-only installation and platform readiness checks and exit")
   .option("--readiness", "Inspect repository readiness for a blocked task (read-only) and exit")
   .option("--expected-branch <name>", "Expected branch for the --readiness branch check")
@@ -631,7 +630,14 @@ program
       // reported. Exits 0 on success, 2 on a missing session or bad format.
       if (opts.sessionStats !== undefined) {
         const store = new SessionStore();
-        const id = String(opts.sessionStats);
+        // Id-or-name targeting (#536): exact id wins, then the user-owned
+        // name fallback; fail closed without substitution.
+        const resolved = resolveSessionTarget(String(opts.sessionStats), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Error: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const id = resolved.sessionId;
         const format = String(opts.output ?? "text");
         if (format !== "text" && format !== "json") {
           process.stderr.write(`Error: invalid output format "${format}"\n`);
@@ -694,7 +700,13 @@ program
       // Exits 0 on success, 2 on a missing session or bad output format.
       if (opts.tasks !== undefined) {
         const store = new SessionStore();
-        const id = String(opts.tasks);
+        // Id-or-name targeting (#536).
+        const resolved = resolveSessionTarget(String(opts.tasks), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Error: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const id = resolved.sessionId;
         const format = String(opts.output ?? "text");
         if (format !== "text" && format !== "json") {
           process.stderr.write(`Error: invalid output format "${format}"\n`);
@@ -738,7 +750,13 @@ program
       // missing/empty session, 0 on success.
       if (opts.compact !== undefined) {
         const store = new SessionStore();
-        const id = String(opts.compact);
+        // Id-or-name targeting (#536).
+        const resolved = resolveSessionTarget(String(opts.compact), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Error: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const id = resolved.sessionId;
         const full = store.load(id);
         if (full.length === 0) {
           process.stderr.write(`Error: no such session "${id}"\n`);
@@ -758,7 +776,13 @@ program
       // missing session, collision, or write error.
       if (opts.exportSession !== undefined) {
         const store = new SessionStore();
-        const id = String(opts.exportSession);
+        // Id-or-name targeting (#536).
+        const resolved = resolveSessionTarget(String(opts.exportSession), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Error: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const id = resolved.sessionId;
         const outDir = opts.out ? String(opts.out) : process.cwd();
         const format = String(opts.output ?? "text");
         if (format !== "text" && format !== "json") {
@@ -798,7 +822,14 @@ program
       // closed (exit 2) without touching any other session.
       if (opts.renameSession !== undefined) {
         const store = new SessionStore();
-        const id = String(opts.renameSession);
+        // Id-or-name targeting (#536): the target may be addressed by its
+        // current user-owned name as well as its exact id.
+        const resolved = resolveSessionTarget(String(opts.renameSession), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Error: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const id = resolved.sessionId;
         if (opts.sessionName === undefined) {
           process.stderr.write("Error: --rename-session requires --session-name <name> (empty clears the override)\n");
           process.exit(2);
@@ -837,7 +868,13 @@ program
       if (opts.undoTurn !== undefined || opts.redoTurn !== undefined) {
         const store = new SessionStore();
         const op: "undo" | "redo" = opts.undoTurn !== undefined ? "undo" : "redo";
-        const id = String(opts.undoTurn ?? opts.redoTurn);
+        // Id-or-name targeting (#536).
+        const resolved = resolveSessionTarget(String(opts.undoTurn ?? opts.redoTurn), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Error: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const id = resolved.sessionId;
         const format = String(opts.output ?? "text");
         if (format !== "text" && format !== "json") {
           process.stderr.write(`Error: invalid output format "${format}"\n`);
@@ -2242,7 +2279,13 @@ program
         }
         let contextMessages: SessionMessage[] = [];
         if (opts.session !== undefined) {
-          const sourceId = String(opts.session);
+          // Id-or-name targeting (#536).
+          const resolved = resolveSessionTarget(String(opts.session), store);
+          if (!resolved.ok) {
+            process.stderr.write(`Error: ${resolved.reason}\n`);
+            process.exit(2);
+          }
+          const sourceId = resolved.sessionId;
           if (store.integrity(sourceId).status === "missing") {
             process.stderr.write(`Error: session "${sourceId}" not found\n`);
             process.exit(2);
@@ -2459,11 +2502,7 @@ program
       // never substituted).
       let resumeFlagSessionId: string | undefined;
       if (browseResume === null && opts.resume !== undefined) {
-        const raw = String(opts.resume);
-        let target = resolveResumeFlagTarget(raw, store);
-        if (!target.ok) {
-          target = resolveResumeByName(raw, store);
-        }
+        const target = resolveSessionTarget(String(opts.resume), store);
         if (!target.ok) {
           process.stderr.write(`Cannot resume: ${target.reason}\n`);
           process.exit(1);

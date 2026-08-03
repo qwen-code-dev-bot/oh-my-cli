@@ -105,7 +105,9 @@ describe("Integration: session compaction", () => {
   it("--compact on a missing session exits 2", async () => {
     const result = await runCli(["--compact", "no-such-session"], baseEnv);
     expect(result.code).toBe(2);
-    expect(result.stderr).toContain("no such session");
+    // Id-or-name targeting (#536): a value matching neither an id nor a
+    // user-owned name reports the shared resolution reason.
+    expect(result.stderr).toContain("no session named");
   });
 
   it("resume consumes the compaction contract and does not replay a completed mutation", async () => {

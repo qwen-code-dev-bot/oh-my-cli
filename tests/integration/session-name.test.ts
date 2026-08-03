@@ -90,7 +90,8 @@ describe("Integration: persisted session names (#249)", () => {
   it("fails closed (exit 2) for a missing session without touching others", async () => {
     const r = await runCli(["--rename-session", "no-such-session", "--session-name", "x"], env);
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("not found");
+    // Id-or-name targeting (#536): shared resolution reason.
+    expect(r.stderr).toContain("no session named");
   });
 
   it("rejects overlong and secret-like names (exit 2)", async () => {

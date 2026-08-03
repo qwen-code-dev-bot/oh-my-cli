@@ -175,7 +175,8 @@ describe("Integration: session stats (--session-stats)", () => {
   it("fails closed (exit 2) when the session does not exist", async () => {
     const r = await runCli(["--session-stats", "does-not-exist"], baseEnv);
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("not found");
+    // Id-or-name targeting (#536): shared resolution reason.
+    expect(r.stderr).toContain("no session named");
   });
 
   it("rejects an invalid --output format (exit 2)", async () => {

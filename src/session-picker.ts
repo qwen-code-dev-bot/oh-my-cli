@@ -278,6 +278,17 @@ export function resolveResumeByName(name: string, store: SessionStore): ResumeTa
   return { ok: true, sessionId, workspace };
 }
 
+// Resolve a session-targeted flag value (Issue #536): exact session id first
+// (the pre-existing semantics, unchanged), then the user-owned name fallback
+// (#534). Every session-targeted flag shares this one contract — names are
+// first-class across all surfaces. Fail-closed; never substitutes a different
+// session.
+export function resolveSessionTarget(value: string, store: SessionStore): ResumeTarget {
+  const target = resolveResumeFlagTarget(value, store);
+  if (target.ok) return target;
+  return resolveResumeByName(value, store);
+}
+
 export interface SessionPickerRenderState {
   query: string;
   selected: number;
