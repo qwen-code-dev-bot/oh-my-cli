@@ -48,6 +48,11 @@ export interface AgentOptions {
   // time has elapsed since the run began — at the round boundary only. Null
   // disables it.
   maxWallTimeMs?: number | null;
+  // Optional operator tool-call cap (Issue #517). When set, the loop stops at
+  // the first round boundary after the cumulative processed tool-call count
+  // reaches it — every tool call the round emitted already has its result, so
+  // the transcript stays complete. Null disables it.
+  maxToolCalls?: number | null;
   // Folder-trust enforcement. When false, every mutating tool (file or shell)
   // fails closed before approval is even considered, regardless of approvalMode
   // (so yolo cannot widen the boundary). Defaults to true (no enforcement) so
@@ -250,9 +255,10 @@ export interface AgentResult {
   ok: boolean;
   // `empty_response` is the terminal anomaly when the provider keeps returning a
   // stream with no assistant text and no valid tool call and the bounded
-  // empty-completion recovery is exhausted (#244). `max_turns_reached` and
-  // `wall_time_reached` are operator run-cap stops (Issue #515): bounded,
-  // round-boundary halts distinct from failures.
+  // empty-completion recovery is exhausted (#244). `max_turns_reached`,
+  // `wall_time_reached`, and `tool_call_budget_reached` are operator run-cap
+  // stops (Issues #515, #517): bounded, round-boundary halts distinct from
+  // failures.
   reason:
     | "completed"
     | "provider_error"
@@ -260,6 +266,7 @@ export interface AgentResult {
     | "budget_reached"
     | "max_turns_reached"
     | "wall_time_reached"
+    | "tool_call_budget_reached"
     | "empty_response"
     | "cancelled";
   rounds: number;
@@ -363,6 +370,13 @@ export async function runAgent(
     typeof opts.maxWallTimeMs === "number" && opts.maxWallTimeMs >= 0
       ? opts.maxWallTimeMs
       : null;
+  // Tool-call cap (Issue #517): counts every tool call the loop processes
+  // (including denied attempts, which also consume rounds and can loop), via
+  // the same per-tool counters that back the run stats.
+  const maxToolCalls =
+    typeof opts.maxToolCalls === "number" && opts.maxToolCalls > 0
+      ? opts.maxToolCalls
+      : null;
   const runClock = opts.runClock ?? Date.now;
   const runStartedAt = runClock();
   // Context-pressure auto-compaction. Null disables it. `lastPromptTokens` is the
@@ -383,6 +397,8 @@ export async function runAgent(
   const tokensSnapshot = () => (hasUsage ? { ...tokens } : null);
   const costSnapshot = () => (hasUsage ? costUsd : null);
   const budgetReached = () => budgetUsd !== null && costUsd >= budgetUsd;
+  const totalToolCalls = () =>
+    Object.values(toolCalls).reduce((sum, n) => sum + n, 0);
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
     // Cooperative cancellation (#489): checked before any provider call in this
@@ -440,6 +456,23 @@ export async function runAgent(
         text: finalText,
         ok: false,
         reason: "wall_time_reached",
+        rounds: round,
+        retries,
+        stats: statsSnapshot(),
+        tokens: tokensSnapshot(),
+        estimatedCostUsd: costSnapshot(),
+        costKnown,
+      };
+    }
+    // Tool-call cap gate (Issue #517): stop at the first round boundary after
+    // the cumulative processed tool-call count reaches the cap. The boundary
+    // guarantees every tool call emitted by prior rounds has its result, so
+    // the persisted transcript stays complete (no orphan tool_call).
+    if (maxToolCalls !== null && totalToolCalls() >= maxToolCalls) {
+      return {
+        text: finalText,
+        ok: false,
+        reason: "tool_call_budget_reached",
         rounds: round,
         retries,
         stats: statsSnapshot(),
