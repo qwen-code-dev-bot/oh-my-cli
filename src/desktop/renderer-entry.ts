@@ -9,6 +9,7 @@ import {
   reduceDesktopState,
   renderDesktopWorkbench,
   renderSessionRail,
+  shouldAdoptCompletedSession,
   type DesktopAction,
   type DesktopPrimaryView,
 } from "./renderer.js";
@@ -425,9 +426,17 @@ document.addEventListener("submit", (event) => {
   void window.ohMyCliDesktop
     .sendMessage({ sessionId, prompt })
     .then(async () => {
-      const session = await window.ohMyCliDesktop.loadSession(sessionId);
-      dispatch({ type: "select-session", session });
       dispatch({ type: "set-busy", busy: false });
+      // A finishing turn only reloads its own session when the user is still
+      // there; otherwise the completion is background truth (summary refresh,
+      // unread badge) and must never steal focus from the session the user
+      // moved to while the turn was running.
+      if (shouldAdoptCompletedSession(state, sessionId)) {
+        const session = await window.ohMyCliDesktop.loadSession(sessionId);
+        if (shouldAdoptCompletedSession(state, sessionId)) {
+          dispatch({ type: "select-session", session });
+        }
+      }
       await refreshSessions();
       markActiveRead();
     })

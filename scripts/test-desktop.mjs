@@ -29,6 +29,24 @@ const service = new DesktopService({
     model: "qwen3.8-max",
   }),
   run: async (prompt, _messages, options) => {
+    if (prompt === "Slow background turn") {
+      options.onMessage({ role: "user", content: prompt });
+      options.sink?.assistantDelta("Background ");
+      await sleep(800);
+      options.sink?.assistantDelta("done");
+      options.onMessage({ role: "assistant", content: "Background done" });
+      return {
+        text: "Background done",
+        ok: true,
+        reason: "completed",
+        rounds: 1,
+        retries: 0,
+        stats: { toolCalls: {}, toolFailures: {} },
+        tokens: null,
+        estimatedCostUsd: null,
+        costKnown: false,
+      };
+    }
     options.onMessage({ role: "user", content: prompt });
     options.sink?.assistantDelta("Desktop ");
     options.sink?.toolStart({ id: "one", name: "read", round: 0 });
@@ -287,6 +305,46 @@ async function run() {
     false,
     "deleted session must be removed from the session store",
   );
+
+  // Switching away during an in-flight turn keeps focus on the chosen
+  // session: completion becomes background truth, never a forced pull-back.
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-session-id="${firstId}"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('.workspace-bar')?.textContent.includes('Prove the Desktop chat works')`,
+  );
+  await window.webContents.executeJavaScript(`(() => {
+    const input = document.querySelector('[aria-label="Message"]');
+    input.value = 'Slow background turn';
+    input.closest('form').requestSubmit();
+  })()`);
+  await waitFor(
+    window,
+    `document.querySelector('[data-agent-busy="true"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-session-id="${draftId}"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-agent-busy="false"]') && document.querySelector('[data-session-id="${draftId}"][aria-current="true"]')`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-session-id="${firstId}"][data-status="unread"]')`,
+  );
+  const inFlight = await window.webContents.executeJavaScript(`(() => ({
+    title: document.querySelector('.workspace-bar strong')?.textContent,
+    composer: document.querySelector('[aria-label="Message"]')?.value,
+    leaked: document.body.textContent.includes('Background done'),
+  }))()`);
+  assert.deepEqual(inFlight, {
+    title: "Renamed draft",
+    composer: "remember me",
+    leaked: false,
+  });
 
   // Reload restores sessions, the active selection, and the saved draft.
   await window.webContents.executeJavaScript(

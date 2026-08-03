@@ -7,6 +7,7 @@ import {
   reduceDesktopState,
   renderDesktopShell,
   renderDesktopWorkbench,
+  shouldAdoptCompletedSession,
   type DesktopRuntimeState,
 } from "../../src/desktop/renderer.js";
 
@@ -212,6 +213,33 @@ describe("desktop workbench renderer", () => {
       event: { type: "assistant-delta", sessionId: "one", delta: "kept" },
     });
     expect(own.streamingText).toBe("kept");
+  });
+
+  it("lets a completing turn adopt its session only while it is still active", () => {
+    const withActive = reduceDesktopState(
+      readyWith({
+        sessions: [summary({ id: "one" }), summary({ id: "two", title: "Other" })],
+      }),
+      {
+        type: "select-session",
+        session: { id: "one", title: "Build desktop", messages: [] },
+      },
+    );
+    // The user stayed: the finishing turn may reload its own session.
+    expect(shouldAdoptCompletedSession(withActive, "one")).toBe(true);
+
+    // The user switched away mid-turn: completion is background truth and
+    // must never yank the workbench back to the originating session.
+    const switched = reduceDesktopState(withActive, {
+      type: "select-session",
+      session: { id: "two", title: "Other", messages: [] },
+    });
+    expect(shouldAdoptCompletedSession(switched, "one")).toBe(false);
+    expect(switched.activeSession?.id).toBe("two");
+
+    // No active session at all: nothing may be adopted.
+    const cleared = reduceDesktopState(withActive, { type: "clear-session" });
+    expect(shouldAdoptCompletedSession(cleared, "one")).toBe(false);
   });
 
   it("reports the session status line from lifecycle truth", () => {

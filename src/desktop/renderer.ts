@@ -419,6 +419,17 @@ function activeSummary(model: DesktopViewModel): DesktopSessionSummary | undefin
   );
 }
 
+// A finishing turn may only pull the workbench back to its own session when
+// the user is still there. Otherwise the completion is background truth
+// (summary refresh, unread badge) and must never steal focus from the session
+// the user moved to while the turn was running.
+export function shouldAdoptCompletedSession(
+  state: Pick<DesktopRuntimeState, "activeSession">,
+  completedSessionId: string,
+): boolean {
+  return state.activeSession?.id === completedSessionId;
+}
+
 function sessionStatusLine(model: DesktopViewModel): string {
   if (model.busy) return "Qwen is working";
   // Fresh notices (saved file, completed turn) outrank the static lifecycle
