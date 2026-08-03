@@ -137,6 +137,80 @@ export function clearActiveGoal(state: GoalQueueState): GoalQueueState {
   return { hasActiveGoal: false, queue: [...state.queue] };
 }
 
+// --- queue management (ordering and reprioritizing) -----------------------------
+
+/** Result of a queue ordering operation (move / prioritize / remove). */
+export type QueueOrderResult =
+  | { ok: true; state: GoalQueueState }
+  | { ok: false; state: GoalQueueState; reason: string };
+
+// Validate a 1-based queue position. Returns an actionable reason when the
+// position is out of range, or null when it is valid.
+function invalidPositionReason(state: GoalQueueState, position: number): string | null {
+  if (state.queue.length === 0) {
+    return "the Goal queue is empty; nothing to reorder";
+  }
+  if (!Number.isInteger(position) || position < 1 || position > state.queue.length) {
+    return `invalid queue position ${position}; the queue holds ${state.queue.length} Goal(s), use 1-${state.queue.length}`;
+  }
+  return null;
+}
+
+// Move a queued Goal from one position to another (1-based). Preserves the
+// relative order of every other entry; an in-place move is a no-op success.
+// Never changes the active slot; never mutates the input.
+export function moveQueuedGoal(
+  state: GoalQueueState,
+  fromPosition: number,
+  toPosition: number,
+): QueueOrderResult {
+  const fromReason = invalidPositionReason(state, fromPosition);
+  if (fromReason) {
+    return { ok: false, state, reason: fromReason };
+  }
+  const toReason = invalidPositionReason(state, toPosition);
+  if (toReason) {
+    return { ok: false, state, reason: toReason };
+  }
+  if (fromPosition === toPosition) {
+    return { ok: true, state: { hasActiveGoal: state.hasActiveGoal, queue: [...state.queue] } };
+  }
+  const queue = [...state.queue];
+  const [entry] = queue.splice(fromPosition - 1, 1);
+  queue.splice(toPosition - 1, 0, entry);
+  return { ok: true, state: { hasActiveGoal: state.hasActiveGoal, queue } };
+}
+
+// Reprioritize a queued Goal by moving it to the front of the queue (the next
+// promotion target). Preserves FIFO order of the remaining entries. Never
+// changes the active slot; never mutates the input.
+export function prioritizeQueuedGoal(state: GoalQueueState, position: number): QueueOrderResult {
+  const reason = invalidPositionReason(state, position);
+  if (reason) {
+    return { ok: false, state, reason };
+  }
+  if (position === 1) {
+    return { ok: true, state: { hasActiveGoal: state.hasActiveGoal, queue: [...state.queue] } };
+  }
+  const queue = [...state.queue];
+  const [entry] = queue.splice(position - 1, 1);
+  queue.unshift(entry);
+  return { ok: true, state: { hasActiveGoal: state.hasActiveGoal, queue } };
+}
+
+// Remove a queued Goal at the given 1-based position. The queue length
+// decreases, restoring cap headroom. Never changes the active slot; never
+// mutates the input.
+export function removeQueuedGoal(state: GoalQueueState, position: number): QueueOrderResult {
+  const reason = invalidPositionReason(state, position);
+  if (reason) {
+    return { ok: false, state, reason };
+  }
+  const queue = [...state.queue];
+  queue.splice(position - 1, 1);
+  return { ok: true, state: { hasActiveGoal: state.hasActiveGoal, queue } };
+}
+
 // --- view and formatting -------------------------------------------------------
 
 export function assembleGoalQueueView(state: GoalQueueState): GoalQueueView {
