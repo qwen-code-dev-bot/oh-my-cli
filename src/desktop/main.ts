@@ -1,15 +1,76 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { DESKTOP_CHANNELS } from "./contracts.js";
 import { DesktopService } from "./service.js";
 import { createDesktopWindow } from "./window.js";
 
-const service = new DesktopService();
+// The active service is swapped atomically when the user opens or switches a
+// workspace (#491). Every handler closes over this binding, so all IPC after
+// a switch is owned by the new workspace's service — sessions, drafts, and
+// files never cross the boundary.
+let service = new DesktopService({
+  workspaceRoot: DesktopService.startupWorkspaceRoot(),
+});
+service.markWorkspaceOpened();
+
+function broadcastWorkspaceSwitched(): void {
+  const status = service.getWorkspaceStatus();
+  for (const window of BrowserWindow.getAllWindows()) {
+    // Delivered on the agent-event channel: workspace-switched is part of the
+    // DesktopAgentEvent union, and it is the only channel the sandboxed
+    // renderer subscribes to.
+    window.webContents.send(DESKTOP_CHANNELS.agentEvent, {
+      type: "workspace-switched",
+      path: status.path,
+      name: status.name,
+    });
+  }
+}
+
+function switchWorkspace(requestedPath: string) {
+  const canonical = service.canonicalWorkspacePath(requestedPath);
+  if (canonical === service.workspace.root) {
+    return service.getWorkspaceStatus();
+  }
+  if (service.busyTurnRunning()) {
+    throw new Error("Wait for the running turn to finish before switching");
+  }
+  service = new DesktopService({ workspaceRoot: canonical });
+  service.markWorkspaceOpened();
+  broadcastWorkspaceSwitched();
+  return service.getWorkspaceStatus();
+}
 
 ipcMain.handle(DESKTOP_CHANNELS.getBootstrapState, () => ({
   platform: process.platform,
   version: app.getVersion(),
-  workspaceName: service.workspace.root.split(/[\\/]/).at(-1) ?? "Workspace",
+  workspaceName:
+    service.workspace.root.split(/[\\/]/).filter(Boolean).at(-1) ??
+    "Workspace",
 }));
+ipcMain.handle(DESKTOP_CHANNELS.getWorkspaceStatus, () =>
+  service.getWorkspaceStatus(),
+);
+ipcMain.handle(DESKTOP_CHANNELS.listRecents, () => service.listRecents());
+ipcMain.handle(DESKTOP_CHANNELS.forgetWorkspace, (_event, workspacePath) =>
+  service.forgetWorkspace(workspacePath),
+);
+ipcMain.handle(DESKTOP_CHANNELS.openWorkspaceDialog, async (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const result = window
+    ? await dialog.showOpenDialog(window, {
+        title: "Open workspace folder",
+        properties: ["openDirectory"],
+      })
+    : await dialog.showOpenDialog({
+        title: "Open workspace folder",
+        properties: ["openDirectory"],
+      });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return switchWorkspace(result.filePaths[0]);
+});
+ipcMain.handle(DESKTOP_CHANNELS.switchWorkspace, (_event, workspacePath) =>
+  switchWorkspace(workspacePath),
+);
 ipcMain.handle(DESKTOP_CHANNELS.listSessions, () => service.listSessions());
 ipcMain.handle(DESKTOP_CHANNELS.createSession, () => service.createSession());
 ipcMain.handle(DESKTOP_CHANNELS.loadSession, (_event, sessionId: string) =>

@@ -573,6 +573,31 @@ function persistEditorTabs(): void {
     });
 }
 
+// Persist the layout's primary view so a reload restores it (#491).
+function persistActiveView(view: DesktopPrimaryView): void {
+  void window.ohMyCliDesktop
+    .saveUiState({ activeView: view })
+    .catch(() => {
+      // Layout persistence is best-effort.
+    });
+}
+
+// Switch to another workspace folder. The main process validates the path,
+// swaps the owning service, and broadcasts workspace-switched; this call only
+// surfaces hard failures (missing path, busy turn) — a successful switch
+// arrives as the event and triggers a clean re-bootstrap.
+async function switchToWorkspace(path: string): Promise<void> {
+  try {
+    await window.ohMyCliDesktop.switchWorkspace(path);
+  } catch (error) {
+    dispatch({
+      type: "set-error",
+      message:
+        error instanceof Error ? error.message : "Unable to open workspace",
+    });
+  }
+}
+
 async function restoreEditorTabs(): Promise<void> {
   let ui;
   try {
@@ -607,14 +632,26 @@ async function restoreEditorTabs(): Promise<void> {
 async function bootstrap(): Promise<void> {
   dispatch({ type: "bootstrap-started" });
   try {
-    const [payload, sessions, files, ui] = await Promise.all([
-      window.ohMyCliDesktop.getBootstrapState(),
-      window.ohMyCliDesktop.listSessions(),
-      window.ohMyCliDesktop.listWorkspaceFiles(),
-      window.ohMyCliDesktop.getUiState(),
-    ]);
+    const [payload, sessions, files, ui, workspaceStatus, recents] =
+      await Promise.all([
+        window.ohMyCliDesktop.getBootstrapState(),
+        window.ohMyCliDesktop.listSessions(),
+        window.ohMyCliDesktop.listWorkspaceFiles(),
+        window.ohMyCliDesktop.getUiState(),
+        window.ohMyCliDesktop.getWorkspaceStatus(),
+        window.ohMyCliDesktop.listRecents(),
+      ]);
     uiState = ui;
     dispatch({ type: "bootstrap-resolved", payload, sessions, files });
+    dispatch({ type: "set-workspace-status", status: workspaceStatus });
+    dispatch({ type: "set-recents", recents });
+    if (
+      ui.activeView === "chat" ||
+      ui.activeView === "workflow" ||
+      ui.activeView === "changes"
+    ) {
+      dispatch({ type: "select-view", view: ui.activeView });
+    }
     window.ohMyCliDesktop
       .getRuntimeInfo()
       .then((runtime) => dispatch({ type: "set-runtime", runtime }))
@@ -634,6 +671,28 @@ async function bootstrap(): Promise<void> {
 }
 
 window.ohMyCliDesktop.onAgentEvent((event) => {
+  if (event.type === "workspace-switched") {
+    // A different workspace took over: drop every local truth (sessions,
+    // drafts, tabs) and re-bootstrap against the new boundary. Pending
+    // persistence is cancelled first so nothing from the previous workspace
+    // can be written into the new one.
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = null;
+    }
+    if (tabPersistTimer) {
+      clearTimeout(tabPersistTimer);
+      tabPersistTimer = null;
+    }
+    if (fileSearchTimer) {
+      clearTimeout(fileSearchTimer);
+      fileSearchTimer = null;
+    }
+    state = createInitialDesktopState();
+    render();
+    void bootstrap();
+    return;
+  }
   dispatch({ type: "agent-event", event });
   // Late events for other sessions never touch the active transcript (the
   // reducer drops them), but a background completion still changes rail
@@ -651,6 +710,29 @@ document.addEventListener("click", (event) => {
   const view = target.closest<HTMLElement>("[data-view]")?.dataset.view;
   if (view === "chat" || view === "workflow" || view === "changes") {
     dispatch({ type: "select-view", view: view as DesktopPrimaryView });
+    persistActiveView(view as DesktopPrimaryView);
+    return;
+  }
+  const recentPath =
+    target.closest<HTMLElement>("[data-recent-path]")?.dataset.recentPath;
+  if (recentPath) {
+    void switchToWorkspace(recentPath);
+    return;
+  }
+  const forgetPath =
+    target.closest<HTMLElement>("[data-forget-workspace]")?.dataset
+      .forgetWorkspace;
+  if (forgetPath) {
+    void window.ohMyCliDesktop
+      .forgetWorkspace(forgetPath)
+      .then((recents) => dispatch({ type: "set-recents", recents }))
+      .catch((error: unknown) =>
+        dispatch({
+          type: "set-error",
+          message:
+            error instanceof Error ? error.message : "Unable to forget workspace",
+        }),
+      );
     return;
   }
   const sessionId =
@@ -762,6 +844,18 @@ document.addEventListener("click", (event) => {
     void commitFileDialog();
   } else if (action === "open-diff") {
     void openDiff();
+  } else if (action === "open-workspace") {
+    void window.ohMyCliDesktop
+      .openWorkspaceDialog()
+      .catch((error: unknown) =>
+        dispatch({
+          type: "set-error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Unable to open workspace",
+        }),
+      );
   } else if (action === "close-diff") {
     dispatch({ type: "diff-closed" });
   } else if (action === "refresh-diff") {

@@ -36,6 +36,11 @@ describe("desktop preload", () => {
     expect(name).toBe("ohMyCliDesktop");
     expect(Object.keys(bridge)).toEqual([
       "getBootstrapState",
+      "getWorkspaceStatus",
+      "listRecents",
+      "forgetWorkspace",
+      "openWorkspaceDialog",
+      "switchWorkspace",
       "listSessions",
       "createSession",
       "loadSession",

@@ -13,6 +13,7 @@ import { SessionStore } from "../../src/session.js";
 let root: string;
 let sessions: string;
 let uiStatePath: string;
+let recentsPath: string;
 
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "oh-my-cli-desktop-workspace-"));
@@ -20,6 +21,7 @@ beforeEach(() => {
     path.join(os.tmpdir(), "oh-my-cli-desktop-sessions-"),
   );
   uiStatePath = path.join(sessions, "desktop-ui.json");
+  recentsPath = path.join(sessions, "desktop-recents.json");
 });
 
 afterEach(() => {
@@ -46,6 +48,7 @@ function makeService(overrides: Partial<DesktopServiceOptions> = {}): DesktopSer
     workspaceRoot: root,
     store: new SessionStore(sessions),
     uiStatePath,
+    recentsPath,
     resolveConfig: () => ({
       apiKey: "test",
       baseUrl: "https://example.test/v1",
@@ -808,6 +811,140 @@ describe("DesktopService", () => {
         activeEditorTab: "a.md",
       });
       expect(cleaned.activeEditorTab).toBeNull();
+    });
+  });
+
+  describe("workspace entry and recovery (#491)", () => {
+    it("canonicalizes workspace paths fail-closed", () => {
+      const service = makeService();
+      expect(service.canonicalWorkspacePath(root)).toBe(
+        fs.realpathSync(root),
+      );
+      expect(() =>
+        service.canonicalWorkspacePath(path.join(root, "missing")),
+      ).toThrow("Workspace not found");
+      expect(() =>
+        service.canonicalWorkspacePath(path.join(root, "file.txt")),
+      ).toThrow();
+      fs.writeFileSync(path.join(root, "file.txt"), "x");
+      expect(() => service.canonicalWorkspacePath(path.join(root, "file.txt")))
+        .toThrow("Not a directory");
+      expect(() => service.canonicalWorkspacePath("")).toThrow(
+        "A workspace path is required",
+      );
+    });
+
+    it("remembers, lists, and forgets recents with a bounded MRU order", () => {
+      const service = makeService();
+      const second = fs.mkdtempSync(path.join(os.tmpdir(), "omc-second-"));
+      try {
+        const secondService = makeService({ workspaceRoot: second });
+        service.markWorkspaceOpened();
+        secondService.markWorkspaceOpened();
+        // Re-opening the first moves it back to the front.
+        service.markWorkspaceOpened();
+
+        const recents = service.listRecents();
+        expect(recents.map((r) => r.path)).toEqual([
+          fs.realpathSync(root),
+          fs.realpathSync(second),
+        ]);
+        expect(recents[0].name).toBe(fs.realpathSync(root).split("/").at(-1));
+
+        const remaining = service.forgetWorkspace(second);
+        expect(remaining.map((r) => r.path)).toEqual([fs.realpathSync(root)]);
+        // Forgetting a deleted path matches the raw recorded entry too.
+        expect(
+          service.forgetWorkspace(path.join(second, "gone")).map((r) => r.path),
+        ).toEqual([fs.realpathSync(root)]);
+      } finally {
+        fs.rmSync(second, { recursive: true, force: true });
+      }
+    });
+
+    it("recovers the last valid workspace at startup and falls back safely", () => {
+      // No recents yet: fall back to the default.
+      expect(DesktopService.startupWorkspaceRoot({ recentsPath })).toBe(
+        process.cwd(),
+      );
+
+      const service = makeService();
+      service.markWorkspaceOpened();
+      expect(DesktopService.startupWorkspaceRoot({ recentsPath })).toBe(
+        fs.realpathSync(root),
+      );
+
+      // A stale last workspace falls back instead of failing startup.
+      fs.writeFileSync(
+        recentsPath,
+        JSON.stringify({
+          version: 1,
+          workspaces: [],
+          lastWorkspacePath: path.join(os.tmpdir(), "vanished-workspace"),
+        }),
+        "utf-8",
+      );
+      expect(DesktopService.startupWorkspaceRoot({ recentsPath })).toBe(
+        process.cwd(),
+      );
+
+      // A corrupt recents file degrades to the default.
+      fs.writeFileSync(recentsPath, "{not json", "utf-8");
+      expect(DesktopService.startupWorkspaceRoot({ recentsPath })).toBe(
+        process.cwd(),
+      );
+    });
+
+    it("reports honest workspace posture for git and non-git roots", () => {
+      const plain = makeService().getWorkspaceStatus();
+      expect(plain.path).toBe(fs.realpathSync(root));
+      expect(plain.name).toBe(fs.realpathSync(root).split("/").at(-1));
+      expect(plain.git).toBeNull();
+
+      execFileSync("git", ["init", "-q", "-b", "trunk", root], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      execFileSync("git", ["-C", root, "config", "user.email", "t@e.com"], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      execFileSync("git", ["-C", root, "config", "user.name", "T"], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      fs.writeFileSync(path.join(root, "a.txt"), "1\n");
+      execFileSync("git", ["-C", root, "add", "a.txt"], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "base"], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+
+      const cleanStatus = makeService().getWorkspaceStatus();
+      expect(cleanStatus.git).toEqual({
+        branch: "trunk",
+        head: expect.stringMatching(/^[0-9a-f]+$/),
+        dirtyCount: 0,
+      });
+
+      fs.writeFileSync(path.join(root, "a.txt"), "2\n");
+      fs.writeFileSync(path.join(root, "untracked.txt"), "u\n");
+      const dirtyStatus = makeService().getWorkspaceStatus();
+      expect(dirtyStatus.git?.dirtyCount).toBe(2);
+    });
+
+    it("refuses to switch while a turn is running", () => {
+      const service = makeService();
+      expect(service.busyTurnRunning()).toBe(false);
+    });
+
+    it("persists the layout view with strict sanitization", () => {
+      const service = makeService();
+      const saved = service.saveUiState({ activeView: "changes" });
+      expect(saved.activeView).toBe("changes");
+      expect(
+        makeService().getUiState().activeView,
+      ).toBe("changes");
+      const rejected = service.saveUiState({ activeView: "bogus" });
+      expect(rejected.activeView).toBeUndefined();
     });
   });
 });
