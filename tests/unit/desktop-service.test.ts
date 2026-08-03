@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentResult } from "../../src/agent.js";
 import {
@@ -621,6 +622,192 @@ describe("DesktopService", () => {
       } finally {
         delete process.env.OMC_TEST_KEY_489;
       }
+    });
+  });
+
+  describe("coding workflow (#490)", () => {
+    it("reads and writes with content revisions and fails closed on external change", () => {
+      fs.writeFileSync(path.join(root, "app.ts"), "v1\n");
+      const service = makeService();
+
+      const read = service.readWorkspaceFile("app.ts");
+      expect(read.revision).toMatch(/^[0-9a-f]{16}$/);
+
+      // A matching revision saves cleanly and returns the new revision.
+      const saved = service.writeWorkspaceFile({
+        path: "app.ts",
+        content: "v2\n",
+        expectedRevision: read.revision,
+      });
+      expect(saved.content).toBe("v2\n");
+      expect(saved.revision).not.toBe(read.revision);
+      expect(fs.readFileSync(path.join(root, "app.ts"), "utf-8")).toBe("v2\n");
+
+      // A stale revision fails closed; the file is untouched.
+      expect(() =>
+        service.writeWorkspaceFile({
+          path: "app.ts",
+          content: "v3\n",
+          expectedRevision: read.revision,
+        }),
+      ).toThrow("File changed outside Desktop");
+      expect(fs.readFileSync(path.join(root, "app.ts"), "utf-8")).toBe("v2\n");
+    });
+
+    it("creates, renames, and deletes files fail-closed", () => {
+      const service = makeService();
+
+      const created = service.createWorkspaceFile("notes.md");
+      expect(created.content).toBe("");
+      expect(fs.existsSync(path.join(root, "notes.md"))).toBe(true);
+      expect(() => service.createWorkspaceFile("notes.md")).toThrow(
+        "File already exists",
+      );
+      expect(() => service.createWorkspaceFile("missing/dir.md")).toThrow(
+        /Parent directory does not exist/,
+      );
+      expect(() => service.createWorkspaceFile("../outside.md")).toThrow(
+        /escape/i,
+      );
+
+      fs.writeFileSync(path.join(root, "a.txt"), "x");
+      const renamed = service.renameWorkspaceFile({
+        from: "a.txt",
+        to: "b.txt",
+      });
+      expect(renamed.path).toBe("b.txt");
+      expect(fs.existsSync(path.join(root, "a.txt"))).toBe(false);
+      expect(fs.existsSync(path.join(root, "b.txt"))).toBe(true);
+      expect(() =>
+        service.renameWorkspaceFile({ from: "b.txt", to: "notes.md" }),
+      ).toThrow("File already exists");
+      expect(() =>
+        service.renameWorkspaceFile({ from: "b.txt", to: "../escape.txt" }),
+      ).toThrow(/escape/i);
+
+      expect(service.deleteWorkspaceFile("b.txt")).toEqual({ ok: true });
+      expect(fs.existsSync(path.join(root, "b.txt"))).toBe(false);
+      expect(() => service.deleteWorkspaceFile("b.txt")).toThrow(
+        /does not exist/,
+      );
+      expect(() => service.deleteWorkspaceFile("../outside")).toThrow(
+        /escape/i,
+      );
+    });
+
+    it("lists directories lazily and searches visible files", () => {
+      fs.mkdirSync(path.join(root, "src"));
+      fs.writeFileSync(path.join(root, "src", "app.ts"), "1");
+      fs.writeFileSync(path.join(root, "README.md"), "readme");
+      const service = makeService();
+
+      const listing = service.listWorkspaceDirectory(".");
+      expect(listing.entries.map((e) => e.path)).toEqual(
+        expect.arrayContaining(["src", "README.md"]),
+      );
+      const srcEntry = listing.entries.find((e) => e.path === "src");
+      expect(srcEntry?.type).toBe("directory");
+
+      const nested = service.listWorkspaceDirectory("src");
+      expect(nested.entries.map((e) => e.path)).toEqual(["src/app.ts"]);
+
+      expect(() => service.listWorkspaceDirectory("../outside")).toThrow(
+        /escape|not a directory/i,
+      );
+
+      expect(
+        service.searchWorkspaceFiles("app").map((f) => f.path),
+      ).toEqual(["src/app.ts"]);
+      expect(service.searchWorkspaceFiles("")).toEqual([]);
+      expect(service.searchWorkspaceFiles("zzz")).toEqual([]);
+    });
+
+    it("reports the real Git working-tree diff with bounded detail", () => {
+      execFileSync("git", ["init", "-q", "-b", "main", root], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      execFileSync("git", ["-C", root, "config", "user.email", "t@e.com"], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      execFileSync("git", ["-C", root, "config", "user.name", "T"], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      fs.writeFileSync(path.join(root, "tracked.txt"), "base\n");
+      execFileSync("git", ["-C", root, "add", "tracked.txt"], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "base"], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+
+      fs.writeFileSync(path.join(root, "tracked.txt"), "changed\n");
+      fs.writeFileSync(path.join(root, "untracked.md"), "new file\n");
+
+      const service = makeService();
+      const diff = service.getWorkspaceDiff();
+      expect(diff.git).toBe(true);
+      const byPath = Object.fromEntries(
+        diff.files.map((f) => [f.path, f.status]),
+      );
+      expect(byPath["tracked.txt"]).toBe("M");
+      expect(byPath["untracked.md"]).toBe("??");
+
+      const trackedPatch = service.getWorkspaceFileDiff("tracked.txt");
+      expect(trackedPatch.patch).toContain("-base");
+      expect(trackedPatch.patch).toContain("+changed");
+      expect(trackedPatch.truncated).toBe(false);
+
+      const untrackedPatch = service.getWorkspaceFileDiff("untracked.md");
+      expect(untrackedPatch.patch).toContain("+++ b/untracked.md");
+      expect(untrackedPatch.patch).toContain("+new file");
+
+      // A non-Git workspace is reported honestly.
+      const nonGit = makeService({ workspaceRoot: sessions });
+      expect(nonGit.getWorkspaceDiff()).toEqual({
+        git: false,
+        files: [],
+        truncated: false,
+      });
+      expect(() => nonGit.getWorkspaceFileDiff("x")).toThrow(
+        "Not a Git repository",
+      );
+    });
+
+    it("persists bounded editor tabs across a service restart", () => {
+      const service = makeService();
+      const saved = service.saveUiState({
+        editorTabs: [
+          { path: "a.md", scrollTop: 42, dirty: true, draft: "unsaved" },
+          { path: 123 as never, draft: "invalid" },
+          {
+            path: "big.md",
+            draft: "x".repeat(200_000),
+          },
+        ],
+        activeEditorTab: "a.md",
+      });
+      expect(saved.editorTabs).toHaveLength(2);
+      expect(saved.editorTabs?.[0]).toMatchObject({
+        path: "a.md",
+        scrollTop: 42,
+        dirty: true,
+        draft: "unsaved",
+      });
+      expect(saved.editorTabs?.[1].draft).toHaveLength(100_000);
+      expect(saved.activeEditorTab).toBe("a.md");
+
+      const reloaded = makeService();
+      const ui = reloaded.getUiState();
+      expect(ui.editorTabs?.[0]?.path).toBe("a.md");
+      expect(ui.activeEditorTab).toBe("a.md");
+
+      // A stale active tab reads as none.
+      const stale = makeService();
+      const cleaned = stale.saveUiState({
+        editorTabs: [],
+        activeEditorTab: "a.md",
+      });
+      expect(cleaned.activeEditorTab).toBeNull();
     });
   });
 });

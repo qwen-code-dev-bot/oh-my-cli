@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { app, ipcMain } from "electron";
@@ -27,6 +28,9 @@ await writeFile(
     "hex",
   ),
 );
+// A subdirectory so the lazy tree exercises expansion.
+await mkdir(path.join(fixtureRoot, "src"), { recursive: true });
+await writeFile(path.join(fixtureRoot, "src", "leaf.ts"), "export {};\n", "utf-8");
 const settingsPath = path.join(fixtureRoot, "e2e-settings.json");
 await writeFile(
   settingsPath,
@@ -40,6 +44,26 @@ await writeFile(
   "utf-8",
 );
 process.env.OMC_E2E_API_KEY = "e2e-key";
+
+// Make the fixture a Git repository with demo.txt committed, so the diff
+// phase reviews a real working-tree patch.
+execFileSync("git", ["init", "-q", "-b", "main", fixtureRoot], {
+  stdio: ["ignore", "pipe", "ignore"],
+});
+execFileSync(
+  "git",
+  ["-C", fixtureRoot, "config", "user.email", "e2e@example.test"],
+  { stdio: ["ignore", "pipe", "ignore"] },
+);
+execFileSync("git", ["-C", fixtureRoot, "config", "user.name", "E2E"], {
+  stdio: ["ignore", "pipe", "ignore"],
+});
+execFileSync("git", ["-C", fixtureRoot, "add", "demo.txt"], {
+  stdio: ["ignore", "pipe", "ignore"],
+});
+execFileSync("git", ["-C", fixtureRoot, "commit", "-q", "-m", "base"], {
+  stdio: ["ignore", "pipe", "ignore"],
+});
 
 let retryCalls = 0;
 
@@ -216,6 +240,27 @@ ipcMain.handle(DESKTOP_CHANNELS.saveUiState, (_event, request) =>
 );
 ipcMain.handle(DESKTOP_CHANNELS.listWorkspaceFiles, () =>
   service.listWorkspaceFiles(),
+);
+ipcMain.handle(DESKTOP_CHANNELS.listWorkspaceDirectory, (_event, dirPath) =>
+  service.listWorkspaceDirectory(dirPath),
+);
+ipcMain.handle(DESKTOP_CHANNELS.searchWorkspaceFiles, (_event, query) =>
+  service.searchWorkspaceFiles(query),
+);
+ipcMain.handle(DESKTOP_CHANNELS.createWorkspaceFile, (_event, filePath) =>
+  service.createWorkspaceFile(filePath),
+);
+ipcMain.handle(DESKTOP_CHANNELS.renameWorkspaceFile, (_event, request) =>
+  service.renameWorkspaceFile(request),
+);
+ipcMain.handle(DESKTOP_CHANNELS.deleteWorkspaceFile, (_event, filePath) =>
+  service.deleteWorkspaceFile(filePath),
+);
+ipcMain.handle(DESKTOP_CHANNELS.getWorkspaceDiff, () =>
+  service.getWorkspaceDiff(),
+);
+ipcMain.handle(DESKTOP_CHANNELS.getWorkspaceFileDiff, (_event, filePath) =>
+  service.getWorkspaceFileDiff(filePath),
 );
 ipcMain.handle(DESKTOP_CHANNELS.readWorkspaceFile, (_event, filePath) =>
   service.readWorkspaceFile(filePath),
@@ -579,12 +624,165 @@ async function run() {
     `document.querySelector('[aria-label="Message"]')?.value === 'remember me' && document.querySelector('.workspace-bar')?.textContent.includes('Renamed draft')`,
   );
 
+  // --- Coding workflow (#490) ---
+  // Lazy tree: files listed at bootstrap, directories expand on demand.
+  await waitFor(
+    window,
+    `document.querySelector('[data-file-path="demo.txt"]') && document.querySelector('[data-tree-dir="src"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-tree-dir="src"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-file-path="src/leaf.ts"]')`,
+  );
+
+  // Multiple tabs: drafts survive switching between them.
   await window.webContents.executeJavaScript(
     `document.querySelector('[data-file-path="demo.txt"]')?.click()`,
   );
   await waitFor(
     window,
-    `document.querySelector('[aria-label="File content"]')`,
+    `document.querySelector('[aria-label="File content"]')?.value === 'before\\n'`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-file-path="notes.txt"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-tab-path="notes.txt"]')`,
+  );
+  await window.webContents.executeJavaScript(`(() => {
+    const editor = document.querySelector('[aria-label="File content"]');
+    editor.value = 'unsaved notes';
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-tab-path="demo.txt"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[aria-label="File content"]')?.value === 'before\\n'`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-tab-path="notes.txt"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[aria-label="File content"]')?.value === 'unsaved notes'`,
+  );
+
+  // External-change conflict: the save fails closed, reload recovers.
+  await writeFile(path.join(fixtureRoot, "demo.txt"), "external\n", "utf-8");
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-tab-path="demo.txt"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[aria-label="File content"]')?.value === 'before\\n'`,
+  );
+  await window.webContents.executeJavaScript(`(() => {
+    const editor = document.querySelector('[aria-label="File content"]');
+    editor.value = 'stale write\\n';
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('[data-action="save-file"]')?.click();
+  })()`);
+  await waitFor(
+    window,
+    `document.body.textContent.includes('File changed outside Desktop')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="file-reload"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[aria-label="File content"]')?.value === 'external\\n'`,
+  );
+
+  // Path policy: escapes are rejected before anything touches the disk.
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="file-new"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[aria-label="New file path"]')`,
+  );
+  await window.webContents.executeJavaScript(`(() => {
+    const input = document.querySelector('[aria-label="New file path"]');
+    input.value = '../evil.md';
+    document.querySelector('[data-action="file-dialog-commit"]')?.click();
+  })()`);
+  await waitFor(window, `document.body.textContent.includes('escape')`);
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="file-dialog-cancel"]')?.click()`,
+  );
+
+  // Create, rename, and delete with explicit valid targets.
+  await window.webContents.executeJavaScript(`(() => {
+    document.querySelector('[data-action="file-new"]')?.click();
+  })()`);
+  await waitFor(
+    window,
+    `document.querySelector('[aria-label="New file path"]')`,
+  );
+  await window.webContents.executeJavaScript(`(() => {
+    const input = document.querySelector('[aria-label="New file path"]');
+    input.value = 'scratch.md';
+    document.querySelector('[data-action="file-dialog-commit"]')?.click();
+  })()`);
+  await waitFor(
+    window,
+    `document.querySelector('[data-tab-path="scratch.md"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="file-rename"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[aria-label="Rename file path"]')`,
+  );
+  await window.webContents.executeJavaScript(`(() => {
+    const input = document.querySelector('[aria-label="Rename file path"]');
+    input.value = 'scratch2.md';
+    document.querySelector('[data-action="file-dialog-commit"]')?.click();
+  })()`);
+  await waitFor(
+    window,
+    `document.querySelector('[data-tab-path="scratch2.md"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="file-delete"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-action="file-delete-confirm"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="file-delete-confirm"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `!document.querySelector('[data-tab-path="scratch2.md"]')`,
+  );
+  assert.equal(
+    existsSync(path.join(fixtureRoot, "scratch.md")),
+    false,
+    "rename must remove the old path",
+  );
+  assert.equal(
+    existsSync(path.join(fixtureRoot, "scratch2.md")),
+    false,
+    "confirmed delete must remove the file",
+  );
+
+  // Save the final content, then review the real working-tree patch.
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-tab-path="demo.txt"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[aria-label="File content"]')?.value === 'external\\n'`,
   );
   await window.webContents.executeJavaScript(`(() => {
     const editor = document.querySelector('[aria-label="File content"]');
@@ -593,6 +791,44 @@ async function run() {
     document.querySelector('[data-action="save-file"]')?.click();
   })()`);
   await waitFor(window, `document.body.textContent.includes('Saved demo.txt')`);
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="open-diff"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-diff-file-path="demo.txt"]') && document.querySelector('[data-diff-file-path="notes.txt"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-diff-file-path="demo.txt"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('.diff-patch')?.textContent.includes('-before') && document.querySelector('.diff-patch')?.textContent.includes('+after')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="refresh-diff"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-diff-file-path="demo.txt"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="close-diff"]')?.click()`,
+  );
+
+  // Reload restores the coding context: tabs reopen from disk.
+  window.webContents.reload();
+  await new Promise((resolve) =>
+    window.webContents.once("did-finish-load", resolve),
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-workbench-state="ready"]') && document.querySelector('[data-tab-path="demo.txt"]')`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[aria-label="File content"]')?.value === 'after\\n'`,
+  );
 
   const result = await window.webContents.executeJavaScript(`(() => ({
     state: document.querySelector('[data-workbench-state]')?.dataset.workbenchState,

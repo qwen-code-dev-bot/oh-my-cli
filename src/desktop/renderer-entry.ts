@@ -27,6 +27,17 @@ let uiState: DesktopUiState = { activeSessionId: null, sessions: {} };
 let restoreScrollTop: number | null = null;
 let draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let scrollSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let tabPersistTimer: ReturnType<typeof setTimeout> | null = null;
+let fileSearchTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Debounced tab persistence while typing so keystrokes never hammer IPC.
+function queueTabPersist(): void {
+  if (tabPersistTimer) clearTimeout(tabPersistTimer);
+  tabPersistTimer = setTimeout(() => {
+    tabPersistTimer = null;
+    persistEditorTabs();
+  }, 400);
+}
 
 function render(): void {
   const root = document.querySelector<HTMLElement>("#desktop-root");
@@ -47,6 +58,16 @@ function render(): void {
     );
     rename?.focus();
     rename?.select();
+  }
+  // Restore the editor reading position of the visible tab.
+  const editor = document.querySelector<HTMLTextAreaElement>(
+    '[aria-label="File content"]',
+  );
+  const editorTab = editor?.dataset.editorPath
+    ? state.editorTabs.find((tab) => tab.path === editor.dataset.editorPath)
+    : undefined;
+  if (editor && editorTab && editorTab.scrollTop > 0) {
+    editor.scrollTop = editorTab.scrollTop;
   }
   requestAnimationFrame(() => {
     const stage = document.querySelector<HTMLElement>(".stage");
@@ -339,6 +360,250 @@ function sessionPrompts(): string[] {
     .map((message) => message.content);
 }
 
+// --- Workspace file workflow (#490) -----------------------------------------
+
+function openFileTab(filePath: string): void {
+  void window.ohMyCliDesktop
+    .readWorkspaceFile(filePath)
+    .then((doc) => {
+      dispatch({ type: "file-opened", doc });
+      persistEditorTabs();
+    })
+    .catch((error: unknown) =>
+      dispatch({
+        type: "set-error",
+        message:
+          error instanceof Error ? error.message : "Unable to open file",
+      }),
+    );
+}
+
+function editorTextarea(): HTMLTextAreaElement | null {
+  return document.querySelector<HTMLTextAreaElement>(
+    '[aria-label="File content"]',
+  );
+}
+
+function currentTabContent(path: string): string | undefined {
+  const editor = editorTextarea();
+  const tab = state.editorTabs.find((item) => item.path === path);
+  // The DOM value is freshest while the editor is focused on this tab.
+  if (editor && state.activeTabPath === path) return editor.value;
+  return tab?.content;
+}
+
+async function saveFileTab(path: string): Promise<void> {
+  const tab = state.editorTabs.find((item) => item.path === path);
+  if (!tab) return;
+  const content = currentTabContent(path) ?? tab.content;
+  try {
+    const doc = await window.ohMyCliDesktop.writeWorkspaceFile({
+      path,
+      content,
+      expectedRevision: tab.baseline.revision,
+    });
+    dispatch({ type: "file-tab-saved", doc });
+    persistEditorTabs();
+    void refreshDiffIfOpen();
+  } catch (error) {
+    dispatch({
+      type: "file-tab-error",
+      path,
+      message: error instanceof Error ? error.message : "Unable to save file",
+    });
+  }
+}
+
+async function saveAllTabs(): Promise<void> {
+  const dirty = state.editorTabs.filter(
+    (tab) => tab.content !== tab.baseline.content,
+  );
+  for (const tab of dirty) {
+    await saveFileTab(tab.path);
+  }
+}
+
+async function revertFileTab(path: string): Promise<void> {
+  try {
+    const doc = await window.ohMyCliDesktop.readWorkspaceFile(path);
+    dispatch({ type: "file-tab-reloaded", doc });
+    persistEditorTabs();
+  } catch (error) {
+    dispatch({
+      type: "file-tab-error",
+      path,
+      message: error instanceof Error ? error.message : "Unable to reload file",
+    });
+  }
+}
+
+async function deleteFileConfirmed(): Promise<void> {
+  const path = state.confirmFileDelete;
+  dispatch({ type: "confirm-file-delete" });
+  if (!path) return;
+  try {
+    await window.ohMyCliDesktop.deleteWorkspaceFile(path);
+    dispatch({ type: "file-tab-gone", path });
+    persistEditorTabs();
+    void loadRootTree();
+    void refreshDiffIfOpen();
+  } catch (error) {
+    dispatch({
+      type: "set-error",
+      message: error instanceof Error ? error.message : "Unable to delete file",
+    });
+  }
+}
+
+async function commitFileDialog(): Promise<void> {
+  const dialog = state.fileDialog;
+  const input = document.querySelector<HTMLInputElement>(
+    dialog?.kind === "new"
+      ? '[aria-label="New file path"]'
+      : '[aria-label="Rename file path"]',
+  );
+  const value = input?.value.trim() ?? "";
+  if (!dialog || !value) return;
+  try {
+    if (dialog.kind === "new") {
+      const doc = await window.ohMyCliDesktop.createWorkspaceFile(value);
+      dispatch({ type: "file-dialog" });
+      dispatch({ type: "file-opened", doc });
+      persistEditorTabs();
+      void loadRootTree();
+      void refreshDiffIfOpen();
+    } else if (dialog.path) {
+      const doc = await window.ohMyCliDesktop.renameWorkspaceFile({
+        from: dialog.path,
+        to: value,
+      });
+      dispatch({ type: "file-dialog" });
+      dispatch({ type: "file-tab-renamed", from: dialog.path, doc });
+      persistEditorTabs();
+      void loadRootTree();
+      void refreshDiffIfOpen();
+    }
+  } catch (error) {
+    dispatch({
+      type: "set-error",
+      message: error instanceof Error ? error.message : "File operation failed",
+    });
+  }
+}
+
+async function openDiff(): Promise<void> {
+  try {
+    const diff = await window.ohMyCliDesktop.getWorkspaceDiff();
+    dispatch({ type: "diff-opened", diff });
+    const first = diff.files[0]?.path;
+    if (first) await openFileDiff(first);
+  } catch (error) {
+    dispatch({
+      type: "set-error",
+      message: error instanceof Error ? error.message : "Unable to read the diff",
+    });
+  }
+}
+
+async function openFileDiff(path: string): Promise<void> {
+  try {
+    const fileDiff = await window.ohMyCliDesktop.getWorkspaceFileDiff(path);
+    dispatch({ type: "diff-file-selected", path, fileDiff });
+  } catch (error) {
+    dispatch({
+      type: "set-error",
+      message:
+        error instanceof Error ? error.message : "Unable to read the file diff",
+    });
+  }
+}
+
+function refreshDiffIfOpen(): void {
+  if (!state.diffOpen) return;
+  void window.ohMyCliDesktop
+    .getWorkspaceDiff()
+    .then((diff) => dispatch({ type: "diff-opened", diff }))
+    .catch(() => {});
+}
+
+async function loadRootTree(): Promise<void> {
+  try {
+    const result = await window.ohMyCliDesktop.listWorkspaceDirectory(".");
+    dispatch({ type: "tree-dir-loaded", base: ".", entries: result.entries });
+  } catch {
+    dispatch({ type: "tree-dir-loaded", base: ".", entries: [] });
+  }
+}
+
+async function toggleTreeDir(base: string): Promise<void> {
+  const loaded = state.treeDirs[base] !== undefined;
+  const expanded = state.expandedDirs.includes(base);
+  dispatch({ type: "tree-dir-toggle", base });
+  if (!loaded && !expanded) {
+    try {
+      const result = await window.ohMyCliDesktop.listWorkspaceDirectory(base);
+      dispatch({
+        type: "tree-dir-loaded",
+        base: result.base || base,
+        entries: result.entries,
+      });
+    } catch (error) {
+      dispatch({
+        type: "set-error",
+        message:
+          error instanceof Error ? error.message : "Unable to list directory",
+      });
+    }
+  }
+}
+
+// Persist the open tabs (bounded) so a reload restores the coding context.
+function persistEditorTabs(): void {
+  const tabs = state.editorTabs.map((tab) => ({
+    path: tab.path,
+    scrollTop: tab.scrollTop,
+    ...(tab.content !== tab.baseline.content
+      ? { dirty: true, draft: tab.content.slice(0, 100_000) }
+      : {}),
+  }));
+  void window.ohMyCliDesktop
+    .saveUiState({ editorTabs: tabs, activeEditorTab: state.activeTabPath ?? null })
+    .catch(() => {
+      // Tab persistence is best-effort; a failed save never breaks editing.
+    });
+}
+
+async function restoreEditorTabs(): Promise<void> {
+  let ui;
+  try {
+    ui = await window.ohMyCliDesktop.getUiState();
+  } catch {
+    return;
+  }
+  const tabs = ui.editorTabs ?? [];
+  for (const tab of tabs) {
+    try {
+      const doc = await window.ohMyCliDesktop.readWorkspaceFile(tab.path);
+      dispatch({ type: "file-opened", doc });
+      if (tab.dirty && typeof tab.draft === "string") {
+        dispatch({ type: "file-tab-content", path: tab.path, content: tab.draft });
+      }
+      if (typeof tab.scrollTop === "number") {
+        dispatch({
+          type: "file-tab-scroll",
+          path: tab.path,
+          scrollTop: tab.scrollTop,
+        });
+      }
+    } catch {
+      // The file may have disappeared since; skip it honestly.
+    }
+  }
+  if (ui.activeEditorTab) {
+    dispatch({ type: "file-tab-select", path: ui.activeEditorTab });
+  }
+}
+
 async function bootstrap(): Promise<void> {
   dispatch({ type: "bootstrap-started" });
   try {
@@ -354,9 +619,11 @@ async function bootstrap(): Promise<void> {
       .getRuntimeInfo()
       .then((runtime) => dispatch({ type: "set-runtime", runtime }))
       .catch(() => dispatch({ type: "set-runtime", runtime: null }));
+    void loadRootTree();
     if (ui.activeSessionId) {
       await selectSession(ui.activeSessionId);
     }
+    await restoreEditorTabs();
   } catch (error) {
     dispatch({
       type: "bootstrap-rejected",
@@ -395,16 +662,34 @@ document.addEventListener("click", (event) => {
   const filePath =
     target.closest<HTMLElement>("[data-file-path]")?.dataset.filePath;
   if (filePath) {
-    void window.ohMyCliDesktop
-      .readWorkspaceFile(filePath)
-      .then((file) => dispatch({ type: "select-file", file }))
-      .catch((error: unknown) =>
-        dispatch({
-          type: "set-error",
-          message:
-            error instanceof Error ? error.message : "Unable to open file",
-        }),
-      );
+    openFileTab(filePath);
+    return;
+  }
+  const tabPath =
+    target.closest<HTMLElement>("[data-tab-path]")?.dataset.tabPath;
+  if (tabPath) {
+    dispatch({ type: "file-tab-select", path: tabPath });
+    persistEditorTabs();
+    return;
+  }
+  const tabClose =
+    target.closest<HTMLElement>("[data-tab-close]")?.dataset.tabClose;
+  if (tabClose) {
+    dispatch({ type: "file-tab-close", path: tabClose });
+    persistEditorTabs();
+    return;
+  }
+  const treeDir =
+    target.closest<HTMLElement>("[data-tree-dir]")?.dataset.treeDir;
+  if (treeDir) {
+    void toggleTreeDir(treeDir);
+    return;
+  }
+  const diffFilePath =
+    target.closest<HTMLElement>("[data-diff-file-path]")?.dataset
+      .diffFilePath;
+  if (diffFilePath) {
+    void openFileDiff(diffFilePath);
     return;
   }
   const attachFilePath =
@@ -447,21 +732,40 @@ document.addEventListener("click", (event) => {
     void cancelTurn();
   } else if (action === "retry-turn") {
     retryTurn();
-  } else if (action === "save-file" && state.activeFile) {
-    const editor = document.querySelector<HTMLTextAreaElement>(
-      '[aria-label="File content"]',
-    );
-    const content = editor?.value ?? state.activeFile.content;
-    void window.ohMyCliDesktop
-      .writeWorkspaceFile({ path: state.activeFile.path, content })
-      .then((file) => dispatch({ type: "file-saved", file }))
-      .catch((error: unknown) =>
-        dispatch({
-          type: "set-error",
-          message:
-            error instanceof Error ? error.message : "Unable to save file",
-        }),
-      );
+  } else if (action === "save-file" && state.activeTabPath) {
+    void saveFileTab(state.activeTabPath);
+  } else if (action === "file-save-all") {
+    void saveAllTabs();
+  } else if (action === "file-revert" && state.activeTabPath) {
+    void revertFileTab(state.activeTabPath);
+  } else if (action === "file-reload" && state.activeTabPath) {
+    void revertFileTab(state.activeTabPath);
+  } else if (action === "file-new") {
+    dispatch({
+      type: "file-dialog",
+      dialog: { kind: "new", value: "" },
+    });
+  } else if (action === "file-rename" && state.activeTabPath) {
+    dispatch({
+      type: "file-dialog",
+      dialog: { kind: "rename", path: state.activeTabPath, value: state.activeTabPath },
+    });
+  } else if (action === "file-delete" && state.activeTabPath) {
+    dispatch({ type: "confirm-file-delete", path: state.activeTabPath });
+  } else if (action === "file-delete-cancel") {
+    dispatch({ type: "confirm-file-delete" });
+  } else if (action === "file-delete-confirm") {
+    void deleteFileConfirmed();
+  } else if (action === "file-dialog-cancel") {
+    dispatch({ type: "file-dialog" });
+  } else if (action === "file-dialog-commit") {
+    void commitFileDialog();
+  } else if (action === "open-diff") {
+    void openDiff();
+  } else if (action === "close-diff") {
+    dispatch({ type: "diff-closed" });
+  } else if (action === "refresh-diff") {
+    void openDiff();
   } else if (action === "open-diagnostics") {
     dispatch({ type: "set-diagnostics", open: true });
   } else if (action === "close-diagnostics") {
@@ -477,6 +781,9 @@ document.addEventListener("click", (event) => {
     dispatch({ type: "set-diagnostics", open: false });
     dispatch({ type: "confirm-delete" });
     dispatch({ type: "attach-picker", open: false });
+    dispatch({ type: "diff-closed" });
+    dispatch({ type: "file-dialog" });
+    dispatch({ type: "confirm-file-delete" });
   }
 });
 
@@ -486,10 +793,25 @@ document.addEventListener("input", (event) => {
     target instanceof HTMLTextAreaElement &&
     target.getAttribute("aria-label") === "File content"
   ) {
-    dispatch({ type: "file-changed", content: target.value }, false);
-    document
-      .querySelector<HTMLButtonElement>('[data-action="save-file"]')
-      ?.removeAttribute("disabled");
+    const path = target.dataset.editorPath ?? state.activeTabPath;
+    if (path) {
+      dispatch(
+        { type: "file-tab-content", path, content: target.value },
+        false,
+      );
+      // No re-render while typing: sync the toolbar's enabled state directly
+      // from the just-updated tab truth.
+      const tab = state.editorTabs.find((item) => item.path === path);
+      const dirty = tab ? tab.content !== tab.baseline.content : false;
+      const saveButton =
+        document.querySelector<HTMLButtonElement>('[data-action="save-file"]');
+      if (saveButton) saveButton.disabled = !dirty;
+      const revertButton = document.querySelector<HTMLButtonElement>(
+        '[data-action="file-revert"]',
+      );
+      if (revertButton) revertButton.disabled = !dirty;
+      queueTabPersist();
+    }
     return;
   }
   if (
@@ -518,13 +840,53 @@ document.addEventListener("input", (event) => {
     dispatch({ type: "set-session-search", value: target.value }, false);
     const list = document.querySelector<HTMLElement>(".session-list");
     if (list) list.innerHTML = renderSessionRail(createDesktopViewModel(state));
+    return;
+  }
+  if (
+    target instanceof HTMLInputElement &&
+    target.getAttribute("aria-label") === "Search workspace files"
+  ) {
+    const query = target.value;
+    dispatch({ type: "file-search", query, results: null }, false);
+    if (fileSearchTimer) clearTimeout(fileSearchTimer);
+    fileSearchTimer = setTimeout(() => {
+      fileSearchTimer = null;
+      if (!query.trim()) {
+        dispatch({ type: "file-search", query: "", results: null });
+        return;
+      }
+      void window.ohMyCliDesktop
+        .searchWorkspaceFiles(query)
+        .then((results) =>
+          dispatch({ type: "file-search", query, results }),
+        )
+        .catch(() =>
+          dispatch({ type: "file-search", query, results: [] }),
+        );
+    }, 250);
   }
 });
 
 document.addEventListener("scroll", (event) => {
   const target = event.target;
-  if (!(target instanceof Element) || !target.classList.contains("stage"))
+  if (!(target instanceof Element)) return;
+  if (target.classList.contains("code-editor")) {
+    // Track the reading position of the focused editor tab.
+    const path =
+      (target as HTMLElement).dataset.editorPath ?? state.activeTabPath;
+    if (path) {
+      dispatch(
+        {
+          type: "file-tab-scroll",
+          path,
+          scrollTop: (target as HTMLElement).scrollTop,
+        },
+        false,
+      );
+    }
     return;
+  }
+  if (!target.classList.contains("stage")) return;
   queueScrollPersist();
 }, true);
 
@@ -601,6 +963,20 @@ document.addEventListener("submit", (event) => {
 
 document.addEventListener("keydown", (event) => {
   const target = event.target;
+  if (
+    target instanceof HTMLInputElement &&
+    (target.getAttribute("aria-label") === "New file path" ||
+      target.getAttribute("aria-label") === "Rename file path")
+  ) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void commitFileDialog();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      dispatch({ type: "file-dialog" });
+    }
+    return;
+  }
   if (
     target instanceof HTMLInputElement &&
     target.getAttribute("aria-label") === "Rename session"
@@ -697,7 +1073,13 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     void createSession();
   } else if (event.key === "Escape") {
-    if (state.attachPickerOpen) {
+    if (state.fileDialog) {
+      dispatch({ type: "file-dialog" });
+    } else if (state.confirmFileDelete) {
+      dispatch({ type: "confirm-file-delete" });
+    } else if (state.diffOpen) {
+      dispatch({ type: "diff-closed" });
+    } else if (state.attachPickerOpen) {
       dispatch({ type: "attach-picker", open: false });
     } else if (state.confirmDeleteId) {
       dispatch({ type: "confirm-delete" });
@@ -757,6 +1139,7 @@ document.addEventListener("drop", (event) => {
 
 window.addEventListener("beforeunload", () => {
   captureActiveContext();
+  persistEditorTabs();
   const id = state.activeSession?.id;
   if (!id) return;
   const entry = uiState.sessions[id] ?? {};

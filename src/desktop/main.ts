@@ -54,6 +54,27 @@ ipcMain.handle(DESKTOP_CHANNELS.saveUiState, (_event, request) =>
 ipcMain.handle(DESKTOP_CHANNELS.listWorkspaceFiles, () =>
   service.listWorkspaceFiles(),
 );
+ipcMain.handle(DESKTOP_CHANNELS.listWorkspaceDirectory, (_event, dirPath) =>
+  service.listWorkspaceDirectory(dirPath),
+);
+ipcMain.handle(DESKTOP_CHANNELS.searchWorkspaceFiles, (_event, query) =>
+  service.searchWorkspaceFiles(query),
+);
+ipcMain.handle(DESKTOP_CHANNELS.createWorkspaceFile, (_event, filePath) =>
+  service.createWorkspaceFile(filePath),
+);
+ipcMain.handle(DESKTOP_CHANNELS.renameWorkspaceFile, (_event, request) =>
+  service.renameWorkspaceFile(request),
+);
+ipcMain.handle(DESKTOP_CHANNELS.deleteWorkspaceFile, (_event, filePath) =>
+  service.deleteWorkspaceFile(filePath),
+);
+ipcMain.handle(DESKTOP_CHANNELS.getWorkspaceDiff, () =>
+  service.getWorkspaceDiff(),
+);
+ipcMain.handle(DESKTOP_CHANNELS.getWorkspaceFileDiff, (_event, filePath) =>
+  service.getWorkspaceFileDiff(filePath),
+);
 ipcMain.handle(DESKTOP_CHANNELS.readWorkspaceFile, (_event, filePath: string) =>
   service.readWorkspaceFile(filePath),
 );

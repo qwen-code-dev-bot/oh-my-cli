@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { runAgent, type AgentResult, type AgentSink } from "../agent.js";
 import type { Config } from "../config.js";
-import { globPaths } from "../discovery.js";
+import { globPaths, listDirectory } from "../discovery.js";
 import {
   loadImageAttachment,
   loadImageAttachments,
@@ -18,7 +20,12 @@ import type {
   DesktopAgentEvent,
   DesktopArchiveSessionRequest,
   DesktopAttachmentReport,
+  DesktopDiffFile,
+  DesktopEditorTabState,
+  DesktopFileDiff,
   DesktopFileDocument,
+  DesktopListDirectoryResult,
+  DesktopRenameFileRequest,
   DesktopRenameSessionRequest,
   DesktopRuntimeInfo,
   DesktopSaveUiStateRequest,
@@ -27,6 +34,7 @@ import type {
   DesktopSessionSummary,
   DesktopSessionUiEntry,
   DesktopUiState,
+  DesktopWorkspaceDiff,
   DesktopWorkspaceFile,
   DesktopWriteFileRequest,
 } from "./contracts.js";
@@ -37,6 +45,15 @@ const MAX_VISIBLE_FILES = 500;
 const MAX_DRAFT_CHARS = 10_000;
 const MAX_UI_SESSIONS = 500;
 const MAX_SCROLL_TOP = 1_000_000;
+// Bounded coding-workflow surfaces (#490): search results, diff file list,
+// per-file patch size, untracked preview, and persisted editor tabs.
+const MAX_SEARCH_RESULTS = 50;
+const MAX_DIFF_FILES = 100;
+const MAX_DIFF_PATCH_BYTES = 100_000;
+const MAX_DIFF_UNTRACKED_LINES = 1000;
+const MAX_EDITOR_TABS = 20;
+const MAX_TAB_DRAFT_CHARS = 100_000;
+const MAX_TREE_PATH_CHARS = 512;
 // Desktop turns run with file edits pre-approved and shell tools denied until
 // the Desktop grows a native approval surface; it is shown in the composer so
 // the effective boundary is never implicit.
@@ -240,6 +257,20 @@ export class DesktopService {
             delete ui.sessions[id];
           }
         }
+      }
+      if (Array.isArray(request.editorTabs)) {
+        ui.editorTabs = request.editorTabs
+          .slice(0, MAX_EDITOR_TABS)
+          .map((tab) => this.sanitizeEditorTab(tab))
+          .filter((tab): tab is DesktopEditorTabState => tab !== null);
+      }
+      if ("activeEditorTab" in request) {
+        const candidate = request.activeEditorTab;
+        ui.activeEditorTab =
+          typeof candidate === "string" &&
+          candidate.length <= MAX_TREE_PATH_CHARS
+            ? candidate
+            : null;
       }
     });
     return this.getUiState();
@@ -563,6 +594,281 @@ export class DesktopService {
     return files;
   }
 
+  // One directory level of the lazy workspace tree (#490). Ignore rules apply;
+  // symlinks are reported but never followed or expanded.
+  listWorkspaceDirectory(relativePath: string): DesktopListDirectoryResult {
+    if (typeof relativePath !== "string" || !relativePath.trim()) {
+      relativePath = ".";
+    }
+    const result = listDirectory(this.workspace, {
+      path: relativePath,
+      ignore: true,
+    });
+    return {
+      base: result.base,
+      entries: result.entries.map((entry) => ({
+        path: entry.path,
+        type: entry.type,
+      })),
+      totalEntries: result.totalEntries,
+      truncated: result.truncated,
+    };
+  }
+
+  // Bounded substring search across the visible workspace files (#490).
+  searchWorkspaceFiles(query: string): DesktopWorkspaceFile[] {
+    if (typeof query !== "string") return [];
+    const needle = query.trim().toLowerCase();
+    if (!needle) return [];
+    return this.listWorkspaceFiles()
+      .filter((file) => file.path.toLowerCase().includes(needle))
+      .slice(0, MAX_SEARCH_RESULTS);
+  }
+
+  // Create a new empty UTF-8 file (#490). Fails closed when the target exists
+  // or its parent directory does not — nothing is created optimistically.
+  createWorkspaceFile(relativePath: string): DesktopFileDocument {
+    this.assertValidNewPath(relativePath);
+    const absolutePath = this.workspace.resolveSafe(relativePath);
+    const parent = path.dirname(absolutePath);
+    let parentStat: fs.Stats;
+    try {
+      parentStat = fs.statSync(parent);
+    } catch {
+      throw new Error(
+        `Parent directory does not exist: ${path.dirname(relativePath)}`,
+      );
+    }
+    if (!parentStat.isDirectory()) {
+      throw new Error(
+        `Parent is not a directory: ${path.dirname(relativePath)}`,
+      );
+    }
+    try {
+      fs.writeFileSync(absolutePath, "", { encoding: "utf-8", flag: "wx" });
+    } catch {
+      throw new Error(`File already exists: ${relativePath}`);
+    }
+    return this.readWorkspaceFile(relativePath);
+  }
+
+  // Rename/move a file inside the workspace (#490). The target must not exist
+  // and its parent must exist; symlinks are never renamed through.
+  renameWorkspaceFile(request: DesktopRenameFileRequest): DesktopFileDocument {
+    if (
+      !request ||
+      typeof request.from !== "string" ||
+      typeof request.to !== "string" ||
+      !request.to.trim()
+    ) {
+      throw new Error("Invalid Desktop rename request");
+    }
+    const fromAbsolute = this.regularFile(request.from);
+    this.assertValidNewPath(request.to);
+    const toAbsolute = this.workspace.resolveSafe(request.to);
+    try {
+      fs.lstatSync(toAbsolute);
+      throw new Error(`File already exists: ${request.to}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const parent = path.dirname(toAbsolute);
+    if (!fs.existsSync(parent) || !fs.statSync(parent).isDirectory()) {
+      throw new Error(
+        `Parent directory does not exist: ${path.dirname(request.to)}`,
+      );
+    }
+    fs.renameSync(fromAbsolute, toAbsolute);
+    return this.readWorkspaceFile(request.to);
+  }
+
+  // Delete one regular file with an explicit, confined target (#490).
+  deleteWorkspaceFile(relativePath: string): { ok: boolean } {
+    const absolutePath = this.regularFile(relativePath);
+    fs.unlinkSync(absolutePath);
+    return { ok: true };
+  }
+
+  // Real Git working-tree change list for the diff view (#490). Honest about
+  // non-Git workspaces; bounded; confined to this workspace when it is nested
+  // inside a larger repository.
+  getWorkspaceDiff(): DesktopWorkspaceDiff {
+    if (!this.isGitWorkTree()) return { git: false, files: [], truncated: false };
+    const status = this.runGit(
+      ["status", "--porcelain"],
+      MAX_DIFF_FILES * 512,
+    );
+    if (!status.ok) return { git: false, files: [], truncated: false };
+    const toplevel = this.gitToplevel();
+    const files: DesktopDiffFile[] = [];
+    let truncated = false;
+    for (const line of status.stdout.split("\n")) {
+      if (line.trim().length < 4) continue;
+      const code = line.slice(0, 2).trim() || "?";
+      let repoPath = line.slice(3);
+      const arrow = repoPath.indexOf(" -> ");
+      if (arrow >= 0) repoPath = repoPath.slice(arrow + 4);
+      if (repoPath.startsWith('"') && repoPath.endsWith('"')) {
+        repoPath = JSON.parse(repoPath) as string;
+      }
+      const workspacePath = this.repoPathToWorkspace(repoPath, toplevel);
+      if (!workspacePath) continue;
+      if (files.length >= MAX_DIFF_FILES) {
+        truncated = true;
+        break;
+      }
+      files.push({ path: workspacePath, status: code });
+    }
+    return { git: true, files, truncated };
+  }
+
+  // The patch for one file (#490): `git diff HEAD` for tracked changes
+  // (staged and unstaged together — the real working-tree patch), a bounded
+  // all-added preview for untracked files, and a truthful cap.
+  getWorkspaceFileDiff(relativePath: string): DesktopFileDiff {
+    if (!this.isGitWorkTree()) throw new Error("Not a Git repository");
+    const workspacePath = this.regularOrMissingFile(relativePath);
+    const porcelain = this.runGit(
+      ["status", "--porcelain", "--", this.workspacePathToRepo(workspacePath)],
+      4096,
+    );
+    const line = porcelain.ok
+      ? porcelain.stdout.split("\n").find((l) => l.trim().length >= 4)
+      : undefined;
+    const untracked = line !== undefined && line.slice(0, 2) === "??";
+    if (untracked) {
+      return this.untrackedPreview(workspacePath);
+    }
+    const diff = this.runGit(
+      ["diff", "HEAD", "--no-color", "--", this.workspacePathToRepo(workspacePath)],
+      MAX_DIFF_PATCH_BYTES * 2,
+    );
+    if (!diff.ok) throw new Error("Unable to read the Git diff");
+    const patch = diff.stdout.slice(0, MAX_DIFF_PATCH_BYTES);
+    return {
+      path: workspacePath,
+      patch,
+      truncated: diff.stdout.length > MAX_DIFF_PATCH_BYTES,
+    };
+  }
+
+  private untrackedPreview(workspacePath: string): DesktopFileDiff {
+    const absolutePath = this.regularFile(workspacePath);
+    const buffer = fs.readFileSync(absolutePath);
+    if (buffer.byteLength > MAX_FILE_BYTES || buffer.includes(0)) {
+      return {
+        path: workspacePath,
+        patch: `(binary or oversized file — ${buffer.byteLength} bytes, not previewed)`,
+        truncated: false,
+      };
+    }
+    const lines = buffer.toString("utf-8").split("\n");
+    const shown = lines.slice(0, MAX_DIFF_UNTRACKED_LINES);
+    const header = `--- /dev/null\n+++ b/${workspacePath}\n@@ -0,0 +1,${shown.length} @@\n`;
+    return {
+      path: workspacePath,
+      patch: header + shown.map((l) => `+${l}`).join("\n"),
+      truncated: lines.length > MAX_DIFF_UNTRACKED_LINES,
+    };
+  }
+
+  private assertValidNewPath(relativePath: string): void {
+    if (
+      typeof relativePath !== "string" ||
+      !relativePath.trim() ||
+      relativePath.length > MAX_TREE_PATH_CHARS
+    ) {
+      throw new Error("A workspace-relative file path is required");
+    }
+    // resolveSafe throws on escapes; the existence check happens at the
+    // operation site so error messages stay exact.
+    this.workspace.resolveSafe(relativePath);
+  }
+
+  private regularOrMissingFile(relativePath: string): string {
+    if (typeof relativePath !== "string" || !relativePath.trim()) {
+      throw new Error("A workspace-relative file path is required");
+    }
+    const absolutePath = this.workspace.resolveSafe(relativePath);
+    if (
+      !fs.existsSync(absolutePath) &&
+      !this.regularFileKnownToGit(relativePath)
+    ) {
+      throw new Error(`File does not exist: ${relativePath}`);
+    }
+    return relativePath;
+  }
+
+  // A deleted file is absent on disk but still diffable through Git.
+  private regularFileKnownToGit(relativePath: string): boolean {
+    if (!this.isGitWorkTree()) return false;
+    const status = this.runGit(
+      ["status", "--porcelain", "--", this.workspacePathToRepo(relativePath)],
+      4096,
+    );
+    return status.ok && status.stdout.trim().length >= 4;
+  }
+
+  private isGitWorkTree(): boolean {
+    const result = this.runGit(["rev-parse", "--is-inside-work-tree"], 4096);
+    return result.ok && result.stdout.trim() === "true";
+  }
+
+  private gitToplevel(): string {
+    const result = this.runGit(["rev-parse", "--show-toplevel"], 4096);
+    return result.ok ? result.stdout.trim() : this.workspace.root;
+  }
+
+  // Confine Git output to this workspace: repo-relative paths are resolved
+  // against the repository toplevel, then required to land inside the
+  // workspace root. Realpath both sides so symlinked temp roots (macOS /var)
+  // compare honestly. Returns a workspace-relative path or null.
+  private repoPathToWorkspace(
+    repoPath: string,
+    toplevel: string,
+  ): string | null {
+    const absolute = path.resolve(toplevel, repoPath);
+    let workspaceReal: string;
+    try {
+      workspaceReal = fs.realpathSync(this.workspace.root);
+    } catch {
+      workspaceReal = this.workspace.root;
+    }
+    const relative = path.relative(workspaceReal, absolute);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
+    return relative || path.basename(absolute);
+  }
+
+  private workspacePathToRepo(workspacePath: string): string {
+    const toplevel = this.gitToplevel();
+    let workspaceReal: string;
+    try {
+      workspaceReal = fs.realpathSync(this.workspace.root);
+    } catch {
+      workspaceReal = this.workspace.root;
+    }
+    if (toplevel === workspaceReal) return workspacePath;
+    return path.relative(toplevel, path.resolve(workspaceReal, workspacePath));
+  }
+
+  private runGit(
+    args: string[],
+    maxBytes: number,
+  ): { ok: boolean; stdout: string } {
+    try {
+      const result = spawnSync("git", args, {
+        cwd: this.workspace.root,
+        encoding: "utf-8",
+        maxBuffer: maxBytes,
+        timeout: 10_000,
+      });
+      if (result.error || result.status !== 0) return { ok: false, stdout: "" };
+      return { ok: true, stdout: result.stdout ?? "" };
+    } catch {
+      return { ok: false, stdout: "" };
+    }
+  }
+
   readWorkspaceFile(relativePath: string): DesktopFileDocument {
     const absolutePath = this.regularFile(relativePath);
     const buffer = fs.readFileSync(absolutePath);
@@ -576,7 +882,12 @@ export class DesktopService {
     } catch {
       throw new Error("File is not valid UTF-8 text");
     }
-    return { path: relativePath, content, bytes: buffer.byteLength };
+    return {
+      path: relativePath,
+      content,
+      bytes: buffer.byteLength,
+      revision: this.contentRevision(buffer),
+    };
   }
 
   writeWorkspaceFile(request: DesktopWriteFileRequest): DesktopFileDocument {
@@ -588,6 +899,17 @@ export class DesktopService {
       throw new Error("Invalid Desktop file request");
     }
     const absolutePath = this.regularFile(request.path);
+    // External-change guard (#490): when the editor supplies the revision it
+    // loaded, the save fails closed if the on-disk content moved on, so an
+    // outside edit is never silently overwritten.
+    if (typeof request.expectedRevision === "string") {
+      const current = fs.readFileSync(absolutePath);
+      if (this.contentRevision(current) !== request.expectedRevision) {
+        throw new Error(
+          "File changed outside Desktop — reload it before saving",
+        );
+      }
+    }
     const bytes = Buffer.byteLength(request.content, "utf-8");
     if (bytes > MAX_FILE_BYTES)
       throw new Error("File exceeds the 1 MiB Desktop editor limit");
@@ -602,7 +924,16 @@ export class DesktopService {
     } finally {
       fs.rmSync(temporaryPath, { force: true });
     }
-    return { path: request.path, content: request.content, bytes };
+    return {
+      path: request.path,
+      content: request.content,
+      bytes,
+      revision: this.contentRevision(Buffer.from(request.content, "utf-8")),
+    };
+  }
+
+  private contentRevision(buffer: Buffer): string {
+    return crypto.createHash("sha256").update(buffer).digest("hex").slice(0, 16);
   }
 
   private regularFile(relativePath: string): string {
@@ -747,6 +1078,12 @@ export class DesktopService {
           ? workspace.activeSessionId
           : null,
       sessions: workspace.sessions,
+      ...(Array.isArray(workspace.editorTabs)
+        ? { editorTabs: workspace.editorTabs }
+        : {}),
+      ...(typeof workspace.activeEditorTab === "string"
+        ? { activeEditorTab: workspace.activeEditorTab }
+        : {}),
     };
   }
 
@@ -762,14 +1099,22 @@ export class DesktopService {
   }
 
   // Return the workspace UI state with stale references removed: an active
-  // session that no longer exists (or belongs elsewhere) reads as none.
+  // session that no longer exists (or belongs elsewhere) reads as none, and
+  // the active editor tab must be one of the persisted tabs.
   private sanitizeWorkspaceUi(ui: DesktopUiState): DesktopUiState {
+    const editorTabs = ui.editorTabs;
     return {
       activeSessionId:
         ui.activeSessionId && this.ownsSession(ui.activeSessionId)
           ? ui.activeSessionId
           : null,
       sessions: ui.sessions,
+      ...(editorTabs ? { editorTabs } : {}),
+      activeEditorTab:
+        ui.activeEditorTab &&
+        editorTabs?.some((tab) => tab.path === ui.activeEditorTab)
+          ? ui.activeEditorTab
+          : null,
     };
   }
 
@@ -796,6 +1141,33 @@ export class DesktopService {
       candidate.lastSeenMessageCount >= 0
     ) {
       sanitized.lastSeenMessageCount = candidate.lastSeenMessageCount;
+    }
+    return sanitized;
+  }
+
+  // Bounded, well-typed editor-tab persistence (#490). Invalid tabs are
+  // dropped rather than partially trusted.
+  private sanitizeEditorTab(tab: unknown): DesktopEditorTabState | null {
+    if (!tab || typeof tab !== "object") return null;
+    const candidate = tab as Record<string, unknown>;
+    if (
+      typeof candidate.path !== "string" ||
+      !candidate.path.trim() ||
+      candidate.path.length > MAX_TREE_PATH_CHARS
+    ) {
+      return null;
+    }
+    const sanitized: DesktopEditorTabState = { path: candidate.path };
+    if (
+      typeof candidate.scrollTop === "number" &&
+      Number.isFinite(candidate.scrollTop) &&
+      candidate.scrollTop >= 0
+    ) {
+      sanitized.scrollTop = Math.min(candidate.scrollTop, MAX_SCROLL_TOP);
+    }
+    if (typeof candidate.dirty === "boolean") sanitized.dirty = candidate.dirty;
+    if (typeof candidate.draft === "string") {
+      sanitized.draft = candidate.draft.slice(0, MAX_TAB_DRAFT_CHARS);
     }
     return sanitized;
   }
