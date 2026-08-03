@@ -2593,6 +2593,12 @@ export interface ConversationShellOptions {
   // Returns the persisted conversation at submit time (mirrors store.load).
   loadHistory: () => SessionMessage[];
   budgetUsd?: number | null;
+  // Operator turn cap (Issue #515): stop before the (n+1)th round at a round
+  // boundary. Null/undefined disables it.
+  maxTurns?: number | null;
+  // Operator wall-time cap in milliseconds (Issue #515): stop at the first round
+  // boundary after this much wall time has elapsed. Null/undefined disables it.
+  maxWallTimeMs?: number | null;
   // Context-pressure auto-compaction threshold (tokens); undefined disables it.
   compactThreshold?: number;
   // Folder-trust enforcement: when false, mutating tools fail closed in the
@@ -3824,6 +3830,8 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         onMessage: opts.onMessage,
         sink: createShellSink(generation),
         budgetUsd: opts.budgetUsd ?? null,
+        maxTurns: opts.maxTurns ?? null,
+        maxWallTimeMs: opts.maxWallTimeMs ?? null,
         compactThreshold: opts.compactThreshold,
         mutatingAllowed: opts.mutatingAllowed ?? true,
         images,
@@ -3842,6 +3850,21 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       accumulateRuntime(result, Date.now() - turnStart);
       state.composer.mode = result.ok ? "focused" : "error";
       state.turn = advanceTurn(state.turn, { type: result.ok ? "complete" : "fail" });
+      // An operator run-cap stop is surfaced like the spend-budget stop (Issue
+      // #515): a visible notice naming the bound, no simulated continuation.
+      if (result.reason === "max_turns_reached") {
+        state.transcript.push({
+          kind: "notice",
+          text: "turn limit reached; stopped before further provider calls",
+        });
+        scheduleRender();
+      } else if (result.reason === "wall_time_reached") {
+        state.transcript.push({
+          kind: "notice",
+          text: "wall-time budget reached; stopped before further provider calls",
+        });
+        scheduleRender();
+      }
       if (result.tokens) state.status.contextUsage = `tokens ${result.tokens.total}`;
       if (goalRevision !== undefined && opts.settleGoal) {
         try {

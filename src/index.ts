@@ -206,6 +206,7 @@ import { loadImageAttachments, imageRef } from "./image-input.js";
 import type { LoadedImage } from "./image-input.js";
 import { createTools } from "./tools.js";
 import { parseBudgetUsd } from "./cost.js";
+import { parseMaxTurns, parseWallTimeMs } from "./run-limits.js";
 import {
   readRunSummaryFile,
   compareRunSummaries,
@@ -538,6 +539,14 @@ program
   .option(
     "--budget <usd>",
     "Spend budget in USD; stop before further provider calls once the estimated cost reaches it (also honors OMC_SPEND_BUDGET_USD)",
+  )
+  .option(
+    "--max-turns <n>",
+    "Stop the run before the (n+1)th round at a round boundary; positive integer (also honors OMC_MAX_TURNS)",
+  )
+  .option(
+    "--max-wall-time <duration>",
+    "Wall-time budget for the run, e.g. 90, 30s, 5m, 1h, 1.5h; the run stops at the first round boundary after it elapses (also honors OMC_MAX_WALL_TIME)",
   )
   .option("--baseline <file>", "Baseline run-summary file to compare in scorecard mode")
   .option("--candidate <file>", "Candidate run-summary file to compare in scorecard mode")
@@ -2332,6 +2341,26 @@ program
         process.exit(1);
       }
 
+      // Operator run caps (Issue #515): turn and wall-time bounds for bounded
+      // unattended execution. Same flag-then-env convention as --budget; an
+      // invalid value is a usage error rather than a silent disable.
+      let maxTurns: number | null = null;
+      try {
+        maxTurns = parseMaxTurns(opts.maxTurns ?? process.env.OMC_MAX_TURNS);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`${msg}\n`);
+        process.exit(1);
+      }
+      let maxWallTimeMs: number | null = null;
+      try {
+        maxWallTimeMs = parseWallTimeMs(opts.maxWallTime ?? process.env.OMC_MAX_WALL_TIME);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`${msg}\n`);
+        process.exit(1);
+      }
+
       // Context-pressure auto-compaction threshold (tokens). Honors the flag then
       // the env var; absent/blank disables it, an unparseable value is a usage
       // error rather than a silent disable.
@@ -2562,6 +2591,8 @@ program
               onMessage,
               sink,
               budgetUsd,
+              maxTurns,
+              maxWallTimeMs,
               compactThreshold,
               mutatingAllowed,
               images,
@@ -2662,6 +2693,8 @@ program
           // carries the same per-message timing in its `usage` event.
           sink: createConsoleSink({ messageUsage: process.env.OMC_MESSAGE_USAGE === "1" }),
           budgetUsd,
+          maxTurns,
+          maxWallTimeMs,
           compactThreshold,
           mutatingAllowed,
           images,
@@ -2861,6 +2894,8 @@ program
             onMessage,
             loadHistory: () => loadSessionMessages(store, sessionId),
             budgetUsd,
+            maxTurns,
+            maxWallTimeMs,
             compactThreshold,
             mutatingAllowed,
             color: useColor,
@@ -3030,6 +3065,8 @@ program
                 sessionId,
                 onMessage,
                 budgetUsd,
+                maxTurns,
+                maxWallTimeMs,
                 compactThreshold,
                 mutatingAllowed,
                 images,

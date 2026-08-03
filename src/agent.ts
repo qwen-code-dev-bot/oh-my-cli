@@ -39,6 +39,15 @@ export interface AgentOptions {
   // Optional spend budget in USD. When the running cost estimate reaches this
   // cap, the loop stops before issuing further provider calls. Null disables it.
   budgetUsd?: number | null;
+  // Optional operator turn cap (Issue #515). When set, the loop stops before
+  // the (n+1)th provider round at the round boundary — never mid-tool-call and
+  // never mid-stream. Null disables it.
+  maxTurns?: number | null;
+  // Optional operator wall-time cap in milliseconds (Issue #515). When set, the
+  // loop stops the first round that would start at or after this much wall
+  // time has elapsed since the run began — at the round boundary only. Null
+  // disables it.
+  maxWallTimeMs?: number | null;
   // Folder-trust enforcement. When false, every mutating tool (file or shell)
   // fails closed before approval is even considered, regardless of approvalMode
   // (so yolo cannot widen the boundary). Defaults to true (no enforcement) so
@@ -82,6 +91,11 @@ export interface AgentOptions {
   // Date.now; tests supply a deterministic clock so responsiveness metrics are
   // reproducible. Undefined ⇒ Date.now.
   now?: () => number;
+  // Injectable wall-time clock for the operator wall-time cap (Issue #515).
+  // Deliberately distinct from `now` (per-message timing) so capping a run
+  // never shifts TTFT clock sequences. Defaults to Date.now. Undefined ⇒
+  // Date.now.
+  runClock?: () => number;
   // Cooperative cancellation (#489). Polled before the first provider call, at
   // every round boundary, and between streamed events. When it returns true the
   // loop stops as soon as the current event is handled: any streamed assistant
@@ -236,8 +250,18 @@ export interface AgentResult {
   ok: boolean;
   // `empty_response` is the terminal anomaly when the provider keeps returning a
   // stream with no assistant text and no valid tool call and the bounded
-  // empty-completion recovery is exhausted (#244).
-  reason: "completed" | "provider_error" | "max_rounds" | "budget_reached" | "empty_response" | "cancelled";
+  // empty-completion recovery is exhausted (#244). `max_turns_reached` and
+  // `wall_time_reached` are operator run-cap stops (Issue #515): bounded,
+  // round-boundary halts distinct from failures.
+  reason:
+    | "completed"
+    | "provider_error"
+    | "max_rounds"
+    | "budget_reached"
+    | "max_turns_reached"
+    | "wall_time_reached"
+    | "empty_response"
+    | "cancelled";
   rounds: number;
   // Total transient provider retries across the run (0 when the provider never
   // failed transiently). Lets a consumer distinguish "exhausted retries"
@@ -329,6 +353,18 @@ export async function runAgent(
   let costUsd = 0;
   const costKnown = lookupModelPrice(opts.config.model).known;
   const budgetUsd = opts.budgetUsd ?? null;
+  // Operator run caps (Issue #515): same round-boundary semantics as the spend
+  // budget. The wall-time cap measures real elapsed time through a dedicated
+  // injectable clock (`runClock`), kept distinct from the per-message `now`
+  // clock so capping never shifts TTFT timing sequences.
+  const maxTurns =
+    typeof opts.maxTurns === "number" && opts.maxTurns > 0 ? opts.maxTurns : null;
+  const maxWallTimeMs =
+    typeof opts.maxWallTimeMs === "number" && opts.maxWallTimeMs >= 0
+      ? opts.maxWallTimeMs
+      : null;
+  const runClock = opts.runClock ?? Date.now;
+  const runStartedAt = runClock();
   // Context-pressure auto-compaction. Null disables it. `lastPromptTokens` is the
   // most recent provider call's prompt size — the live context pressure that
   // drives compaction at the next round boundary.
@@ -374,6 +410,36 @@ export async function runAgent(
         text: finalText,
         ok: false,
         reason: "budget_reached",
+        rounds: round,
+        retries,
+        stats: statsSnapshot(),
+        tokens: tokensSnapshot(),
+        estimatedCostUsd: costSnapshot(),
+        costKnown,
+      };
+    }
+
+    // Operator run-cap gates (Issue #515): the same round-boundary semantics as
+    // the spend budget — stop before the next provider call, never mid-tool and
+    // never mid-stream, so no partial turn or orphan tool call is produced.
+    if (maxTurns !== null && round >= maxTurns) {
+      return {
+        text: finalText,
+        ok: false,
+        reason: "max_turns_reached",
+        rounds: round,
+        retries,
+        stats: statsSnapshot(),
+        tokens: tokensSnapshot(),
+        estimatedCostUsd: costSnapshot(),
+        costKnown,
+      };
+    }
+    if (maxWallTimeMs !== null && runClock() - runStartedAt >= maxWallTimeMs) {
+      return {
+        text: finalText,
+        ok: false,
+        reason: "wall_time_reached",
         rounds: round,
         retries,
         stats: statsSnapshot(),
