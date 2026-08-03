@@ -167,6 +167,12 @@ oh-my-cli -p "List the files in this directory"
 oh-my-cli
 ```
 
+While a response is streaming, the read-only commands `/status`, `/model`,
+`/settings`, `/tools`, `/capabilities`, `/continuity`, and `/help` run
+immediately: their redacted output appears in place while the turn continues
+undisturbed. Anything else you type mid-stream waits — a prompt draft is kept
+and submits once the turn settles, and **Esc** interrupts it.
+
 ### Web delivery board
 
 Review the post-Desktop Remote Control and Dynamic Workflow surfaces on
