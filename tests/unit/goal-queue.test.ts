@@ -4,6 +4,9 @@ import {
   enqueueGoal,
   promoteNextGoal,
   clearActiveGoal,
+  moveQueuedGoal,
+  prioritizeQueuedGoal,
+  removeQueuedGoal,
   assembleGoalQueueView,
   formatGoalQueue,
   MAX_QUEUED_GOALS,
@@ -138,6 +141,129 @@ describe("objective validation and sanitization", () => {
     if (result.ok) {
       expect(result.state.queue[0].queuedBy).not.toContain(token);
     }
+  });
+});
+
+// --- queue management: move ---------------------------------------------------
+
+const threeQueue = (): GoalQueueState => {
+  let state = emptyGoalQueue();
+  state = enqueueGoal(state, "one", "user", NOW).state;
+  state = enqueueGoal(state, "two", "user", NOW + 1).state;
+  state = enqueueGoal(state, "three", "user", NOW + 2).state;
+  return state;
+};
+
+const objectives = (state: GoalQueueState): string[] =>
+  state.queue.map((g) => g.objective);
+
+describe("moveQueuedGoal", () => {
+  it("moves an entry forward and preserves the order of the others", () => {
+    const result = moveQueuedGoal(threeQueue(), 1, 3);
+    expect(result.ok).toBe(true);
+    expect(objectives(result.state)).toEqual(["two", "three", "one"]);
+  });
+
+  it("moves an entry backward and preserves the order of the others", () => {
+    const result = moveQueuedGoal(threeQueue(), 3, 1);
+    expect(result.ok).toBe(true);
+    expect(objectives(result.state)).toEqual(["three", "one", "two"]);
+  });
+
+  it("treats an in-place move as a no-op success", () => {
+    const result = moveQueuedGoal(threeQueue(), 2, 2);
+    expect(result.ok).toBe(true);
+    expect(objectives(result.state)).toEqual(["one", "two", "three"]);
+  });
+
+  it("keeps the active slot unchanged", () => {
+    const base = { ...threeQueue(), hasActiveGoal: true };
+    const result = moveQueuedGoal(base, 1, 2);
+    expect(result.ok).toBe(true);
+    expect(result.state.hasActiveGoal).toBe(true);
+  });
+});
+
+// --- queue management: prioritize ------------------------------------------------
+
+describe("prioritizeQueuedGoal", () => {
+  it("moves the chosen entry to the front, preserving FIFO of the rest", () => {
+    const result = prioritizeQueuedGoal(threeQueue(), 3);
+    expect(result.ok).toBe(true);
+    expect(objectives(result.state)).toEqual(["three", "one", "two"]);
+  });
+
+  it("is a no-op success for the first position", () => {
+    const result = prioritizeQueuedGoal(threeQueue(), 1);
+    expect(result.ok).toBe(true);
+    expect(objectives(result.state)).toEqual(["one", "two", "three"]);
+  });
+});
+
+// --- queue management: remove -------------------------------------------------------
+
+describe("removeQueuedGoal", () => {
+  it("removes head, middle, and tail entries", () => {
+    expect(objectives(removeQueuedGoal(threeQueue(), 1).state)).toEqual(["two", "three"]);
+    expect(objectives(removeQueuedGoal(threeQueue(), 2).state)).toEqual(["one", "three"]);
+    expect(objectives(removeQueuedGoal(threeQueue(), 3).state)).toEqual(["one", "two"]);
+  });
+
+  it("restores cap headroom after removing from a full queue", () => {
+    let state = emptyGoalQueue();
+    for (let i = 0; i < MAX_QUEUED_GOALS; i++) {
+      state = enqueueGoal(state, `g${i}`, "user", NOW + i).state;
+    }
+    expect(enqueueGoal(state, "overflow", "user", NOW).ok).toBe(false);
+    const removed = removeQueuedGoal(state, 1);
+    expect(removed.ok).toBe(true);
+    expect(enqueueGoal(removed.state, "fits now", "user", NOW).ok).toBe(true);
+  });
+});
+
+// --- queue management: refusals --------------------------------------------------------
+
+describe("queue management refusals", () => {
+  it("refuses out-of-range and non-integer positions with actionable reasons", () => {
+    const base = threeQueue();
+    for (const op of [
+      () => moveQueuedGoal(base, 0, 1),
+      () => moveQueuedGoal(base, 1, 4),
+      () => moveQueuedGoal(base, 1.5, 2),
+      () => prioritizeQueuedGoal(base, -1),
+      () => prioritizeQueuedGoal(base, 4),
+      () => removeQueuedGoal(base, 0),
+      () => removeQueuedGoal(base, 99),
+    ]) {
+      const result = op();
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toContain("invalid queue position");
+      }
+    }
+  });
+
+  it("refuses operations on an empty queue", () => {
+    const empty = emptyGoalQueue();
+    for (const result of [
+      moveQueuedGoal(empty, 1, 1),
+      prioritizeQueuedGoal(empty, 1),
+      removeQueuedGoal(empty, 1),
+    ]) {
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toContain("empty");
+      }
+    }
+  });
+
+  it("does not mutate the input state on any operation", () => {
+    const base = threeQueue();
+    const snapshot = JSON.stringify(base);
+    moveQueuedGoal(base, 1, 3);
+    prioritizeQueuedGoal(base, 2);
+    removeQueuedGoal(base, 1);
+    expect(JSON.stringify(base)).toBe(snapshot);
   });
 });
 
