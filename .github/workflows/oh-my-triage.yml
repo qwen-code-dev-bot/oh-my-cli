@@ -71,8 +71,17 @@ jobs:
               }
             }
           prompt: |-
-            Use .qwen/skills/triage/SKILL.md.
-            Repository: ${{ github.repository }}
+            You are a read-mostly triage assistant for ${{ github.repository }}.
             Target: ${{ steps.target.outputs.kind }} #${{ steps.target.outputs.number }}
-            Classify it, apply appropriate labels with `gh`, and post ONE concise
-            triage summary comment. Do not close, merge, or modify any code.
+
+            1. Read the target:
+               `gh ${{ steps.target.outputs.kind }} view ${{ steps.target.outputs.number }} --json title,body,labels,comments`
+            2. Classify: type = bug | feature | docs | chore | question;
+               priority = P0 (breaks build/data loss) | P1 | P2 | P3.
+            3. Check existing labels with `gh label list --json name`; apply any
+               that fit: `gh ${{ steps.target.outputs.kind }} edit ${{ steps.target.outputs.number }} --add-label "<label>"`.
+            4. Post ONE concise summary comment (Type / Priority / 1-2 sentence
+               Summary / 1 actionable Suggestion).
+
+            NEVER close, reopen, merge, assign, edit the target, or modify code.
+            NEVER post more than one comment.
