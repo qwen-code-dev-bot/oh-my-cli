@@ -82,6 +82,19 @@ export interface AgentOptions {
   // Date.now; tests supply a deterministic clock so responsiveness metrics are
   // reproducible. Undefined ⇒ Date.now.
   now?: () => number;
+  // Cooperative cancellation (#489). Polled before the first provider call, at
+  // every round boundary, and between streamed events. When it returns true the
+  // loop stops as soon as the current event is handled: any streamed assistant
+  // text is persisted as one interrupted turn (never lost, never reported as a
+  // completed answer) and the run ends with reason "cancelled". Undefined ⇒ the
+  // run cannot be cancelled.
+  cancelRequested?: () => boolean;
+  // Retry support (#489). When false the run does NOT create or persist a user
+  // message — the caller has already persisted the turn's user message and it is
+  // present in existingMessages, so a retry reuses one request identity instead
+  // of duplicating the user turn. Defaults to true. Attachments belong to the
+  // original turn and are never re-attached on retry.
+  appendUserMessage?: boolean;
 }
 
 // Cumulative usage and cost reported after each round. `estimatedCostUsd` is an
@@ -224,7 +237,7 @@ export interface AgentResult {
   // `empty_response` is the terminal anomaly when the provider keeps returning a
   // stream with no assistant text and no valid tool call and the bounded
   // empty-completion recovery is exhausted (#244).
-  reason: "completed" | "provider_error" | "max_rounds" | "budget_reached" | "empty_response";
+  reason: "completed" | "provider_error" | "max_rounds" | "budget_reached" | "empty_response" | "cancelled";
   rounds: number;
   // Total transient provider retries across the run (0 when the provider never
   // failed transiently). Lets a consumer distinguish "exhausted retries"
@@ -282,24 +295,26 @@ export async function runAgent(
     opts.onMessage(system);
   }
 
-  const userMsg: SessionMessage = { role: "user", content: userPrompt };
-  if (opts.images && opts.images.length > 0) {
-    // In-memory copy carries the data URLs the provider needs.
-    userMsg.images = opts.images.map((img) => ({
-      name: img.name,
-      mediaType: img.mediaType,
-      bytes: img.bytes,
-      dataUrl: img.dataUrl,
-    }));
+  if (opts.appendUserMessage !== false) {
+    const userMsg: SessionMessage = { role: "user", content: userPrompt };
+    if (opts.images && opts.images.length > 0) {
+      // In-memory copy carries the data URLs the provider needs.
+      userMsg.images = opts.images.map((img) => ({
+        name: img.name,
+        mediaType: img.mediaType,
+        bytes: img.bytes,
+        dataUrl: img.dataUrl,
+      }));
+    }
+    messages.push(userMsg);
+    // Persist a privacy-safe copy: the data URL (raw image bytes) never reaches
+    // the session log; only the non-secret reference (name, type, size) is kept.
+    opts.onMessage(
+      userMsg.images
+        ? { ...userMsg, images: userMsg.images.map(({ name, mediaType, bytes }) => ({ name, mediaType, bytes })) }
+        : userMsg,
+    );
   }
-  messages.push(userMsg);
-  // Persist a privacy-safe copy: the data URL (raw image bytes) never reaches
-  // the session log; only the non-secret reference (name, type, size) is kept.
-  opts.onMessage(
-    userMsg.images
-      ? { ...userMsg, images: userMsg.images.map(({ name, mediaType, bytes }) => ({ name, mediaType, bytes })) }
-      : userMsg,
-  );
 
   let finalText = "";
 
@@ -334,6 +349,24 @@ export async function runAgent(
   const budgetReached = () => budgetUsd !== null && costUsd >= budgetUsd;
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
+    // Cooperative cancellation (#489): checked before any provider call in this
+    // round, so a cancel issued while queued or between rounds stops the loop
+    // without another billable call. Nothing has been streamed at a round
+    // boundary, so there is no partial turn to persist here.
+    if (opts.cancelRequested?.()) {
+      return {
+        text: finalText,
+        ok: false,
+        reason: "cancelled",
+        rounds: round,
+        retries,
+        stats: statsSnapshot(),
+        tokens: tokensSnapshot(),
+        estimatedCostUsd: costSnapshot(),
+        costKnown,
+      };
+    }
+
     // Spend budget gate: once the running estimate has reached the cap, stop
     // before issuing a new provider call so no further billable calls are made.
     if (budgetReached()) {
@@ -422,6 +455,33 @@ export async function runAgent(
               reasonClass: event.reasonClass,
               delayMs: event.delayMs,
             });
+          }
+          // Cooperative cancellation (#489): polled between streamed events so a
+          // cancel takes effect at the next event boundary. Partial tool calls
+          // are never persisted; only emitted assistant text survives, as one
+          // interrupted turn.
+          if (opts.cancelRequested?.()) {
+            if (assistantText.length > 0) {
+              const partial: SessionMessage = {
+                role: "assistant",
+                content: assistantText,
+                interrupted: true,
+              };
+              messages.push(partial);
+              opts.onMessage(partial);
+              sink.assistantTurn(assistantText, round, { final: false, interrupted: true });
+            }
+            return {
+              text: assistantText,
+              ok: false,
+              reason: "cancelled",
+              rounds: round,
+              retries,
+              stats: statsSnapshot(),
+              tokens: tokensSnapshot(),
+              estimatedCostUsd: costSnapshot(),
+              costKnown,
+            };
           }
         }
       } catch (err: unknown) {

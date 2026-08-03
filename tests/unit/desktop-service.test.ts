@@ -403,4 +403,224 @@ describe("DesktopService", () => {
       fs.rmSync(outside, { recursive: true, force: true });
     }
   });
+
+  describe("composer lifecycle (#489)", () => {
+    function tinyPng(): Buffer {
+      return Buffer.from(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
+        "hex",
+      );
+    }
+
+    it("refuses cancel and retry preconditions fail-closed", async () => {
+      const service = makeService();
+      const session = service.createSession();
+      expect(() => service.cancelTurn(session.id)).toThrow(
+        "No turn is running for this session",
+      );
+      await expect(service.retryTurn(session.id, () => {})).rejects.toThrow(
+        "Nothing to retry in this session",
+      );
+    });
+
+    it("cancel ends the running turn as cancelled and preserves the partial transcript", async () => {
+      const run = vi.fn(async (prompt, _messages, options) => {
+        if (options.appendUserMessage !== false)
+          options.onMessage({ role: "user", content: prompt });
+        options.sink?.assistantDelta("Partial");
+        await vi.waitFor(() =>
+          expect(options.cancelRequested?.()).toBe(true),
+        );
+        options.onMessage({
+          role: "assistant",
+          content: "Partial",
+          interrupted: true,
+        });
+        return { ...result(false), reason: "cancelled" as const };
+      });
+      const service = makeService({ run });
+      const session = service.createSession();
+      const events: Array<{ type: string; sessionId?: string }> = [];
+
+      const pending = service.sendMessage(
+        { sessionId: session.id, prompt: "slow work" },
+        (event) => events.push(event),
+      );
+      await vi.waitFor(() =>
+        expect(events.some((e) => e.type === "assistant-delta")).toBe(true),
+      );
+      expect(service.cancelTurn(session.id)).toEqual({ ok: true });
+      await expect(pending).resolves.toEqual({ ok: false });
+
+      expect(events).toContainEqual({
+        type: "cancelled",
+        sessionId: session.id,
+      });
+      // A cancel is neither a completed nor a failed turn; the persisted
+      // partial assistant message still ends the pristine draft state.
+      const summary = summaryOf(service, session.id);
+      expect(summary.failed).toBe(false);
+      expect(summary.draft).toBe(false);
+      expect(summary.title).not.toBe("slow work");
+      expect(service.loadSession(session.id).messages).toContainEqual({
+        role: "assistant",
+        content: "Partial",
+        interrupted: true,
+      });
+    });
+
+    it("retry reuses one request identity without duplicating the user turn", async () => {
+      let calls = 0;
+      const run = vi.fn(async (prompt, _messages, options) => {
+        calls++;
+        if (options.appendUserMessage !== false)
+          options.onMessage({ role: "user", content: prompt });
+        if (calls === 1) return { ...result(false), reason: "provider_error" as const };
+        options.sink?.assistantDelta("Recovered");
+        options.onMessage({ role: "assistant", content: "Recovered" });
+        return result();
+      });
+      const service = makeService({ run });
+      const session = service.createSession();
+
+      await service.sendMessage(
+        { sessionId: session.id, prompt: "flaky turn" },
+        () => {},
+      );
+      expect(summaryOf(service, session.id).failed).toBe(true);
+
+      await expect(
+        service.retryTurn(session.id, () => {}),
+      ).resolves.toEqual({ ok: true });
+
+      const messages = service.loadSession(session.id).messages;
+      expect(messages.filter((m) => m.role === "user")).toHaveLength(1);
+      expect(messages.map((m) => m.content)).toContain("Recovered");
+      expect(summaryOf(service, session.id).failed).toBe(false);
+      // Retry passed the existing transcript through unchanged.
+      expect(run.mock.calls[1][2].appendUserMessage).toBe(false);
+    });
+
+    it("validates attachments by content and workspace provenance", () => {
+      const service = makeService();
+      const png = tinyPng();
+      fs.writeFileSync(path.join(root, "shot.png"), png);
+      fs.writeFileSync(path.join(root, "notes.txt"), "not an image");
+
+      const reports = service.attachImages(["shot.png", "notes.txt"]);
+      expect(reports[0]).toMatchObject({
+        path: "shot.png",
+        ok: true,
+        name: "shot.png",
+        mediaType: "image/png",
+      });
+      expect(reports[0].bytes).toBe(png.length);
+      expect(reports[1]).toMatchObject({ path: "notes.txt", ok: false });
+      expect(reports[1].error).toContain("Unsupported image type");
+
+      const outside = service.attachImageFiles([
+        path.join(os.tmpdir(), "elsewhere.png"),
+      ]);
+      expect(outside[0]).toMatchObject({
+        ok: false,
+        error: "File is outside this workspace",
+      });
+
+      const inside = service.attachImageFiles([path.join(root, "shot.png")]);
+      expect(inside[0]).toMatchObject({ ok: true, mediaType: "image/png" });
+
+      expect(() => service.attachImages([])).toThrow(
+        "No attachments provided",
+      );
+      expect(() =>
+        service.attachImages(
+          Array.from({ length: 9 }, (_, i) => `img${i}.png`),
+        ),
+      ).toThrow(/Too many images/);
+    });
+
+    it("sends validated attachments with the turn and rejects invalid ones before the turn", async () => {
+      const run = vi.fn(async (prompt, _messages, options) => {
+        if (options.appendUserMessage !== false)
+          options.onMessage({ role: "user", content: prompt });
+        options.onMessage({ role: "assistant", content: "ok" });
+        return result();
+      });
+      const service = makeService({ run });
+      const session = service.createSession();
+      fs.writeFileSync(path.join(root, "shot.png"), tinyPng());
+      fs.writeFileSync(path.join(root, "notes.txt"), "not an image");
+
+      await service.sendMessage(
+        { sessionId: session.id, prompt: "with image", attachments: ["shot.png"] },
+        () => {},
+      );
+      expect(run.mock.calls[0][2].images).toHaveLength(1);
+
+      await expect(
+        service.sendMessage(
+          { sessionId: session.id, prompt: "bad", attachments: ["notes.txt"] },
+          () => {},
+        ),
+      ).rejects.toThrow(/Unsupported image type/);
+    });
+  });
+
+  describe("runtime info and profiles (#489)", () => {
+    it("reports effective model and approval mode, and switches profiles canonically", () => {
+      const settings = path.join(sessions, "settings.json");
+      fs.writeFileSync(
+        settings,
+        JSON.stringify({
+          profiles: {
+            qwen: {
+              name: "qwen-model",
+              baseUrl: "https://dashscope.example.invalid/v1",
+              apiKeyEnv: "OMC_TEST_KEY_489",
+            },
+            local: {
+              name: "local-model",
+              baseUrl: "http://127.0.0.1:11434/v1",
+              apiKeyEnv: "OMC_TEST_KEY_489",
+            },
+          },
+        }),
+      );
+      process.env.OMC_TEST_KEY_489 = "test-key";
+      try {
+        const service = makeService({ settingsPath: settings });
+
+        const info = service.getRuntimeInfo();
+        expect(info.approvalMode).toBe("auto-edit");
+        expect(info.profiles).toEqual(["local", "qwen"]);
+        // No default profile and no legacy model section: truthful degradation.
+        expect(info.model).toBeNull();
+        expect(info.endpointHost).toBeNull();
+
+        const selected = service.setSelectedProfile("qwen");
+        expect(selected.model).toBe("qwen-model");
+        expect(selected.profile).toBe("qwen");
+        // Redacted endpoint: bare host only — no scheme, path, or userinfo.
+        expect(selected.endpointHost).toBe("dashscope.example.invalid");
+
+        expect(() => service.setSelectedProfile("nope")).toThrow(
+          "Unknown model profile",
+        );
+
+        const cleared = service.setSelectedProfile(null);
+        expect(cleared.profile).toBeNull();
+        expect(cleared.model).toBeNull();
+
+        // The choice survives a service restart (persisted runtime state).
+        const reloaded = makeService({ settingsPath: settings });
+        expect(reloaded.getRuntimeInfo().profile).toBeNull();
+        reloaded.setSelectedProfile("local");
+        expect(
+          makeService({ settingsPath: settings }).getRuntimeInfo().profile,
+        ).toBe("local");
+      } finally {
+        delete process.env.OMC_TEST_KEY_489;
+      }
+    });
+  });
 });

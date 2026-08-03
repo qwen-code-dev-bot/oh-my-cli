@@ -3,8 +3,13 @@ import path from "node:path";
 import { runAgent, type AgentResult, type AgentSink } from "../agent.js";
 import type { Config } from "../config.js";
 import { globPaths } from "../discovery.js";
-import { resolveModelProfileConfig } from "../model-profiles.js";
-import { redactSecrets } from "../permission-impact.js";
+import {
+  loadImageAttachment,
+  loadImageAttachments,
+  MAX_IMAGES_PER_MESSAGE,
+} from "../image-input.js";
+import { collectProfileList, resolveModelProfileConfig } from "../model-profiles.js";
+import { redactEndpointHost, redactSecrets } from "../permission-impact.js";
 import { SessionStore, type SessionMessage } from "../session.js";
 import { normalizeSessionName, sessionDisplayTitle } from "../session-name.js";
 import { collectSessionSummaries } from "../session-summary.js";
@@ -12,8 +17,10 @@ import { Workspace } from "../workspace.js";
 import type {
   DesktopAgentEvent,
   DesktopArchiveSessionRequest,
+  DesktopAttachmentReport,
   DesktopFileDocument,
   DesktopRenameSessionRequest,
+  DesktopRuntimeInfo,
   DesktopSaveUiStateRequest,
   DesktopSendMessageRequest,
   DesktopSession,
@@ -30,6 +37,10 @@ const MAX_VISIBLE_FILES = 500;
 const MAX_DRAFT_CHARS = 10_000;
 const MAX_UI_SESSIONS = 500;
 const MAX_SCROLL_TOP = 1_000_000;
+// Desktop turns run with file edits pre-approved and shell tools denied until
+// the Desktop grows a native approval surface; it is shown in the composer so
+// the effective boundary is never implicit.
+const DESKTOP_APPROVAL_MODE = "auto-edit" as const;
 const SESSION_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -42,6 +53,9 @@ type AgentRunner = typeof runAgent;
 interface DesktopUiFile {
   version: 1;
   workspaces: Record<string, DesktopUiState>;
+  // Desktop-selected model profile (#489). Null/absent means the canonical
+  // default resolution (settings.defaultProfile, then the legacy model section).
+  selectedProfile?: string | null;
 }
 
 export interface DesktopServiceOptions {
@@ -50,6 +64,7 @@ export interface DesktopServiceOptions {
   run?: AgentRunner;
   resolveConfig?: () => Config;
   uiStatePath?: string;
+  settingsPath?: string;
 }
 
 export class DesktopService {
@@ -58,7 +73,9 @@ export class DesktopService {
   private readonly run: AgentRunner;
   private readonly resolveConfig: () => Config;
   private readonly uiStatePath: string;
+  private readonly settingsPath?: string;
   private busySessionId: string | null = null;
+  private turnCancelRequested = false;
 
   constructor(opts: DesktopServiceOptions = {}) {
     this.workspace = new Workspace(opts.workspaceRoot ?? process.cwd());
@@ -66,6 +83,7 @@ export class DesktopService {
     this.run = opts.run ?? runAgent;
     this.resolveConfig =
       opts.resolveConfig ?? (() => resolveModelProfileConfig().config);
+    this.settingsPath = opts.settingsPath;
     this.uiStatePath =
       opts.uiStatePath ??
       path.join(
@@ -227,6 +245,140 @@ export class DesktopService {
     return this.getUiState();
   }
 
+  // Validate workspace-relative attachment paths before submission (#489).
+  // Each path is confined and sniffed by magic bytes; failures are reported
+  // per path so the composer can show honest validation state.
+  attachImages(paths: string[]): DesktopAttachmentReport[] {
+    if (!Array.isArray(paths) || paths.length === 0) {
+      throw new Error("No attachments provided");
+    }
+    if (paths.length > MAX_IMAGES_PER_MESSAGE) {
+      throw new Error(
+        `Too many images: ${paths.length} provided, limit is ${MAX_IMAGES_PER_MESSAGE}`,
+      );
+    }
+    return paths.map((p) =>
+      typeof p === "string"
+        ? this.attachOne(p)
+        : { path: "", ok: false, error: "Invalid attachment path" },
+    );
+  }
+
+  // Validate files dropped into the composer (#489). Dropped paths are
+  // absolute; only files inside this workspace are accepted (provenance),
+  // anything outside is rejected per file without touching the rest.
+  attachImageFiles(paths: string[]): DesktopAttachmentReport[] {
+    if (!Array.isArray(paths) || paths.length === 0) {
+      throw new Error("No attachments provided");
+    }
+    if (paths.length > MAX_IMAGES_PER_MESSAGE) {
+      throw new Error(
+        `Too many images: ${paths.length} provided, limit is ${MAX_IMAGES_PER_MESSAGE}`,
+      );
+    }
+    return paths.map((p) => {
+      if (typeof p !== "string" || !path.isAbsolute(p)) {
+        return { path: "", ok: false, error: "Dropped file path is unavailable" };
+      }
+      const relative = path.relative(this.workspace.root, p);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) {
+        return {
+          path: path.basename(p),
+          ok: false,
+          error: "File is outside this workspace",
+        };
+      }
+      return this.attachOne(relative);
+    });
+  }
+
+  // Effective runtime configuration for the composer (#489): the resolved
+  // model/profile (never a credential), the redacted endpoint host, the
+  // Desktop approval mode, and the selectable profile names.
+  getRuntimeInfo(): DesktopRuntimeInfo {
+    const profiles = this.availableProfiles();
+    const selected = this.readSelectedProfile();
+    try {
+      const resolved = resolveModelProfileConfig({
+        settingsPath: this.settingsPath,
+        ...(selected ? { profile: selected } : {}),
+      });
+      return {
+        model: resolved.config.model,
+        profile: resolved.profile ?? null,
+        approvalMode: DESKTOP_APPROVAL_MODE,
+        endpointHost: redactEndpointHost(resolved.config.baseUrl),
+        profiles,
+      };
+    } catch {
+      // Truthful degradation: configuration is unavailable, say so, and never
+      // leak the failing detail (it may contain endpoint or credential hints).
+      return {
+        model: null,
+        profile: selected,
+        approvalMode: DESKTOP_APPROVAL_MODE,
+        endpointHost: null,
+        profiles,
+      };
+    }
+  }
+
+  // Select the model profile used by the next turn (#489). The choice goes
+  // through the canonical profile resolution on the following turn; unknown or
+  // malformed selections fail closed before anything is persisted.
+  setSelectedProfile(profile: string | null): DesktopRuntimeInfo {
+    if (profile !== null) {
+      if (typeof profile !== "string" || !profile.trim()) {
+        throw new Error("Invalid profile selection");
+      }
+      if (!this.availableProfiles().includes(profile)) {
+        throw new Error("Unknown model profile");
+      }
+    }
+    const file = this.readUiFile();
+    file.selectedProfile = profile;
+    this.writeUiFile(file);
+    return this.getRuntimeInfo();
+  }
+
+  private attachOne(relativePath: string): DesktopAttachmentReport {
+    try {
+      const image = loadImageAttachment(relativePath, this.workspace);
+      return {
+        path: relativePath,
+        ok: true,
+        name: image.name,
+        mediaType: image.mediaType,
+        bytes: image.bytes,
+      };
+    } catch (error) {
+      return {
+        path: relativePath,
+        ok: false,
+        error: redactSecrets(
+          error instanceof Error ? error.message : "Attachment rejected",
+        ).text,
+      };
+    }
+  }
+
+  private availableProfiles(): string[] {
+    try {
+      return collectProfileList({ settingsPath: this.settingsPath })
+        .profiles.filter((entry) => !entry.disabled)
+        .map((entry) => entry.profile);
+    } catch {
+      return [];
+    }
+  }
+
+  private readSelectedProfile(): string | null {
+    const file = this.readUiFile();
+    return typeof file.selectedProfile === "string" && file.selectedProfile
+      ? file.selectedProfile
+      : null;
+  }
+
   async sendMessage(
     request: DesktopSendMessageRequest,
     emit: (event: DesktopAgentEvent) => void,
@@ -245,46 +397,110 @@ export class DesktopService {
       throw new Error("Message is too large");
     if (this.busySessionId)
       throw new Error("Another Desktop turn is already running");
+    // Attachments are validated fail-closed before the turn starts; invalid
+    // input never consumes the single turn slot.
+    const images =
+      request.attachments && request.attachments.length > 0
+        ? loadImageAttachments(request.attachments, this.workspace)
+        : undefined;
 
     const existing = this.store.load(request.sessionId);
     const firstUserTurn = !existing.some((message) => message.role === "user");
-    this.busySessionId = request.sessionId;
+    return this.runTurn({
+      sessionId: request.sessionId,
+      prompt,
+      existing,
+      firstUserTurn,
+      images,
+      appendUserMessage: true,
+      emit,
+    });
+  }
+
+  // Cancel the running turn of a session (#489). Cooperative: the agent loop
+  // observes the flag at the next boundary, persists any streamed text as one
+  // interrupted turn, and ends as cancelled. Idempotent while busy.
+  cancelTurn(sessionId: string): { ok: boolean } {
+    if (typeof sessionId !== "string") {
+      throw new Error("Invalid Desktop cancel request");
+    }
+    this.assertOwnedSession(sessionId);
+    if (this.busySessionId !== sessionId) {
+      throw new Error("No turn is running for this session");
+    }
+    this.turnCancelRequested = true;
+    return { ok: true };
+  }
+
+  // Retry the session's most recent turn (#489). Reuses one request identity:
+  // the persisted user message stays singular because the retry run does not
+  // append another one.
+  async retryTurn(
+    sessionId: string,
+    emit: (event: DesktopAgentEvent) => void,
+  ): Promise<{ ok: boolean }> {
+    if (typeof sessionId !== "string") {
+      throw new Error("Invalid Desktop retry request");
+    }
+    this.assertOwnedSession(sessionId);
+    if (this.busySessionId)
+      throw new Error("Another Desktop turn is already running");
+    const existing = this.store.load(sessionId);
+    const lastUser = [...existing]
+      .reverse()
+      .find((message) => message.role === "user");
+    if (!lastUser || typeof lastUser.content !== "string") {
+      throw new Error("Nothing to retry in this session");
+    }
+    return this.runTurn({
+      sessionId,
+      prompt: lastUser.content,
+      existing,
+      firstUserTurn: false,
+      images: undefined,
+      appendUserMessage: false,
+      emit,
+    });
+  }
+
+  private async runTurn(opts: {
+    sessionId: string;
+    prompt: string;
+    existing: SessionMessage[];
+    firstUserTurn: boolean;
+    images?: ReturnType<typeof loadImageAttachments>;
+    appendUserMessage: boolean;
+    emit: (event: DesktopAgentEvent) => void;
+  }): Promise<{ ok: boolean }> {
+    const { sessionId, prompt, existing, firstUserTurn, images, emit } = opts;
+    this.busySessionId = sessionId;
+    this.turnCancelRequested = false;
     emit({
       type: "status",
-      sessionId: request.sessionId,
+      sessionId,
       message: "Connecting to Qwen",
     });
 
     const sink: AgentSink = {
       assistantDelta: (delta) =>
-        emit({ type: "assistant-delta", sessionId: request.sessionId, delta }),
+        emit({ type: "assistant-delta", sessionId, delta }),
       assistantTurn: () => {},
-      toolStart: ({ name }) =>
-        emit({ type: "tool-start", sessionId: request.sessionId, name }),
+      toolStart: ({ name }) => emit({ type: "tool-start", sessionId, name }),
       toolResult: ({ name, result }) =>
-        emit({
-          type: "tool-result",
-          sessionId: request.sessionId,
-          name,
-          ok: !result.isError,
-        }),
+        emit({ type: "tool-result", sessionId, name, ok: !result.isError }),
       providerError: (message) =>
-        emit({
-          type: "error",
-          sessionId: request.sessionId,
-          message: redactSecrets(message).text,
-        }),
+        emit({ type: "error", sessionId, message: redactSecrets(message).text }),
       usage: () => {},
       retry: ({ attempt, maxAttempts }) =>
         emit({
           type: "status",
-          sessionId: request.sessionId,
+          sessionId,
           message: `Retrying provider ${attempt}/${maxAttempts}`,
         }),
       compaction: ({ summarizedMessages }) =>
         emit({
           type: "status",
-          sessionId: request.sessionId,
+          sessionId,
           message: `Compacted ${summarizedMessages} messages`,
         }),
       requestApproval: async () => false,
@@ -295,28 +511,39 @@ export class DesktopService {
       result = await this.run(prompt, existing, {
         config: this.resolveConfig(),
         workspace: this.workspace,
-        approvalMode: "auto-edit",
-        sessionId: request.sessionId,
-        onMessage: (message) => this.store.append(request.sessionId, message),
+        approvalMode: DESKTOP_APPROVAL_MODE,
+        sessionId,
+        onMessage: (message) => this.store.append(sessionId, message),
         sink,
+        ...(images ? { images } : {}),
+        appendUserMessage: opts.appendUserMessage,
+        cancelRequested: () =>
+          this.turnCancelRequested && this.busySessionId === sessionId,
       });
+      if (result.reason === "cancelled") {
+        // A cancelled turn keeps its partial transcript but is neither a
+        // completed nor a failed turn: no title, no failed badge.
+        emit({ type: "cancelled", sessionId });
+        emit({ type: "complete", sessionId, ok: false });
+        return { ok: false };
+      }
       // A stable title is earned by the first *completed* turn only; a failed
       // or interrupted first turn leaves the session in its draft state.
-      if (firstUserTurn && result.ok)
-        this.nameFromPrompt(request.sessionId, prompt);
-      this.recordTurnOutcome(request.sessionId, result.ok);
-      emit({ type: "complete", sessionId: request.sessionId, ok: result.ok });
+      if (firstUserTurn && result.ok) this.nameFromPrompt(sessionId, prompt);
+      this.recordTurnOutcome(sessionId, result.ok);
+      emit({ type: "complete", sessionId, ok: result.ok });
       return { ok: result.ok };
     } catch (error) {
-      this.recordTurnOutcome(request.sessionId, false);
+      this.recordTurnOutcome(sessionId, false);
       const message = redactSecrets(
         error instanceof Error ? error.message : "Desktop agent turn failed",
       ).text;
-      emit({ type: "error", sessionId: request.sessionId, message });
-      emit({ type: "complete", sessionId: request.sessionId, ok: false });
+      emit({ type: "error", sessionId, message });
+      emit({ type: "complete", sessionId, ok: false });
       throw new Error(message);
     } finally {
       this.busySessionId = null;
+      this.turnCancelRequested = false;
     }
   }
 
@@ -479,7 +706,14 @@ export class DesktopService {
       ) {
         return empty;
       }
-      return { version: 1, workspaces: parsed.workspaces as DesktopUiFile["workspaces"] };
+      return {
+        version: 1,
+        workspaces: parsed.workspaces as DesktopUiFile["workspaces"],
+        ...(parsed.selectedProfile === null ||
+        typeof parsed.selectedProfile === "string"
+          ? { selectedProfile: parsed.selectedProfile }
+          : {}),
+      };
     } catch {
       return empty;
     }

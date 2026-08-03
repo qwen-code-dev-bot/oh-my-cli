@@ -1,7 +1,9 @@
 import type {
   DesktopAgentEvent,
+  DesktopAttachmentReport,
   DesktopBootstrapState,
   DesktopFileDocument,
+  DesktopRuntimeInfo,
   DesktopSession,
   DesktopSessionSummary,
   DesktopWorkspaceFile,
@@ -29,7 +31,14 @@ export interface DesktopRuntimeState {
   showArchived: boolean;
   renaming: boolean;
   confirmDeleteId?: string;
+  cancelling: boolean;
+  turnOutcome: DesktopTurnOutcome;
+  attachments: DesktopAttachmentReport[];
+  attachPickerOpen: boolean;
+  runtime: DesktopRuntimeInfo | null;
 }
+
+export type DesktopTurnOutcome = "idle" | "ok" | "failed" | "cancelled";
 
 export type DesktopAction =
   | { type: "bootstrap-started" }
@@ -43,12 +52,16 @@ export type DesktopAction =
   | { type: "select-view"; view: DesktopPrimaryView }
   | { type: "set-diagnostics"; open: boolean }
   | { type: "set-sessions"; sessions: DesktopSessionSummary[] }
-  | { type: "select-session"; session: DesktopSession }
+  | { type: "select-session"; session: DesktopSession; preserveNotice?: boolean }
   | { type: "clear-session" }
   | { type: "set-session-search"; value: string }
   | { type: "set-show-archived"; show: boolean }
   | { type: "set-renaming"; renaming: boolean }
   | { type: "confirm-delete"; sessionId?: string }
+  | { type: "set-cancelling"; cancelling: boolean }
+  | { type: "set-attachments"; attachments: DesktopAttachmentReport[] }
+  | { type: "attach-picker"; open: boolean }
+  | { type: "set-runtime"; runtime: DesktopRuntimeInfo | null }
   | { type: "optimistic-user"; content: string }
   | { type: "set-busy"; busy: boolean }
   | { type: "agent-event"; event: DesktopAgentEvent }
@@ -100,6 +113,11 @@ export function createInitialDesktopState(): DesktopRuntimeState {
     sessionSearch: "",
     showArchived: false,
     renaming: false,
+    cancelling: false,
+    turnOutcome: "idle",
+    attachments: [],
+    attachPickerOpen: false,
+    runtime: null,
   };
 }
 
@@ -134,10 +152,16 @@ export function reduceDesktopState(
         activeView: "chat",
         streamingText: "",
         activity: [],
-        notice: undefined,
+        // A turn-adoption reload keeps the just-set outcome notice ("Turn
+        // cancelled", "Turn complete"); a user-initiated switch clears it.
+        notice: action.preserveNotice ? state.notice : undefined,
         error: undefined,
         renaming: false,
         confirmDeleteId: undefined,
+        cancelling: false,
+        turnOutcome: action.preserveNotice ? state.turnOutcome : "idle",
+        attachments: [],
+        attachPickerOpen: false,
       };
     case "clear-session":
       return {
@@ -148,6 +172,10 @@ export function reduceDesktopState(
         notice: undefined,
         renaming: false,
         confirmDeleteId: undefined,
+        cancelling: false,
+        turnOutcome: "idle",
+        attachments: [],
+        attachPickerOpen: false,
       };
     case "set-session-search":
       return { ...state, sessionSearch: action.value };
@@ -159,10 +187,19 @@ export function reduceDesktopState(
         : state;
     case "confirm-delete":
       return { ...state, confirmDeleteId: action.sessionId };
+    case "set-cancelling":
+      return { ...state, cancelling: action.cancelling };
+    case "set-attachments":
+      return { ...state, attachments: action.attachments };
+    case "attach-picker":
+      return { ...state, attachPickerOpen: action.open };
+    case "set-runtime":
+      return { ...state, runtime: action.runtime };
     case "optimistic-user":
       if (!state.activeSession) return state;
       return {
         ...state,
+        turnOutcome: "idle",
         activeSession: {
           ...state.activeSession,
           messages: [
@@ -175,7 +212,9 @@ export function reduceDesktopState(
         notice: "Qwen is thinking",
       };
     case "set-busy":
-      return { ...state, busy: action.busy };
+      return action.busy
+        ? { ...state, busy: true, turnOutcome: "idle", cancelling: false }
+        : { ...state, busy: false };
     case "agent-event": {
       if (action.event.sessionId !== state.activeSession?.id) return state;
       if (action.event.type === "assistant-delta") {
@@ -206,10 +245,32 @@ export function reduceDesktopState(
         return { ...state, notice: action.event.message };
       if (action.event.type === "error")
         return { ...state, error: action.event.message };
+      if (action.event.type === "cancelled") {
+        return {
+          ...state,
+          busy: false,
+          cancelling: false,
+          notice: "Turn cancelled",
+          turnOutcome: "cancelled",
+        };
+      }
+      // A complete(ok:false) that follows a cancelled event must not rewrite
+      // the cancellation as a generic failure.
+      const cancelledNow = state.turnOutcome === "cancelled" && !action.event.ok;
       return {
         ...state,
         busy: false,
-        notice: action.event.ok ? "Turn complete" : "Turn failed",
+        cancelling: false,
+        notice: cancelledNow
+          ? "Turn cancelled"
+          : action.event.ok
+            ? "Turn complete"
+            : "Turn failed",
+        turnOutcome: action.event.ok
+          ? "ok"
+          : cancelledNow
+            ? "cancelled"
+            : "failed",
       };
     }
     case "select-file":
@@ -442,6 +503,48 @@ function sessionStatusLine(model: DesktopViewModel): string {
   return "Issue #488 · session lifecycle";
 }
 
+function renderAttachmentChip(attachment: DesktopAttachmentReport): string {
+  const label = attachment.ok
+    ? `${attachment.name ?? attachment.path} · ${attachment.mediaType ?? "unknown"} · ${attachment.bytes ?? 0} B · workspace`
+    : `${attachment.name || attachment.path} — ${attachment.error ?? "rejected"}`;
+  return `<span class="attachment-chip ${attachment.ok ? "" : "is-error"}" data-attachment-path="${escapeHtml(attachment.path)}" title="${escapeHtml(label)}">${escapeHtml(label)}<button class="chip-remove" type="button" data-action="remove-attachment" aria-label="Remove attachment ${escapeHtml(attachment.name || attachment.path)}">×</button></span>`;
+}
+
+function renderRuntimeControls(model: DesktopViewModel): string {
+  const runtime = model.runtime;
+  if (!runtime) {
+    return `<span class="runtime-chip" data-runtime-chip="unavailable">Runtime unavailable</span>`;
+  }
+  const profilePart = runtime.profile ? ` · profile ${runtime.profile}` : "";
+  const hostPart = runtime.endpointHost ? ` · ${runtime.endpointHost}` : "";
+  const detail = `${runtime.model ?? "Model unavailable"}${profilePart} · approvals: ${runtime.approvalMode}${hostPart}`;
+  const chip = `<span class="runtime-chip" data-runtime-chip="${runtime.model ? "ready" : "degraded"}" title="${escapeHtml(detail)}">${escapeHtml(runtime.model ?? "Model unavailable")} · ${escapeHtml(runtime.approvalMode)}</span>`;
+  if (runtime.profiles.length < 2) return chip;
+  const options = runtime.profiles
+    .map(
+      (profile) =>
+        `<option value="${escapeHtml(profile)}"${profile === runtime.profile ? " selected" : ""}>${escapeHtml(profile)}</option>`,
+    )
+    .join("");
+  return `${chip}<select class="profile-select" aria-label="Model profile"><option value=""${runtime.profile ? "" : " selected"}>Default profile</option>${options}</select>`;
+}
+
+function renderAttachPicker(model: DesktopViewModel): string {
+  if (!model.attachPickerOpen) return "";
+  const candidates = model.files.filter((file) =>
+    /\.(png|jpe?g|gif|webp)$/i.test(file.path),
+  );
+  const list = candidates.length
+    ? candidates
+        .map(
+          (file) =>
+            `<button class="attach-option" type="button" data-attach-file-path="${escapeHtml(file.path)}">${escapeHtml(file.path)}</button>`,
+        )
+        .join("")
+    : `<p class="rail-empty">No image files in this workspace</p>`;
+  return `<div class="dialog-backdrop" data-dialog-backdrop="true"><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="attach-picker-title"><div class="dialog-heading"><div><p class="eyebrow">Workspace images</p><h2 id="attach-picker-title">Attach an image</h2></div><button class="icon-button" type="button" aria-label="Close attachment picker" data-action="close-attach-picker">×</button></div><div class="attach-list">${list}</div><p class="dialog-note">Only files from this workspace are listed. Content is verified by magic bytes (PNG, JPEG, GIF, WebP, up to 20 MiB), never by extension; invalid picks are rejected with a reason before submission.</p></section></div>`;
+}
+
 export function renderDesktopWorkbench(model: DesktopViewModel): string {
   const platform = platformLabel(model.bootstrap?.platform);
   const version = model.bootstrap?.version ?? "—";
@@ -460,6 +563,21 @@ export function renderDesktopWorkbench(model: DesktopViewModel): string {
   const sessionActions = model.activeSession
     ? `<div class="session-actions"><button class="ghost-button" type="button" data-action="rename-session">Rename</button><button class="ghost-button" type="button" data-action="${summary?.archived ? "restore-session" : "archive-session"}">${summary?.archived ? "Restore" : "Archive"}</button><button class="ghost-button is-danger" type="button" aria-label="Delete session" data-action="request-delete-session">Delete</button></div>`
     : "";
+  const attachmentTray = model.attachments.length
+    ? `<div class="attachment-tray" aria-label="Staged attachments">${model.attachments.map(renderAttachmentChip).join("")}</div>`
+    : "";
+  const canAttach =
+    Boolean(model.activeSession) && !model.busy && model.phase === "ready";
+  const cancelControl =
+    model.activeSession && model.busy
+      ? `<button class="ghost-button is-danger" type="button" data-action="cancel-turn" aria-label="Cancel turn"${model.cancelling ? " disabled" : ""}>${model.cancelling ? "Cancelling…" : "Cancel"}</button>`
+      : "";
+  const retryControl =
+    model.activeSession &&
+    !model.busy &&
+    (model.turnOutcome === "failed" || model.turnOutcome === "cancelled")
+      ? `<button class="ghost-button" type="button" data-action="retry-turn" aria-label="Retry last turn">Retry</button>`
+      : "";
   return `<div class="app" data-workbench-state="${model.phase}" data-agent-busy="${model.busy}">
     <header class="titlebar"><span></span><strong>Oh My CLI</strong><span class="runtime-status ${model.phase === "ready" ? "is-ready" : ""}"><i></i>${escapeHtml(platform)}</span></header>
     <nav class="rail" aria-label="Projects and sessions">
@@ -476,12 +594,13 @@ export function renderDesktopWorkbench(model: DesktopViewModel): string {
       <div class="workspace-bar">${titleBlock}<div class="tabs" role="tablist" aria-label="Primary workbench views">${tab("chat", "Chat", model.activeView)}${tab("workflow", "Activity", model.activeView)}${tab("changes", "Files", model.activeView)}</div><div class="workspace-bar-actions">${sessionActions}<button class="icon-button" type="button" aria-label="Open diagnostics" data-action="open-diagnostics">•••</button></div></div>
       ${model.error ? `<div class="error-banner" role="alert">${escapeHtml(model.error)}<button type="button" data-action="dismiss-error">×</button></div>` : ""}
       <section class="stage" role="tabpanel" aria-live="polite">${renderStage(model)}</section>
-      <div class="composer-wrap" data-fixed-composer="true"><form class="composer" aria-label="Message composer"><textarea rows="2" aria-label="Message" placeholder="${model.activeSession ? "Ask Qwen to inspect, explain, or change this workspace" : "Create or select a session to start"}" ${canSend ? "" : "disabled"}></textarea><div class="composer-footer"><span>⌘K focus · Enter send · Shift+Enter newline</span><button class="send" type="submit" aria-label="Send message" ${canSend ? "" : "disabled"}>↵</button></div></form></div>
+      <div class="composer-wrap" data-fixed-composer="true"><form class="composer" aria-label="Message composer">${attachmentTray}<textarea rows="2" aria-label="Message" placeholder="${model.activeSession ? "Ask Qwen to inspect, explain, or change this workspace" : "Create or select a session to start"}" ${canSend ? "" : "disabled"}></textarea><div class="composer-footer"><span class="composer-side"><button class="ghost-button" type="button" data-action="open-attach-picker" aria-label="Attach image" ${canAttach ? "" : "disabled"}>Attach image</button><span class="composer-hint">⌘K focus · Enter send · Shift+Enter newline</span></span><span class="composer-side">${renderRuntimeControls(model)}${retryControl}${cancelControl}<button class="send" type="submit" aria-label="Send message" ${canSend ? "" : "disabled"}>↵</button></span></div></form></div>
       <footer class="statusbar"><span><i class="connection-dot ${model.phase === "ready" ? "is-ready" : ""}"></i>${model.busy ? "Agent turn running" : "Secure bridge ready"}</span><span>${escapeHtml(platform)} · ${escapeHtml(version)}</span></footer>
     </main>
     <aside class="inspector" aria-label="Context inspector"><div class="inspector-heading"><span>Workspace files</span><strong>${model.files.length}</strong></div><div class="file-list">${renderFiles(model)}</div><div class="inspector-note"><strong>Safe local editor</strong><p>UTF-8 text only · 1 MiB max · path confined</p></div></aside>
     ${renderDiagnostics(model)}
     ${renderDeleteConfirm(model)}
+    ${renderAttachPicker(model)}
   </div>`;
 }
 
@@ -503,6 +622,9 @@ export function renderDesktopShell(model: DesktopViewModel): string {
     .workspace-bar-actions { display:flex; align-items:center; gap:6px; justify-self:end; }.session-actions { display:flex; gap:4px; }.ghost-button { padding:5px 8px; border:1px solid #d5d8df; border-radius:6px; color:#5f6470; background:white; font-size:9px; }.ghost-button:hover { background:#f1f2f6; }.ghost-button.is-danger { color:#9b2727; border-color:#e5b8b8; }.ghost-button.is-danger:hover { background:#fff1f1; }
     .title-edit { min-width:0; }.rename-input { width:240px; padding:5px 8px; border:1px solid #6257d9; border-radius:6px; font-size:12px; outline:0; }.title-edit small { display:block; margin-top:3px; color:#858a96; font-family:"SFMono-Regular",Consolas,monospace; font-size:9px; }
     .dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }.danger-button { padding:8px 13px; border:1px solid #c0392b; border-radius:7px; color:white; background:#c0392b; font-size:10px; }.danger-button:hover { background:#a93226; }
+    .composer-side { display:flex; align-items:center; gap:8px; }.composer-hint { color:#858a96; font-size:9px; }.runtime-chip { padding:3px 7px; border:1px solid #e2e4e9; border-radius:6px; color:#5f6470; background:#f5f6f8; font:9px "SFMono-Regular",Consolas,monospace; }.runtime-chip[data-runtime-chip="degraded"] { color:#9b2727; border-color:#e5b8b8; }.profile-select { max-width:130px; padding:3px 5px; border:1px solid #d8dbe2; border-radius:6px; color:#5f6470; background:white; font-size:9px; }
+    .attachment-tray { display:flex; flex-wrap:wrap; gap:6px; padding:0 0 8px; }.attachment-chip { display:inline-flex; align-items:center; gap:6px; max-width:340px; padding:4px 8px; border:1px solid #d5d8df; border-radius:6px; color:#505562; background:#f5f6f8; font-size:9px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.attachment-chip.is-error { color:#9b2727; border-color:#e5b8b8; background:#fff1f1; }.chip-remove { border:0; color:inherit; background:transparent; font-size:10px; padding:0 2px; }
+    .attach-list { max-height:260px; overflow:auto; display:flex; flex-direction:column; gap:4px; }.attach-option { padding:8px 10px; border:1px solid #e2e4e9; border-radius:6px; color:#505562; background:white; text-align:left; font:9px "SFMono-Regular",Consolas,monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.attach-option:hover { background:#f1f2f6; }
     .rail-footer { position:absolute; right:18px; bottom:18px; left:18px; display:flex; align-items:flex-start; color:#505562; font-size:10px; }.rail-footer strong,.rail-footer small { display:block; }.rail-footer small { margin-top:4px; color:#9297a2; }
     .workbench { display:grid; grid-template-rows:62px auto minmax(0,1fr) auto 30px; min-width:0; background:white; }.workspace-bar { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; padding:0 20px; border-bottom:1px solid #e2e4e9; }.workspace-bar>div:first-child strong,.workspace-bar>div:first-child small { display:block; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.workspace-bar strong { font-size:12px; }.workspace-bar small { margin-top:3px; color:#858a96; font-family:"SFMono-Regular",Consolas,monospace; font-size:9px; }.tabs { display:flex; align-self:stretch; gap:22px; }.tab { position:relative; border:0; color:#858a96; background:transparent; font-size:11px; }.tab[aria-selected="true"] { color:#252832; }.tab[aria-selected="true"]::after { position:absolute; right:0; bottom:0; left:0; height:2px; background:#6257d9; content:""; }.icon-button { justify-self:end; min-width:30px; height:30px; border:0; border-radius:7px; color:#747985; background:transparent; }.icon-button:hover { background:#eceef2; }
     .error-banner { display:flex; align-items:center; justify-content:space-between; padding:8px 16px; color:#9b2727; background:#fff1f1; border-bottom:1px solid #f1caca; font-size:10px; }.error-banner button { border:0; background:transparent; }.stage { min-height:0; overflow:auto; padding:32px clamp(24px,5vw,68px); }.state-card { max-width:620px; margin:9vh auto 0; text-align:center; }.state-card h1,.conversation-empty h1,.workflow-view h1,.editor h1 { margin:9px 0; font-size:23px; font-weight:620; letter-spacing:-.025em; }.state-card>p,.conversation-empty>p:last-child { margin:0 auto; max-width:560px; color:#6f7480; font-size:12px; line-height:1.6; }.eyebrow { margin:0; color:#858a96!important; font-size:9px!important; font-weight:700; letter-spacing:.13em; text-transform:uppercase; }.state-symbol { display:grid; width:38px; height:38px; margin:0 auto 20px; place-items:center; border:1px solid #d9dce3; border-radius:10px; color:#5d626e; background:#f5f6f8; }.spinner { display:block; width:28px; height:28px; margin:0 auto 24px; border:2px solid #e0e2e8; border-top-color:#6257d9; border-radius:50%; animation:spin 900ms linear infinite; } @keyframes spin { to { transform:rotate(360deg); } }

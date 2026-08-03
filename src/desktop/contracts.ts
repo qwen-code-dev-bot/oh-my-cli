@@ -7,6 +7,12 @@ export const DESKTOP_CHANNELS = Object.freeze({
   setSessionArchived: "desktop:set-session-archived",
   deleteSession: "desktop:delete-session",
   sendMessage: "desktop:send-message",
+  cancelTurn: "desktop:cancel-turn",
+  retryTurn: "desktop:retry-turn",
+  attachImages: "desktop:attach-images",
+  attachImageFiles: "desktop:attach-image-files",
+  getRuntimeInfo: "desktop:get-runtime-info",
+  setSelectedProfile: "desktop:set-selected-profile",
   getUiState: "desktop:get-ui-state",
   saveUiState: "desktop:save-ui-state",
   listWorkspaceFiles: "desktop:list-workspace-files",
@@ -103,11 +109,40 @@ export type DesktopAgentEvent =
   | { type: "tool-result"; sessionId: string; name: string; ok: boolean }
   | { type: "status"; sessionId: string; message: string }
   | { type: "error"; sessionId: string; message: string }
+  | { type: "cancelled"; sessionId: string }
   | { type: "complete"; sessionId: string; ok: boolean };
 
 export interface DesktopSendMessageRequest {
   sessionId: string;
   prompt: string;
+  /** Workspace-relative image paths, pre-validated and re-validated at send. */
+  attachments?: string[];
+}
+
+/**
+ * Validation outcome for one staged attachment (#489). Ok entries carry the
+ * privacy-safe reference (name, media type, size); failed entries carry a
+ * secret-safe reason so the composer can show validation state before submit.
+ */
+export interface DesktopAttachmentReport {
+  path: string;
+  ok: boolean;
+  name?: string;
+  mediaType?: string;
+  bytes?: number;
+  error?: string;
+}
+
+/**
+ * Effective runtime configuration shown in the composer (#489). Carries no
+ * credential values; the endpoint is reduced to its redacted host.
+ */
+export interface DesktopRuntimeInfo {
+  model: string | null;
+  profile: string | null;
+  approvalMode: string;
+  endpointHost: string | null;
+  profiles: string[];
 }
 
 export interface DesktopWriteFileRequest {
@@ -128,6 +163,12 @@ export interface DesktopBridge {
   ): Promise<DesktopSessionSummary>;
   deleteSession(sessionId: string): Promise<{ ok: boolean }>;
   sendMessage(request: DesktopSendMessageRequest): Promise<{ ok: boolean }>;
+  cancelTurn(sessionId: string): Promise<{ ok: boolean }>;
+  retryTurn(sessionId: string): Promise<{ ok: boolean }>;
+  attachImages(paths: string[]): Promise<DesktopAttachmentReport[]>;
+  attachImageFiles(paths: string[]): Promise<DesktopAttachmentReport[]>;
+  getRuntimeInfo(): Promise<DesktopRuntimeInfo>;
+  setSelectedProfile(profile: string | null): Promise<DesktopRuntimeInfo>;
   getUiState(): Promise<DesktopUiState>;
   saveUiState(request: DesktopSaveUiStateRequest): Promise<DesktopUiState>;
   listWorkspaceFiles(): Promise<DesktopWorkspaceFile[]>;
@@ -135,6 +176,8 @@ export interface DesktopBridge {
   writeWorkspaceFile(
     request: DesktopWriteFileRequest,
   ): Promise<DesktopFileDocument>;
+  /** Resolve a dropped File to a filesystem path (Electron preload only). */
+  getPathForFile(file: File): string;
   onAgentEvent(listener: (event: DesktopAgentEvent) => void): () => void;
 }
 
@@ -151,6 +194,7 @@ export type DesktopSubscriber = (
 export function createDesktopBridge(
   invoke: DesktopInvoker,
   subscribe: DesktopSubscriber,
+  pathForFile?: (file: File) => string,
 ): DesktopBridge {
   return Object.freeze({
     getBootstrapState: () =>
@@ -183,6 +227,27 @@ export function createDesktopBridge(
       ) as Promise<{ ok: boolean }>,
     sendMessage: (request: DesktopSendMessageRequest) =>
       invoke(DESKTOP_CHANNELS.sendMessage, request) as Promise<{ ok: boolean }>,
+    cancelTurn: (sessionId: string) =>
+      invoke(DESKTOP_CHANNELS.cancelTurn, sessionId) as Promise<{ ok: boolean }>,
+    retryTurn: (sessionId: string) =>
+      invoke(DESKTOP_CHANNELS.retryTurn, sessionId) as Promise<{ ok: boolean }>,
+    attachImages: (paths: string[]) =>
+      invoke(
+        DESKTOP_CHANNELS.attachImages,
+        paths,
+      ) as Promise<DesktopAttachmentReport[]>,
+    attachImageFiles: (paths: string[]) =>
+      invoke(
+        DESKTOP_CHANNELS.attachImageFiles,
+        paths,
+      ) as Promise<DesktopAttachmentReport[]>,
+    getRuntimeInfo: () =>
+      invoke(DESKTOP_CHANNELS.getRuntimeInfo) as Promise<DesktopRuntimeInfo>,
+    setSelectedProfile: (profile: string | null) =>
+      invoke(
+        DESKTOP_CHANNELS.setSelectedProfile,
+        profile,
+      ) as Promise<DesktopRuntimeInfo>,
     getUiState: () => invoke(DESKTOP_CHANNELS.getUiState) as Promise<DesktopUiState>,
     saveUiState: (request: DesktopSaveUiStateRequest) =>
       invoke(
@@ -203,6 +268,10 @@ export function createDesktopBridge(
         DESKTOP_CHANNELS.writeWorkspaceFile,
         request,
       ) as Promise<DesktopFileDocument>,
+    getPathForFile: (file: File) => {
+      if (!pathForFile) throw new Error("File path resolution is unavailable");
+      return pathForFile(file);
+    },
     onAgentEvent: (listener: (event: DesktopAgentEvent) => void) =>
       subscribe(DESKTOP_CHANNELS.agentEvent, listener),
   });
