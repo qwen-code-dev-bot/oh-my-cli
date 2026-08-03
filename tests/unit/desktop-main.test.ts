@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 const electron = vi.hoisted(() => {
@@ -15,11 +17,8 @@ const electron = vi.hoisted(() => {
     loadedUrl?: string;
     webContents = {
       navigationHandler: undefined as
-        | ((event: { preventDefault(): void }) => void)
-        | undefined,
-      openHandler: undefined as
-        | (() => { action: "deny" })
-        | undefined,
+        ((event: { preventDefault(): void }) => void) | undefined,
+      openHandler: undefined as (() => { action: "deny" }) | undefined,
       on: vi.fn(
         (
           event: string,
@@ -30,11 +29,9 @@ const electron = vi.hoisted(() => {
           }
         },
       ),
-      setWindowOpenHandler: vi.fn(
-        (handler: () => { action: "deny" }) => {
-          this.webContents.openHandler = handler;
-        },
-      ),
+      setWindowOpenHandler: vi.fn((handler: () => { action: "deny" }) => {
+        this.webContents.openHandler = handler;
+      }),
     };
 
     constructor(options: unknown) {
@@ -80,7 +77,19 @@ describe("desktop main process", () => {
     expect(handler?.()).toEqual({
       platform: process.platform,
       version: "0.1.0",
+      workspaceName: path.basename(process.cwd()),
     });
+    expect([...electron.handlers.keys()]).toEqual(
+      expect.arrayContaining([
+        "desktop:list-sessions",
+        "desktop:create-session",
+        "desktop:load-session",
+        "desktop:send-message",
+        "desktop:list-workspace-files",
+        "desktop:read-workspace-file",
+        "desktop:write-workspace-file",
+      ]),
+    );
 
     const [window] = electron.windows;
     expect(window.options).toMatchObject({

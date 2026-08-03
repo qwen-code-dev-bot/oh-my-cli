@@ -3,38 +3,73 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const electron = vi.hoisted(() => ({
   exposeInMainWorld: vi.fn(),
   invoke: vi.fn(),
+  on: vi.fn(),
+  removeListener: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
   contextBridge: { exposeInMainWorld: electron.exposeInMainWorld },
-  ipcRenderer: { invoke: electron.invoke },
+  ipcRenderer: {
+    invoke: electron.invoke,
+    on: electron.on,
+    removeListener: electron.removeListener,
+  },
 }));
 
 describe("desktop preload", () => {
   beforeEach(() => {
-    electron.exposeInMainWorld.mockReset();
-    electron.invoke.mockReset();
+    vi.clearAllMocks();
     vi.resetModules();
   });
 
   it("publishes only the typed desktop bridge", async () => {
-    electron.invoke.mockResolvedValue({
-      platform: "darwin",
-      version: "0.1.0",
-    });
-
+    electron.invoke.mockResolvedValue({ ok: true });
     await import("../../src/desktop/preload.js");
 
     expect(electron.exposeInMainWorld).toHaveBeenCalledOnce();
     const [name, bridge] = electron.exposeInMainWorld.mock.calls[0] as [
       string,
-      { getBootstrapState(): Promise<unknown> },
+      Record<string, (...args: unknown[]) => unknown>,
     ];
     expect(name).toBe("ohMyCliDesktop");
-    expect(Object.keys(bridge)).toEqual(["getBootstrapState"]);
-    await bridge.getBootstrapState();
-    expect(electron.invoke).toHaveBeenCalledWith(
-      "desktop:get-bootstrap-state",
+    expect(Object.keys(bridge)).toEqual([
+      "getBootstrapState",
+      "listSessions",
+      "createSession",
+      "loadSession",
+      "sendMessage",
+      "listWorkspaceFiles",
+      "readWorkspaceFile",
+      "writeWorkspaceFile",
+      "onAgentEvent",
+    ]);
+
+    await bridge.sendMessage({ sessionId: "one", prompt: "hello" });
+    expect(electron.invoke).toHaveBeenCalledWith("desktop:send-message", {
+      sessionId: "one",
+      prompt: "hello",
+    });
+
+    const listener = vi.fn();
+    const unsubscribe = bridge.onAgentEvent(listener) as () => void;
+    expect(electron.on).toHaveBeenCalledWith(
+      "desktop:agent-event",
+      expect.any(Function),
+    );
+    const handler = electron.on.mock.calls[0][1] as (
+      event: unknown,
+      payload: unknown,
+    ) => void;
+    handler({}, { type: "status", sessionId: "one", message: "ready" });
+    expect(listener).toHaveBeenCalledWith({
+      type: "status",
+      sessionId: "one",
+      message: "ready",
+    });
+    unsubscribe();
+    expect(electron.removeListener).toHaveBeenCalledWith(
+      "desktop:agent-event",
+      handler,
     );
   });
 });

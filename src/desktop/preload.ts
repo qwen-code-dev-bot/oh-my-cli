@@ -1,12 +1,15 @@
 import { contextBridge, ipcRenderer } from "electron";
-import {
-  createDesktopBridge,
-  type DesktopBootstrapState,
-} from "./contracts.js";
+import { createDesktopBridge, type DesktopAgentEvent } from "./contracts.js";
 
 const bridge = createDesktopBridge(
-  (channel) =>
-    ipcRenderer.invoke(channel) as Promise<DesktopBootstrapState>,
+  (channel, ...args) =>
+    ipcRenderer.invoke(channel, ...args) as Promise<unknown>,
+  (channel, listener) => {
+    const handler = (_event: unknown, payload: DesktopAgentEvent) =>
+      listener(payload);
+    ipcRenderer.on(channel, handler);
+    return () => ipcRenderer.removeListener(channel, handler);
+  },
 );
 
 contextBridge.exposeInMainWorld("ohMyCliDesktop", bridge);
