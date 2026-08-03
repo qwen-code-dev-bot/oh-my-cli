@@ -12,6 +12,7 @@ import {
 } from "../image-input.js";
 import { collectProfileList, resolveModelProfileConfig } from "../model-profiles.js";
 import { loadWorkspaceEnv } from "../workspace-env.js";
+import { clampZoomLevel } from "./zoom.js";
 import { redactEndpointHost, redactSecrets } from "../permission-impact.js";
 import { SessionStore, type SessionMessage } from "../session.js";
 import { normalizeSessionName, sessionDisplayTitle } from "../session-name.js";
@@ -499,8 +500,30 @@ export class DesktopService {
             ? candidate
             : null;
       }
+      // Zoom persistence (#532): finite values are clamped into the ladder
+      // bounds; anything invalid clears the stored level (reads as 100%).
+      if ("zoomLevel" in request) {
+        const candidate = request.zoomLevel;
+        if (typeof candidate === "number" && Number.isFinite(candidate)) {
+          ui.zoomLevel = clampZoomLevel(candidate);
+        } else {
+          delete ui.zoomLevel;
+        }
+      }
     });
     return this.getUiState();
+  }
+
+  // The persisted zoom level for this workspace (Issue #532): 0 (100%) when
+  // nothing valid is stored.
+  getZoomLevel(): number {
+    return this.getUiState().zoomLevel ?? 0;
+  }
+
+  // Persist a zoom level applied by the main process (Issue #532). Validation
+  // and clamping are identical to renderer-originated saves.
+  setZoomLevel(level: number): DesktopUiState {
+    return this.saveUiState({ zoomLevel: level });
   }
 
   // Validate workspace-relative attachment paths before submission (#489).
@@ -1331,6 +1354,12 @@ export class DesktopService {
       workspace.activeView === "changes"
         ? { activeView: workspace.activeView }
         : {}),
+      // Persisted zoom (#532): a finite number is clamped into the ladder
+      // bounds; anything else is dropped so startup reads 100%.
+      ...(typeof workspace.zoomLevel === "number" &&
+      Number.isFinite(workspace.zoomLevel)
+        ? { zoomLevel: clampZoomLevel(workspace.zoomLevel) }
+        : {}),
     };
   }
 
@@ -1363,6 +1392,8 @@ export class DesktopService {
           ? ui.activeEditorTab
           : null,
       ...(ui.activeView ? { activeView: ui.activeView } : {}),
+      // Zoom was already validated/clamped on read (Issue #532); carry it.
+      ...(ui.zoomLevel !== undefined ? { zoomLevel: ui.zoomLevel } : {}),
     };
   }
 

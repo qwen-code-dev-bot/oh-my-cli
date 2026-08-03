@@ -15,6 +15,7 @@ import {
   saveTrustStore,
   workspaceTrustKey,
 } from "../../src/folder-trust.js";
+import { percentForLevel } from "../../src/desktop/zoom.js";
 
 let root: string;
 let sessions: string;
@@ -1034,6 +1035,45 @@ describe("DesktopService", () => {
       ).toBe("changes");
       const rejected = service.saveUiState({ activeView: "bogus" });
       expect(rejected.activeView).toBeUndefined();
+    });
+
+    it("persists the zoom level per workspace across instances (Issue #532)", () => {
+      const service = makeService();
+      expect(service.getZoomLevel()).toBe(0);
+      service.setZoomLevel(1.5);
+      // A fresh instance over the same state file restores the level.
+      expect(makeService().getZoomLevel()).toBeCloseTo(1.5);
+      // Reset persists 100% (level 0).
+      service.setZoomLevel(0);
+      expect(makeService().getZoomLevel()).toBe(0);
+    });
+
+    it("clamps out-of-range zoom saves into the ladder bounds (Issue #532)", () => {
+      const service = makeService();
+      const high = service.saveUiState({ zoomLevel: 100 });
+      expect(percentForLevel(high.zoomLevel!)).toBeCloseTo(200);
+      const low = service.saveUiState({ zoomLevel: -100 });
+      expect(percentForLevel(low.zoomLevel!)).toBeCloseTo(50);
+      expect(makeService().getZoomLevel()).toBeCloseTo(low.zoomLevel!);
+    });
+
+    it("drops invalid zoom saves instead of persisting them (Issue #532)", () => {
+      const service = makeService();
+      service.setZoomLevel(1);
+      const cleared = service.saveUiState({
+        zoomLevel: Number.NaN as unknown as number,
+      });
+      expect(cleared.zoomLevel).toBeUndefined();
+      expect(makeService().getZoomLevel()).toBe(0);
+    });
+
+    it("zoom persistence leaves other ui-state fields untouched (Issue #532)", () => {
+      const service = makeService();
+      service.saveUiState({ activeView: "workflow" });
+      service.setZoomLevel(2);
+      const state = makeService().getUiState();
+      expect(state.activeView).toBe("workflow");
+      expect(state.zoomLevel).toBeCloseTo(2);
     });
   });
 });

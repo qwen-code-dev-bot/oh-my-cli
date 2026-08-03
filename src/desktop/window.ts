@@ -3,7 +3,15 @@ import { BrowserWindow } from "electron";
 import { createDesktopWindowOptions } from "./window-options.js";
 import { classifyZoomKey, stepZoomLevel } from "./zoom.js";
 
-export async function createDesktopWindow(): Promise<BrowserWindow> {
+export interface CreateDesktopWindowOptions {
+  // Called with the resulting level after a keyboard zoom chord is applied,
+  // so the main process can persist it (Issue #532).
+  onZoomChanged?: (level: number) => void;
+}
+
+export async function createDesktopWindow(
+  opts: CreateDesktopWindowOptions = {},
+): Promise<BrowserWindow> {
   const preload = fileURLToPath(new URL("./preload.cjs", import.meta.url));
   const window = new BrowserWindow(createDesktopWindowOptions(preload));
   window.webContents.on("will-navigate", (event) => {
@@ -17,9 +25,9 @@ export async function createDesktopWindow(): Promise<BrowserWindow> {
     const decision = classifyZoomKey(input);
     if (!decision) return;
     event.preventDefault();
-    window.webContents.setZoomLevel(
-      stepZoomLevel(window.webContents.getZoomLevel(), decision),
-    );
+    const next = stepZoomLevel(window.webContents.getZoomLevel(), decision);
+    window.webContents.setZoomLevel(next);
+    opts.onZoomChanged?.(next);
   });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   const shell = fileURLToPath(

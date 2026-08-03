@@ -138,6 +138,8 @@ export interface DesktopUiState {
   activeEditorTab?: string | null;
   /** Persisted primary view so reload restores the layout (#491). */
   activeView?: string | null;
+  /** Persisted Chromium zoom level (0 = 100%), restored on startup (#532). */
+  zoomLevel?: number;
 }
 
 export interface DesktopSaveUiStateRequest {
@@ -146,6 +148,7 @@ export interface DesktopSaveUiStateRequest {
   editorTabs?: DesktopEditorTabState[];
   activeEditorTab?: string | null;
   activeView?: string | null;
+  zoomLevel?: number;
 }
 
 export interface DesktopWorkspaceFile {

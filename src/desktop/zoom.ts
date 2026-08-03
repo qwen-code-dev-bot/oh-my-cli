@@ -71,6 +71,17 @@ export function stepZoomLevel(currentLevel: number, decision: ZoomDecision): num
   return zoomLevelForPercent(ZOOM_LADDER[next]);
 }
 
+// Clamp a Chromium zoom level into the ladder bounds (Issue #532): used to
+// sanitize persisted values on read/save so a corrupt or out-of-range stored
+// level degrades to a bounded one instead of breaking startup. Non-finite
+// input reads as the 100% level.
+export function clampZoomLevel(level: number): number {
+  if (!Number.isFinite(level)) return zoomLevelForPercent(ZOOM_RESET_PERCENT);
+  const min = zoomLevelForPercent(ZOOM_MIN_PERCENT);
+  const max = zoomLevelForPercent(ZOOM_MAX_PERCENT);
+  return Math.min(Math.max(level, min), max);
+}
+
 // Classify a key input into a zoom decision. Requires Ctrl (or Cmd on macOS)
 // and matches both the character the layout produced and the physical key, so
 // the result does not depend on Shift state or layout: "=" and "+" both zoom
