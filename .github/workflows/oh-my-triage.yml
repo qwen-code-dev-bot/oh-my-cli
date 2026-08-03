@@ -63,7 +63,7 @@ jobs:
         with:
           openai_api_key: '${{ secrets.OPENAI_API_KEY }}'
           openai_base_url: '${{ secrets.OPENAI_BASE_URL }}'
-          openai_model: '${{ vars.OH_MY_TRIAGE_MODEL || 'qwen-coder-plus-latest' }}'
+          openai_model: "${{ vars.OH_MY_TRIAGE_MODEL || 'qwen-coder-plus-latest' }}"
           settings: |-
             {
               "tools": {
