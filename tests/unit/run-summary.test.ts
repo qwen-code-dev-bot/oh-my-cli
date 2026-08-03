@@ -1,10 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   buildRunSummary,
   formatRunSummary,
+  writeRunSummaryFile,
   RUN_SUMMARY_SCHEMA,
   RUN_SUMMARY_VERSION,
 } from "../../src/run-summary.js";
+import { readRunSummaryFile } from "../../src/run-scorecard.js";
 
 describe("buildRunSummary", () => {
   it("builds a deterministic success summary with bounded activity and tokens", () => {
@@ -283,5 +288,108 @@ describe("run summary attachments", () => {
       }),
     );
     expect(without).not.toContain("images:");
+  });
+});
+
+describe("writeRunSummaryFile (Issue #519)", () => {
+  const tmpDirs: string[] = [];
+  afterAll(() => {
+    for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
+  });
+
+  function tmpDir(): string {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), "omc-summary-out-"));
+    tmpDirs.push(d);
+    return d;
+  }
+
+  function sampleSummary() {
+    return buildRunSummary({
+      ok: true,
+      exitCode: 0,
+      reason: "completed",
+      elapsedMs: 1200,
+      rounds: 2,
+      toolCalls: { read: 1 },
+      toolFailures: {},
+      tokens: { prompt: 3, completion: 4, total: 7 },
+      sessionId: "abc-123",
+      sessionPath: null,
+    });
+  }
+
+  it("writes a schema-versioned JSON file that round-trips through the scorecard reader", () => {
+    const dir = tmpDir();
+    const file = path.join(dir, "run.summary.json");
+    const summary = sampleSummary();
+    writeRunSummaryFile(summary, file);
+
+    const parsed = readRunSummaryFile(file, "round-trip");
+    expect(parsed.schema).toBe(RUN_SUMMARY_SCHEMA);
+    expect(parsed.v).toBe(RUN_SUMMARY_VERSION);
+    expect(parsed.outcome).toBe("success");
+    expect(parsed.reason).toBe("completed");
+    expect(parsed.rounds).toBe(2);
+    expect(parsed.evidence.sessionId).toBe("abc-123");
+    expect(parsed).toEqual(summary);
+    // No leftover temp sibling.
+    expect(fs.existsSync(`${file}.tmp`)).toBe(false);
+  });
+
+  it("refuses to overwrite an existing file without force", () => {
+    const dir = tmpDir();
+    const file = path.join(dir, "run.summary.json");
+    writeRunSummaryFile(sampleSummary(), file);
+    const before = fs.readFileSync(file, "utf-8");
+
+    const other = buildRunSummary({
+      ok: false,
+      exitCode: 1,
+      reason: "provider_error",
+      elapsedMs: 5,
+      rounds: 0,
+      toolCalls: {},
+      toolFailures: {},
+      tokens: null,
+      sessionId: "zzz",
+      sessionPath: null,
+    });
+    expect(() => writeRunSummaryFile(other, file)).toThrow(/Refusing to overwrite/);
+    expect(() => writeRunSummaryFile(other, file)).toThrow(/--force/);
+    // The original artifact is untouched.
+    expect(fs.readFileSync(file, "utf-8")).toBe(before);
+  });
+
+  it("replaces atomically with force", () => {
+    const dir = tmpDir();
+    const file = path.join(dir, "run.summary.json");
+    writeRunSummaryFile(sampleSummary(), file);
+
+    const replacement = buildRunSummary({
+      ok: false,
+      exitCode: 1,
+      reason: "max_rounds",
+      elapsedMs: 9,
+      rounds: 30,
+      toolCalls: {},
+      toolFailures: {},
+      tokens: null,
+      sessionId: "replacement",
+      sessionPath: null,
+    });
+    writeRunSummaryFile(replacement, file, true);
+    const parsed = readRunSummaryFile(file, "replaced");
+    expect(parsed.reason).toBe("max_rounds");
+    expect(parsed.evidence.sessionId).toBe("replacement");
+    expect(fs.existsSync(`${file}.tmp`)).toBe(false);
+  });
+
+  it("fails closed when the parent directory does not exist", () => {
+    const dir = tmpDir();
+    const file = path.join(dir, "missing", "run.summary.json");
+    expect(() => writeRunSummaryFile(sampleSummary(), file)).toThrow(
+      /directory .* does not exist/,
+    );
+    expect(fs.existsSync(file)).toBe(false);
   });
 });

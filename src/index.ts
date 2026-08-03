@@ -198,7 +198,7 @@ import {
 } from "./folder-trust.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
-import { buildRunSummary, formatRunSummary } from "./run-summary.js";
+import { buildRunSummary, formatRunSummary, writeRunSummaryFile } from "./run-summary.js";
 import { createBottleneckCollector, formatBottleneckReport } from "./run-bottleneck.js";
 import { createFailureTaxonomyCollector, formatFailureTaxonomyReport } from "./run-failure-taxonomy.js";
 import { readTaskFixtureFile, fixtureStreamProvider, type TaskFixture } from "./task-fixture.js";
@@ -520,6 +520,10 @@ program
   )
   .option("--no-color", "Disable ANSI color output (also honors the NO_COLOR env var)")
   .option("--summary", "Print a privacy-safe execution summary for the run (unattended use)")
+  .option(
+    "--summary-out <file>",
+    "Persist the run's privacy-safe summary JSON (schema oh-my-cli.summary) to <file>; atomic write, refuses to overwrite an existing file without --force",
+  )
   .option(
     "--bottleneck",
     "Print a privacy-safe tool/approval wall-time bottleneck report for the run (unattended use)",
@@ -2375,6 +2379,22 @@ program
         process.exit(1);
       }
 
+      // Persist the run summary artifact when requested (Issue #519). Independent
+      // of `--summary` printing: automation needs the schema-versioned file the
+      // scorecard and evidence-export surfaces already consume. A failed write
+      // (existing target without --force, missing parent directory) fails
+      // closed — the artifact was requested but not delivered.
+      const persistSummary = (summary: RunSummary): void => {
+        if (opts.summaryOut === undefined) return;
+        try {
+          writeRunSummaryFile(summary, String(opts.summaryOut), Boolean(opts.force));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(1);
+        }
+      };
+
       // Context-pressure auto-compaction threshold (tokens). Honors the flag then
       // the env var; absent/blank disables it, an unparseable value is a usage
       // error rather than a silent disable.
@@ -2630,23 +2650,24 @@ program
                 failureTaxonomy: failureTaxonomy.build(Date.now() - startedAt, "error"),
               });
             }
-            if (opts.summary) {
-              writer.emit({
-                type: "summary",
-                summary: buildRunSummary({
-                  ok: false,
-                  exitCode: 1,
-                  reason: "error",
-                  elapsedMs: Date.now() - startedAt,
-                  rounds: 0,
-                  toolCalls: {},
-                  toolFailures: {},
-                  tokens: null,
-                  sessionId,
-                  sessionPath: evidencePath(),
-                  attachments: attachmentRefs,
-                }),
+            if (opts.summary || opts.summaryOut !== undefined) {
+              const summary = buildRunSummary({
+                ok: false,
+                exitCode: 1,
+                reason: "error",
+                elapsedMs: Date.now() - startedAt,
+                rounds: 0,
+                toolCalls: {},
+                toolFailures: {},
+                tokens: null,
+                sessionId,
+                sessionPath: evidencePath(),
+                attachments: attachmentRefs,
               });
+              persistSummary(summary);
+              if (opts.summary) {
+                writer.emit({ type: "summary", summary });
+              }
             }
             writer.emit({ type: "complete", ok: false, exitCode: 1, rounds: 0, reason: "error" });
             process.exit(1);
@@ -2654,25 +2675,26 @@ program
           sealSession();
           recordTurnCheckpoint(turnImages);
           const exitCode = result.ok ? 0 : 1;
-          if (opts.summary) {
-            writer.emit({
-              type: "summary",
-              summary: buildRunSummary({
-                ok: result.ok,
-                exitCode,
-                reason: result.reason,
-                elapsedMs: Date.now() - startedAt,
-                rounds: result.rounds,
-                retries: result.retries,
-                toolCalls: result.stats.toolCalls,
-                toolFailures: result.stats.toolFailures,
-                tokens: result.tokens,
-                estimatedCostUsd: result.estimatedCostUsd,
-                sessionId,
-                sessionPath: evidencePath(),
-                attachments: attachmentRefs,
-              }),
+          if (opts.summary || opts.summaryOut !== undefined) {
+            const summary = buildRunSummary({
+              ok: result.ok,
+              exitCode,
+              reason: result.reason,
+              elapsedMs: Date.now() - startedAt,
+              rounds: result.rounds,
+              retries: result.retries,
+              toolCalls: result.stats.toolCalls,
+              toolFailures: result.stats.toolFailures,
+              tokens: result.tokens,
+              estimatedCostUsd: result.estimatedCostUsd,
+              sessionId,
+              sessionPath: evidencePath(),
+              attachments: attachmentRefs,
             });
+            persistSummary(summary);
+            if (opts.summary) {
+              writer.emit({ type: "summary", summary });
+            }
           }
           if (bottleneck) {
             writer.emit({ type: "bottleneck", bottleneck: bottleneck.build(Date.now() - startedAt) });
@@ -2726,7 +2748,7 @@ program
         // Exit with the run outcome so unattended/CI callers can detect failure;
         // the plain-text path previously fell through and always exited 0.
         const exitCode = result.ok ? 0 : 1;
-        if (opts.summary) {
+        if (opts.summary || opts.summaryOut !== undefined) {
           const summary = buildRunSummary({
             ok: result.ok,
             exitCode,
@@ -2742,7 +2764,10 @@ program
             sessionPath: evidencePath(),
             attachments: attachmentRefs,
           });
-          process.stdout.write("\n" + formatRunSummary(summary) + "\n");
+          persistSummary(summary);
+          if (opts.summary) {
+            process.stdout.write("\n" + formatRunSummary(summary) + "\n");
+          }
         }
         if (bottleneck) {
           process.stdout.write("\n" + formatBottleneckReport(bottleneck.build(Date.now() - startedAt)) + "\n");
