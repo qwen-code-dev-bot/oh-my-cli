@@ -113,9 +113,9 @@ jobs:
             gh issue edit "$ISSUE_NUMBER" --repo "$REPOSITORY" --add-label "$label"
           done < <(jq -r '.addLabels[]' "$RUNNER_TEMP/plan.json")
 
-          comment_id="$(gh api --paginate --slurp \
+          comment_id="$(gh api --paginate \
             "repos/$REPOSITORY/issues/$ISSUE_NUMBER/comments?per_page=100" \
-            --jq 'flatten | map(select(.user.login == "github-actions[bot]" and (.body | contains("<!-- oh-my-cli:auto-triage:v1 -->")))) | first | .id // empty')"
+            | jq -s -r 'flatten | map(select(.user.login == "github-actions[bot]" and (.body | contains("<!-- oh-my-cli:auto-triage:v1 -->")))) | first | .id // empty')"
           jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' > "$RUNNER_TEMP/comment.json"
 
           if [[ -n "$comment_id" ]]; then
