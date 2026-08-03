@@ -1,0 +1,127 @@
+name: Issue triage
+
+on:
+  issues:
+    types: [opened, reopened, edited]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Existing Issue number to triage
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: issue-triage-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+      REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Check out trusted triage code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Validate target
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]]
+
+      - name: Read Issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPOSITORY/issues/$ISSUE_NUMBER" > "$RUNNER_TEMP/issue.json"
+          jq -e 'has("pull_request") | not' "$RUNNER_TEMP/issue.json" > /dev/null
+
+      - name: Build tool-free classification request
+        env:
+          TRIAGE_MODEL: ${{ vars.OH_MY_TRIAGE_MODEL || 'qwen3.8-max' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/issue-triage.mjs build-request \
+            "$RUNNER_TEMP/issue.json" \
+            "$TRIAGE_MODEL" \
+            "$RUNNER_TEMP/request.json"
+          jq -e 'has("tools") | not' "$RUNNER_TEMP/request.json" > /dev/null
+
+      - name: Classify untrusted Issue text
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$OPENAI_API_KEY" ]]
+          base_url="${OPENAI_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+          if ! status="$(curl \
+            --silent \
+            --show-error \
+            --connect-timeout 10 \
+            --max-time 90 \
+            --max-filesize 1048576 \
+            --output "$RUNNER_TEMP/response.json" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $OPENAI_API_KEY" \
+            --header 'Content-Type: application/json' \
+            --data-binary "@$RUNNER_TEMP/request.json" \
+            "${base_url%/}/chat/completions" \
+            2> "$RUNNER_TEMP/curl-error.txt")"; then
+            echo "Classification provider request failed."
+            exit 1
+          fi
+          if [[ "$status" != "200" ]]; then
+            echo "Classification provider returned HTTP $status."
+            exit 1
+          fi
+
+      - name: Validate classification and compute bounded changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/issue-triage.mjs build-plan \
+            "$RUNNER_TEMP/issue.json" \
+            "$RUNNER_TEMP/response.json" \
+            "$RUNNER_TEMP/plan.json"
+          jq -r '.commentBody' "$RUNNER_TEMP/plan.json" > "$RUNNER_TEMP/comment.md"
+
+      - name: Apply labels and upsert one triage summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r label; do
+            gh issue edit "$ISSUE_NUMBER" --repo "$REPOSITORY" --remove-label "$label"
+          done < <(jq -r '.removeLabels[]' "$RUNNER_TEMP/plan.json")
+
+          while IFS= read -r label; do
+            gh issue edit "$ISSUE_NUMBER" --repo "$REPOSITORY" --add-label "$label"
+          done < <(jq -r '.addLabels[]' "$RUNNER_TEMP/plan.json")
+
+          comment_id="$(gh api --paginate \
+            "repos/$REPOSITORY/issues/$ISSUE_NUMBER/comments?per_page=100" \
+            | jq -s -r 'flatten | map(select(.user.login == "github-actions[bot]" and (.body | contains("<!-- oh-my-cli:auto-triage:v1 -->")))) | first | .id // empty')"
+          jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' > "$RUNNER_TEMP/comment.json"
+
+          if [[ -n "$comment_id" ]]; then
+            gh api --method PATCH "repos/$REPOSITORY/issues/comments/$comment_id" \
+              --input "$RUNNER_TEMP/comment.json" > /dev/null
+          else
+            gh api --method POST "repos/$REPOSITORY/issues/$ISSUE_NUMBER/comments" \
+              --input "$RUNNER_TEMP/comment.json" > /dev/null
+          fi
