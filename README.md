@@ -27,7 +27,12 @@ OpenAI 兼容端点配置、CLI 与 Desktop 启动、会话与文件安全边界
 ```bash
 npm install
 npm run build
+npm link
 ```
+
+`npm link` puts the `oh-my-cli` command on your PATH so the examples below run
+as written; `npm unlink -g oh-my-cli` removes it later. Prefer not to link?
+Invoke the built entry directly: `node dist/index.js`.
 
 New here? Follow [docs/FIRST-RUN.md](docs/FIRST-RUN.md) for a verified path from
 install through your first successful task, including a setup `--doctor` check

@@ -12,11 +12,15 @@ Node.js **22 or newer** is required. From the repository root:
 ```bash
 npm install
 npm run build
+npm link
 ```
 
 `npm run build` compiles the TypeScript sources into `dist/`; the CLI entry is
-`dist/index.js`. If you see compiler errors, the build is broken — stop here and
-fix them before continuing.
+`dist/index.js`. `npm link` puts the `oh-my-cli` command on your PATH so the
+commands below run as written (`npm unlink -g oh-my-cli` removes it later);
+without linking, run the same commands as `node dist/index.js ...`. If you see
+compiler errors, the build is broken — stop here and fix them before
+continuing.
 
 ## 2. Configure the provider
 
