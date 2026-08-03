@@ -209,7 +209,13 @@ export function createTools(): ToolDef[] {
         if (count > 1) {
           return { content: `Error: oldText found ${count} times, expected exactly 1`, isError: true };
         }
-        const updated = content.replace(oldText, newText);
+        // Splice at the verified unique occurrence instead of String.replace:
+        // replace() expands $-patterns ($$, $&, $`, $', $n) inside the
+        // replacement string, which would silently corrupt ordinary text such
+        // as shell $$ or Makefile $$ (#478).
+        const index = content.indexOf(oldText);
+        const updated =
+          content.slice(0, index) + newText + content.slice(index + oldText.length);
         fs.writeFileSync(absPath, updated, "utf-8");
         return { content: `Edited ${relPath}: replaced 1 occurrence` };
       },

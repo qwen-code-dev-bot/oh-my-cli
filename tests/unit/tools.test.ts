@@ -120,6 +120,7 @@ describe("Tools", () => {
       );
       expect(result.isError).toBe(true);
       expect(result.content).toContain("not found");
+      expect(fs.readFileSync(path.join(tmpDir, "edit.txt"), "utf-8")).toBe("foo bar");
     });
 
     it("fails on multiple matches", async () => {
@@ -130,6 +131,35 @@ describe("Tools", () => {
       );
       expect(result.isError).toBe(true);
       expect(result.content).toContain("2 times");
+      expect(fs.readFileSync(path.join(tmpDir, "edit.txt"), "utf-8")).toBe("foo foo bar");
+    });
+
+    it.each(["$$", "$&", "$`", "$'", "$1"])(
+      "writes replacement %s literally without $-pattern expansion",
+      async (newText) => {
+        fs.writeFileSync(path.join(tmpDir, "edit.txt"), "alpha MARKER omega");
+        const result = await toolMap.get("edit")!.execute(
+          { path: "edit.txt", oldText: "MARKER", newText },
+          workspace,
+        );
+        expect(result.isError).toBeUndefined();
+        expect(result.content).toContain("replaced 1");
+        expect(fs.readFileSync(path.join(tmpDir, "edit.txt"), "utf-8")).toBe(
+          `alpha ${newText} omega`,
+        );
+      },
+    );
+
+    it("writes multi-line replacements with $ sequences literally", async () => {
+      fs.writeFileSync(path.join(tmpDir, "edit.sh"), "echo PID\n");
+      const result = await toolMap.get("edit")!.execute(
+        { path: "edit.sh", oldText: "PID", newText: "$$ # shell PID, $& stays, so does $1" },
+        workspace,
+      );
+      expect(result.isError).toBeUndefined();
+      expect(fs.readFileSync(path.join(tmpDir, "edit.sh"), "utf-8")).toBe(
+        "echo $$ # shell PID, $& stays, so does $1\n",
+      );
     });
   });
 
