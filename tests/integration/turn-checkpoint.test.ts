@@ -162,6 +162,7 @@ describe("Integration: turn undo/redo (--undo-turn / --redo-turn)", () => {
   it("exits 2 for a missing session", async () => {
     const r = await runCli(["--undo-turn", "no-such-id"], baseEnv);
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("no such session");
+    // Id-or-name targeting (#536): shared resolution reason.
+    expect(r.stderr).toContain("no session named");
   });
 });

@@ -171,6 +171,7 @@ describe("Integration: side question (--side-question)", () => {
       baseEnv,
     );
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("not found");
+    // Id-or-name targeting (#536): shared resolution reason.
+    expect(r.stderr).toContain("no session named");
   });
 });

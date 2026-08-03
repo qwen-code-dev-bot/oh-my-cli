@@ -13,6 +13,7 @@ import {
   resolveResumeTarget,
   resolveResumeFlagTarget,
   resolveResumeByName,
+  resolveSessionTarget,
   collectSessionPickerRows,
   renderSessionPickerLines,
   runSessionPicker,
@@ -502,6 +503,69 @@ describe("session picker: resolveResumeByName (Issue #534)", () => {
 
   it("rejects an empty name", () => {
     const t = resolveResumeByName("   ", store);
+    expect(t.ok).toBe(false);
+    expect(t.reason).toContain("no session named");
+  });
+});
+
+describe("session picker: resolveSessionTarget (Issue #536)", () => {
+  let tmpDir: string;
+  let store: SessionStore;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "oh-my-cli-target-resume-"));
+    store = new SessionStore(tmpDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function namedSession(name: string): string {
+    const id = store.newId();
+    store.writeMeta(id, { model: "m", workspace: tmpDir, createdAt: 1 });
+    store.append(id, { role: "user", content: "hi" });
+    store.writeName(id, name);
+    return id;
+  }
+
+  it("resolves an exact id (unchanged pre-existing semantics)", () => {
+    const id = namedSession("named");
+    const t = resolveSessionTarget(id, store);
+    expect(t.ok).toBe(true);
+    if (t.ok) expect(t.sessionId).toBe(id);
+  });
+
+  it("an exact id wins over a same-value name", () => {
+    const alpha = namedSession("twin");
+    const beta = store.newId();
+    store.writeMeta(beta, { model: "m", workspace: tmpDir, createdAt: 1 });
+    store.append(beta, { role: "user", content: "hi" });
+    // alpha carries a name that IS beta's id: targeting that id lands on beta.
+    store.writeName(alpha, beta);
+    const t = resolveSessionTarget(beta, store);
+    expect(t.ok).toBe(true);
+    if (t.ok) expect(t.sessionId).toBe(beta);
+  });
+
+  it("falls back to the user-owned name when no session exists under the id", () => {
+    const id = namedSession("fallback target");
+    const t = resolveSessionTarget("fallback target", store);
+    expect(t.ok).toBe(true);
+    if (t.ok) expect(t.sessionId).toBe(id);
+  });
+
+  it("fails closed on ambiguity", () => {
+    namedSession("shared");
+    namedSession("shared");
+    const t = resolveSessionTarget("shared", store);
+    expect(t.ok).toBe(false);
+    expect(t.reason).toContain("2 sessions are named");
+  });
+
+  it("fails closed for unknown values", () => {
+    namedSession("exists");
+    const t = resolveSessionTarget("nope", store);
     expect(t.ok).toBe(false);
     expect(t.reason).toContain("no session named");
   });
