@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   classifyZoomKey,
   stepZoomLevel,
+  clampZoomLevel,
   zoomLevelForPercent,
   percentForLevel,
   ZOOM_LADDER,
@@ -96,5 +97,32 @@ describe("zoom ladder (Issue #523)", () => {
     const off = zoomLevelForPercent(104);
     expect(percentForLevel(stepZoomLevel(off, "zoom-in"))).toBeCloseTo(110);
     expect(percentForLevel(stepZoomLevel(off, "zoom-out"))).toBeCloseTo(90);
+  });
+});
+
+describe("clampZoomLevel (Issue #532)", () => {
+  it("keeps in-bounds levels unchanged", () => {
+    expect(clampZoomLevel(0)).toBe(0);
+    const mid = zoomLevelForPercent(125);
+    expect(clampZoomLevel(mid)).toBeCloseTo(mid);
+  });
+
+  it("clamps out-of-range levels into the ladder bounds", () => {
+    expect(percentForLevel(clampZoomLevel(zoomLevelForPercent(400)))).toBeCloseTo(
+      ZOOM_MAX_PERCENT,
+    );
+    expect(percentForLevel(clampZoomLevel(zoomLevelForPercent(10)))).toBeCloseTo(
+      ZOOM_MIN_PERCENT,
+    );
+  });
+
+  it("reads non-finite input as the 100% level", () => {
+    expect(clampZoomLevel(Number.NaN)).toBe(zoomLevelForPercent(ZOOM_RESET_PERCENT));
+    expect(clampZoomLevel(Number.POSITIVE_INFINITY)).toBe(
+      zoomLevelForPercent(ZOOM_RESET_PERCENT),
+    );
+    expect(clampZoomLevel(Number.NEGATIVE_INFINITY)).toBe(
+      zoomLevelForPercent(ZOOM_RESET_PERCENT),
+    );
   });
 });

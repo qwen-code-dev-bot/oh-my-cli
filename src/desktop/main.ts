@@ -146,21 +146,33 @@ ipcMain.handle(DESKTOP_CHANNELS.writeWorkspaceFile, (_event, request) =>
 );
 
 // Apply one zoom step (or the reset) to the focused window through the bounded
-// ladder (Issue #523). Menu zoom entries route here; keyboard zoom flows
-// through the window's before-input-event path so a key press never zooms
-// twice.
+// ladder (Issue #523) and persist the resulting level (Issue #532). Menu zoom
+// entries route here; keyboard zoom flows through the window's
+// before-input-event path, which reports through onZoomChanged — both paths
+// persist through the same service method.
 function applyZoom(decision: ZoomDecision): void {
   const window = BrowserWindow.getFocusedWindow();
   if (!window) return;
-  window.webContents.setZoomLevel(stepZoomLevel(window.webContents.getZoomLevel(), decision));
+  const next = stepZoomLevel(window.webContents.getZoomLevel(), decision);
+  window.webContents.setZoomLevel(next);
+  service.setZoomLevel(next);
+}
+
+// Open a window with the workspace's persisted zoom level applied (Issue
+// #532): zoom is a user preference, so a relaunch restores the last scale.
+async function openZoomedWindow(): Promise<void> {
+  const window = await createDesktopWindow({
+    onZoomChanged: (level) => service.setZoomLevel(level),
+  });
+  window.webContents.setZoomLevel(service.getZoomLevel());
 }
 
 void app.whenReady().then(() => {
   Menu.setApplicationMenu(Menu.buildFromTemplate(buildDesktopMenuTemplate(applyZoom)));
-  void createDesktopWindow();
+  void openZoomedWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      void createDesktopWindow();
+      void openZoomedWindow();
     }
   });
 });

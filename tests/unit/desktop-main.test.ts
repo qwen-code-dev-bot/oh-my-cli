@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { afterAll, describe, expect, it, vi } from "vitest";
+import { percentForLevel } from "../../src/desktop/zoom.js";
 
 const electron = vi.hoisted(() => {
   const windows: Array<{
@@ -178,6 +179,54 @@ describe("desktop main process", () => {
     window.webContents.navigationHandler?.({ preventDefault });
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(window.webContents.openHandler?.()).toEqual({ action: "deny" });
+  });
+
+  it("persists menu zoom and restores the persisted zoom on startup (Issue #532)", async () => {
+    await import("../../src/desktop/main.js");
+    await vi.waitFor(() => expect(electron.windows).toHaveLength(1));
+    const [window] = electron.windows;
+
+    // Window creation applies the persisted level — nothing stored yet, so 100%.
+    expect(window.webContents.setZoomLevel).toHaveBeenCalledWith(0);
+
+    // Route the menu's zoom entries through the focused window.
+    (
+      electron.BrowserWindow as unknown as {
+        getFocusedWindow: () => unknown;
+      }
+    ).getFocusedWindow = () => window;
+    const installed = electron.Menu.setApplicationMenu.mock.calls[0]?.[0] as
+      | Array<Record<string, unknown>>
+      | undefined;
+    const view = installed?.find((item) => item.label === "View") as {
+      submenu: Array<{ label: string; click: () => void }>;
+    };
+    const byLabel = new Map(
+      view.submenu
+        .filter((item) => typeof item.label === "string")
+        .map((item) => [item.label, item]),
+    );
+
+    // Zoom in persists the resulting level to the workspace ui-state file.
+    byLabel.get("Zoom In")!.click();
+    const afterIn = window.webContents.setZoomLevel.mock.calls.at(-1)?.[0] as number;
+    expect(percentForLevel(afterIn)).toBeCloseTo(110);
+    const readUi = (): { zoomLevel?: number } => {
+      const file = JSON.parse(
+        fs.readFileSync(
+          path.join(scratchHome, ".oh-my-cli", "desktop-ui.json"),
+          "utf-8",
+        ),
+      ) as { workspaces: Record<string, { zoomLevel?: number }> };
+      return Object.values(file.workspaces)[0] ?? {};
+    };
+    expect(readUi().zoomLevel).toBeCloseTo(afterIn);
+
+    // Actual Size persists the reset (100%).
+    byLabel.get("Actual Size")!.click();
+    const afterReset = window.webContents.setZoomLevel.mock.calls.at(-1)?.[0] as number;
+    expect(afterReset).toBe(0);
+    expect(readUi().zoomLevel).toBe(0);
   });
 
   it("tracks workspace status, recents, and fail-closed switching", async () => {
