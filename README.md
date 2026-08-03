@@ -513,6 +513,7 @@ focused tests and the end-to-end receipt.
 | `--budget <usd>` | Spend budget in USD; stop before further provider calls once the estimated cost reaches it (also honors `OMC_SPEND_BUDGET_USD`) |
 | `--max-turns <n>` | Stop the run before the (n+1)th round at a round boundary; positive integer (also honors `OMC_MAX_TURNS`) |
 | `--max-wall-time <duration>` | Wall-time budget for the run, e.g. `90`, `30s`, `5m`, `1h`, `1.5h`; the run stops at the first round boundary after it elapses (also honors `OMC_MAX_WALL_TIME`) |
+| `--max-tool-calls <n>` | Cumulative tool-call budget; the run stops at the first round boundary after the processed tool-call count reaches it (also honors `OMC_MAX_TOOL_CALLS`) |
 | `--baseline <file>` | Baseline run-summary file to compare in scorecard mode |
 | `--candidate <file>` | Candidate run-summary file to compare in scorecard mode |
 | `--max-elapsed-ratio <n>` | Scorecard regression threshold: fractional elapsed-time increase tolerated (default `0.25`) |
@@ -749,18 +750,22 @@ oh-my-cli -p "Refactor the parser" --budget 0.005 --output json --summary
 
 Cost is not the only bound an unattended run needs. `--max-turns <n>` (or
 `OMC_MAX_TURNS`) stops the run before the (n+1)th round with terminal reason
-`max_turns_reached`, and `--max-wall-time <duration>` (or
+`max_turns_reached`, `--max-wall-time <duration>` (or
 `OMC_MAX_WALL_TIME`; accepts `90`, `30s`, `5m`, `1h`, `1.5h`) stops the first
 round that would start after the wall-time budget with reason
-`wall_time_reached`. Both caps act only at round boundaries — never mid-tool
-and never mid-stream — and compose with the spend budget: whichever bound
-trips first wins, and the headless terminal event and `--summary` carry the
-reason. Invalid values fail fast with an actionable usage error rather than
-silently disabling the cap.
+`wall_time_reached`, and `--max-tool-calls <n>` (or `OMC_MAX_TOOL_CALLS`)
+stops at the first round boundary after the cumulative processed tool-call
+count reaches the cap, with reason `tool_call_budget_reached` — the bound for
+cheap tool loops that stay under cost and turn budgets. All caps act only at
+round boundaries — never mid-tool and never mid-stream, so the transcript
+stays complete — and compose with the spend budget: whichever bound trips
+first wins, and the headless terminal event and `--summary` carry the reason.
+Invalid values fail fast with an actionable usage error rather than silently
+disabling the cap.
 
 ```bash
-# Bound an automation: at most 10 rounds and 5 minutes of wall time
-oh-my-cli -p "Investigate the failing tests" --max-turns 10 --max-wall-time 5m --output json
+# Bound an automation: at most 10 rounds, 5 minutes, and 50 tool calls
+oh-my-cli -p "Investigate the failing tests" --max-turns 10 --max-wall-time 5m --max-tool-calls 50 --output json
 ```
 
 ### Provider transient-error retry
@@ -2017,9 +2022,9 @@ supported platforms, artifact verification, and rollback evidence.
 
 - `src/config.ts` — environment variable validation (zod)
 - `src/provider.ts` — OpenAI-compatible streaming client with text + tool-call aggregation and bounded transient-error retry
-- `src/agent.ts` — agent loop with 30-round hard cap, spend-budget gate, and operator run caps (`--max-turns`, `--max-wall-time`)
+- `src/agent.ts` — agent loop with 30-round hard cap, spend-budget gate, and operator run caps (`--max-turns`, `--max-wall-time`, `--max-tool-calls`)
 - `src/cost.ts` — bundled model price table, token→USD cost estimate, and budget parsing (`--budget`)
-- `src/run-limits.ts` — operator run-cap parsing (`--max-turns`, `--max-wall-time`)
+- `src/run-limits.ts` — operator run-cap parsing (`--max-turns`, `--max-wall-time`, `--max-tool-calls`)
 - `src/tools.ts` — tool definitions (read, list, glob, grep, write, edit, shell)
 - `src/discovery.ts` — bounded, read-only, symlink-safe discovery primitives (list, glob, grep) backing the same-named tools
 - `src/workspace.ts` — path confinement with symlink escape detection
