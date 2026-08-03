@@ -16,6 +16,12 @@ repository Bot before execution. The autonomy contract, its policy files,
 GitHub workflows, and CODEOWNERS form a protected governance plane maintained
 by `qqqys`; the Bot may propose governance changes but cannot apply them.
 
+## 中文指引
+
+简体中文用户请阅读 [docs/ZH-CN.md](docs/ZH-CN.md)：安装、DashScope /
+OpenAI 兼容端点配置、CLI 与 Desktop 启动、会话与文件安全边界、常见故障排查。
+英文文档为权威版本，两者不一致时以英文为准。
+
 ## Install
 
 ```bash
