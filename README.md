@@ -531,6 +531,7 @@ focused tests and the end-to-end receipt.
 | `--dry-run` | Preview an `--undo-turn`/`--redo-turn` plan without changing the workspace or transcript |
 | `--side-question <text>` | Ask a side question against a session's bounded, read-only context (no tools, no mutation, nothing persisted) and exit; also `/ask` in interactive mode |
 | `--session <id-or-name>` | Source session whose read-only context seeds `--side-question`, by exact id or user-owned name |
+| `--include-partial-messages` | With `--output json`, emit per-chunk `assistant_delta` records for real-time monitoring (the default stays turn-aggregated) |
 | `--approval-mode <mode>` | `default`, `auto-edit`, or `yolo` |
 | `--workspace <dir>` | Workspace directory (default: cwd) |
 | `--doctor` | Run read-only installation/platform readiness checks and exit |
@@ -726,7 +727,8 @@ Each line is a self-describing record that parses independently:
 
 - **Envelope** — every record carries `protocol` (`oh-my-cli.headless`), `v`
   (schema version), a monotonic `seq`, an ISO `ts`, and a `type`.
-- **Events** — `start`, `assistant` (one per turn), `tool_start`, `tool_result`
+- **Events** — `start`, `assistant` (one per turn), `assistant_delta` (opt-in,
+  see below), `tool_start`, `tool_result`
   (`ok` reflects success), `usage` (cumulative tokens and cost estimate per
   round, with budget state), `retry` (a transient provider failure is retried
   with bounded backoff), `error` (`stage` is `provider` or `internal`), and a
@@ -736,6 +738,18 @@ Each line is a self-describing record that parses independently:
   terminal record against `$?`.
 - **Safety** — secrets and home paths are redacted and oversized payloads are
   truncated (with a `truncated` flag); the stream stays clean for machine use.
+
+By default assistant text is aggregated per turn (one `assistant` record per
+turn), which keeps the stream compact and schema-stable for CI consumers. For
+real-time monitoring, add `--include-partial-messages`: each provider text
+chunk is additionally emitted as a bounded, redacted `assistant_delta` record
+in arrival order, before the turn's aggregated `assistant` record — which is
+still emitted unchanged. Without the flag the stream contains no delta
+records at all.
+
+```bash
+oh-my-cli -p "Explain the build failure" --output json --include-partial-messages
+```
 
 ### Run summary
 
