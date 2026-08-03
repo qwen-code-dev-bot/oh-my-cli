@@ -12,6 +12,7 @@ import {
   filterSessionRows,
   resolveResumeTarget,
   resolveResumeFlagTarget,
+  resolveResumeByName,
   collectSessionPickerRows,
   renderSessionPickerLines,
   runSessionPicker,
@@ -420,6 +421,89 @@ describe("session picker: resolveResumeFlagTarget", () => {
     // The first call quarantined the checkpoint, so the second sees it as gone.
     expect(second.ok).toBe(false);
     expect(second.reason).toContain("was not found");
+  });
+});
+
+describe("session picker: resolveResumeByName (Issue #534)", () => {
+  let tmpDir: string;
+  let store: SessionStore;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "oh-my-cli-name-resume-"));
+    store = new SessionStore(tmpDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function namedSession(name: string): string {
+    const id = store.newId();
+    store.writeMeta(id, { model: "m", workspace: tmpDir, createdAt: 1 });
+    store.append(id, { role: "user", content: "hi" });
+    store.writeName(id, name);
+    return id;
+  }
+
+  it("resolves a uniquely named session to its exact id", () => {
+    const id = namedSession("auth refactor");
+    const t = resolveResumeByName("auth refactor", store);
+    expect(t.ok).toBe(true);
+    if (t.ok) {
+      expect(t.sessionId).toBe(id);
+      expect(t.workspace).toBe(tmpDir);
+    }
+  });
+
+  it("matches trimmed input against stored names", () => {
+    const id = namedSession("auth refactor");
+    const t = resolveResumeByName("  auth refactor  ", store);
+    expect(t.ok).toBe(true);
+    if (t.ok) expect(t.sessionId).toBe(id);
+  });
+
+  it("fails closed when no session carries the name", () => {
+    namedSession("something else");
+    const t = resolveResumeByName("auth refactor", store);
+    expect(t.ok).toBe(false);
+    expect(t.reason).toContain('no session named "auth refactor" was found');
+  });
+
+  it("fails closed on ambiguity, listing the matching short ids", () => {
+    const a = namedSession("dup");
+    const b = namedSession("dup");
+    const t = resolveResumeByName("dup", store);
+    expect(t.ok).toBe(false);
+    expect(t.reason).toContain("2 sessions are named");
+    expect(t.reason).toContain(shortSessionId(a));
+    expect(t.reason).toContain(shortSessionId(b));
+    expect(t.reason).toContain("resume by exact session id");
+  });
+
+  it("skips corrupt matches and resolves the healthy one", () => {
+    const healthy = namedSession("mixed");
+    const corrupt = store.newId();
+    fs.writeFileSync(path.join(tmpDir, `${corrupt}.jsonl`), "{bad}\n{worse}\n");
+    store.writeName(corrupt, "mixed");
+    const t = resolveResumeByName("mixed", store);
+    expect(t.ok).toBe(true);
+    if (t.ok) expect(t.sessionId).toBe(healthy);
+  });
+
+  it("reports the corrupt reason when only corrupt sessions carry the name", () => {
+    const corrupt = store.newId();
+    fs.writeFileSync(path.join(tmpDir, `${corrupt}.jsonl`), "{bad}\n{worse}\n");
+    store.writeName(corrupt, "gone bad");
+    const t = resolveResumeByName("gone bad", store);
+    expect(t.ok).toBe(false);
+    expect(t.reason).toContain("corrupt");
+    expect(t.reason).toContain("cannot be resumed safely");
+  });
+
+  it("rejects an empty name", () => {
+    const t = resolveResumeByName("   ", store);
+    expect(t.ok).toBe(false);
+    expect(t.reason).toContain("no session named");
   });
 });
 
