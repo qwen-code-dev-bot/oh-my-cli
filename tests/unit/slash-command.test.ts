@@ -4,8 +4,11 @@ import {
   INTERACTIVE_SLASH_COMMANDS,
   RUNTIME_SLASH_COMMANDS,
   RUNTIME_SLASH_COMMAND_DESCRIPTORS,
+  STREAMING_SAFE_SLASH_COMMANDS,
+  busySubmitDecision,
   formatRuntimeSlashCommand,
   formatSlashCommandHelp,
+  isStreamingSafeSlashCommand,
   resolveSlashCommand,
 } from "../../src/slash-command.js";
 
@@ -164,5 +167,79 @@ describe("interactive slash command inventory", () => {
     expect(RUNTIME_SLASH_COMMAND_DESCRIPTORS.map(({ name }) => name)).toEqual(
       RUNTIME_SLASH_COMMANDS,
     );
+  });
+});
+
+// Issue #511: a bounded read-only allowlist may run while a turn is in flight.
+const paletteNames = [
+  ...INTERACTIVE_SLASH_COMMANDS,
+  "/attach",
+  "/ask",
+  "/goal",
+  "/stats",
+];
+
+describe("streaming-safe allowlist", () => {
+  it("contains exactly the read-only runtime commands plus /help", () => {
+    expect(STREAMING_SAFE_SLASH_COMMANDS).toEqual([
+      "/status",
+      "/model",
+      "/settings",
+      "/tools",
+      "/capabilities",
+      "/continuity",
+      "/help",
+    ]);
+  });
+
+  it("admits allowlisted commands and rejects mutating or queuing ones", () => {
+    for (const name of STREAMING_SAFE_SLASH_COMMANDS) {
+      expect(isStreamingSafeSlashCommand(name)).toBe(true);
+    }
+    for (const name of ["/clear", "/exit", "/attach", "/ask", "/goal", "/stats", "/new"]) {
+      expect(isStreamingSafeSlashCommand(name)).toBe(false);
+    }
+  });
+});
+
+describe("busySubmitDecision", () => {
+  function decide(text: string) {
+    return busySubmitDecision(text, resolveSlashCommand(text, paletteNames));
+  }
+
+  it("runs allowlisted commands immediately, with arguments", () => {
+    expect(decide("/status")).toEqual({ kind: "run-command", name: "/status", args: "" });
+    expect(decide("  /model  ")).toEqual({ kind: "run-command", name: "/model", args: "" });
+  });
+
+  it("runs the /? alias as /help mid-stream", () => {
+    expect(decide("/?")).toEqual({ kind: "run-command", name: "/help", args: "" });
+  });
+
+  it("rejects prompts without touching the turn", () => {
+    expect(decide("explain this file")).toEqual({ kind: "rejected" });
+    expect(decide("use /help in the docs")).toEqual({ kind: "rejected" });
+  });
+
+  it("runs an allowlisted command even when it carries extra words", () => {
+    expect(decide("/status please")).toEqual({
+      kind: "run-command",
+      name: "/status",
+      args: "please",
+    });
+  });
+
+  it("rejects non-allowlisted commands, including /clear and /exit", () => {
+    expect(decide("/clear")).toEqual({ kind: "rejected" });
+    expect(decide("/exit")).toEqual({ kind: "rejected" });
+    expect(decide("/quit")).toEqual({ kind: "rejected" });
+    expect(decide("/goal status")).toEqual({ kind: "rejected" });
+    expect(decide("/attach img.png")).toEqual({ kind: "rejected" });
+    expect(decide("/wat")).toEqual({ kind: "rejected" });
+  });
+
+  it("ignores empty or whitespace-only input silently", () => {
+    expect(decide("")).toEqual({ kind: "ignored" });
+    expect(decide("   \n ")).toEqual({ kind: "ignored" });
   });
 });

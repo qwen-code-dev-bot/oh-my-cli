@@ -31,6 +31,42 @@ export const INTERACTIVE_SLASH_COMMANDS = [
   ...RUNTIME_SLASH_COMMANDS,
 ] as const;
 
+// Read-only commands that may run while a turn is in flight (Issue #511):
+// they render redacted state (or the shortcut panel) and never mutate, queue
+// work, or touch the active turn. Names are post-alias-resolution (`/?`
+// resolves to `/help` before this set is consulted). `/clear` and `/exit`
+// are deliberately excluded — view mutation and process exit are not
+// read-only inspection.
+export const STREAMING_SAFE_SLASH_COMMANDS: readonly string[] = [
+  ...RUNTIME_SLASH_COMMANDS,
+  "/help",
+];
+
+export function isStreamingSafeSlashCommand(name: string): boolean {
+  return STREAMING_SAFE_SLASH_COMMANDS.includes(name);
+}
+
+// What a submit does while a turn is in flight (Issue #511). Only allowlisted
+// read-only commands run immediately; empty input is ignored silently; prompts
+// and every other command are rejected without disturbing the turn (the draft
+// is preserved so it can be submitted once the turn settles). Pure so the
+// gating matrix is unit-testable.
+export type BusySubmitDecision =
+  | { kind: "run-command"; name: string; args: string }
+  | { kind: "ignored" }
+  | { kind: "rejected" };
+
+export function busySubmitDecision(
+  text: string,
+  resolution: SlashCommandResolution,
+): BusySubmitDecision {
+  if (text.trim() === "") return { kind: "ignored" };
+  if (resolution.kind === "command" && isStreamingSafeSlashCommand(resolution.name)) {
+    return { kind: "run-command", name: resolution.name, args: resolution.args };
+  }
+  return { kind: "rejected" };
+}
+
 export interface RuntimeSlashContext {
   model: string;
   workspace: string;

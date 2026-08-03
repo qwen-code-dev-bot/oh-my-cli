@@ -600,6 +600,21 @@ describe("tui-shell: the active turn renders in place in the composer", () => {
     expect(none.join("\n")).toContain("❯ edit");
   });
 
+  it("keeps the streaming affordance truthful while a mid-stream draft is typed (Issue #511)", () => {
+    // The composer is editable mid-stream, but the state rule must still read
+    // as streaming — never as an editable prompt ready to submit.
+    const lines = renderComposer(
+      { mode: "streaming", text: "/status", placeholder: "" },
+      layout,
+      shellStyle(false),
+      { turn: { phase: "streaming" } },
+    );
+    const joined = lines.join("\n");
+    expect(joined).toContain("✦ streaming");
+    expect(joined).toContain("/status");
+    expect(joined).not.toContain("❯ edit");
+  });
+
   it("surfaces the live turn across the whole screen", () => {
     const text = renderShell(
       baseState({

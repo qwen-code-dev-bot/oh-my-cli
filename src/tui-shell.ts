@@ -28,6 +28,8 @@ import type { ColorDepth } from "./product-banner.js";
 import {
   formatRuntimeSlashCommand,
   resolveSlashCommand,
+  busySubmitDecision,
+  STREAMING_SAFE_SLASH_COMMANDS,
 } from "./slash-command.js";
 import {
   buildSideContext,
@@ -2844,14 +2846,16 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   }
 
   function editable(): boolean {
-    return (
-      state.composer.mode !== "submitting" &&
-      state.composer.mode !== "streaming" &&
-      state.composer.mode !== "disabled"
-    );
+    // Streaming is intentionally not a lockout (Issue #511): the composer stays
+    // editable while a turn streams so read-only commands can run in place;
+    // submit() decides what a mid-turn submission may do.
+    return state.composer.mode !== "submitting" && state.composer.mode !== "disabled";
   }
 
   function refreshMode(): void {
+    // Typing mid-stream keeps the streaming mode: the draft coexists with the
+    // active turn, and submit gating stays truthful (Issue #511).
+    if (state.composer.mode === "streaming") return;
     state.composer.mode = state.composer.text.includes("\n") ? "multiline" : "focused";
   }
 
@@ -2994,7 +2998,8 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     state.composer.text += "\n";
     slashPreviewDismissedFor = null;
     referencePreviewDismissedFor = null;
-    state.composer.mode = "multiline";
+    // Mid-stream drafts keep the streaming mode (Issue #511).
+    if (state.composer.mode !== "streaming") state.composer.mode = "multiline";
     refreshReferencePreview(true);
     refreshSlashPreview(true);
     history = commitDraft(history, state.composer.text);
@@ -3630,9 +3635,15 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
 
   function submit(): void {
     // Busy, empty, and repeated submissions are explicit non-destructive no-ops
-    // (criterion 3): while a turn is in flight the composer is not editable, so we
-    // never queue a duplicate run; empty/whitespace input sends nothing.
-    if (!submitAllowed(state.composer.mode, state.composer.text)) return;
+    // (criterion 3): while a turn is in flight only the read-only allowlist may
+    // run (Issue #511); everything else is rejected without disturbing the turn.
+    // Empty/whitespace input sends nothing.
+    if (!submitAllowed(state.composer.mode, state.composer.text)) {
+      const busy =
+        state.composer.mode === "streaming" || state.composer.mode === "submitting";
+      if (busy) submitWhileBusy();
+      return;
+    }
     // Submitting clears any open reference picker along with the composer.
     state.referencePreview = undefined;
     referenceUniverse = null;
@@ -3727,6 +3738,44 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     state.slashPreview = undefined;
     slashPreviewDismissedFor = null;
     queuePrompt(text, pendingImages.splice(0));
+  }
+
+  // While a turn is in flight, read-only allowlisted commands run immediately
+  // and everything else is an explicit, non-destructive no-op (Issue #511).
+  // The run is never queued, interrupted, or reordered: allowlisted commands
+  // render redacted state (or the shortcut panel) in place while the turn
+  // continues, and the composer mode stays `streaming`.
+  function submitWhileBusy(): void {
+    const text = state.composer.text.trim();
+    const decision = busySubmitDecision(
+      text,
+      resolveSlashCommand(text, opts.paletteCommands.map((command) => command.name)),
+    );
+    if (decision.kind === "ignored") return;
+    if (decision.kind === "rejected") {
+      state.transcript.push({
+        kind: "notice",
+        text:
+          "A turn is in flight — read-only commands (" +
+          STREAMING_SAFE_SLASH_COMMANDS.join(", ") +
+          ") run in place; anything else waits until it settles (Esc interrupts).",
+      });
+      scheduleRender();
+      return;
+    }
+    state.composer.text = "";
+    state.slashPreview = undefined;
+    slashPreviewDismissedFor = null;
+    history = commitDraft(history, "");
+    const command = opts.paletteCommands.find(
+      (candidate) => candidate.name === decision.name,
+    );
+    if (!command) {
+      state.transcript.push({ kind: "notice", text: `Command unavailable: ${decision.name}` });
+      scheduleRender();
+      return;
+    }
+    void runPaletteCommand(command, decision.args).then(() => undefined);
   }
 
   // Fold one completed turn's canonical result into the live runtime tally for
