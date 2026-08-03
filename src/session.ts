@@ -414,4 +414,25 @@ export class SessionStore {
       .map((f) => f.slice(0, -".jsonl".length))
       .filter((id) => id.length > 0);
   }
+
+  // Remove a session's canonical checkpoint and every sibling sidecar (temp,
+  // compaction summary, goal, user-owned name, task receipts). Each path is
+  // derived from the same id, so sibling sessions are never touched. Missing
+  // files are ignored; deleting an unknown id is a no-op. Ids that could
+  // escape the store directory are rejected because deletion is destructive.
+  deleteSession(id: string): void {
+    if (typeof id !== "string" || !id || /[/\\]/.test(id) || id.includes("\0")) {
+      throw new Error("Invalid session id");
+    }
+    for (const target of [
+      this.filePath(id),
+      this.tempPath(id),
+      this.compactPath(id),
+      this.goalPath(id),
+      this.namePath(id),
+      this.tasksPath(id),
+    ]) {
+      fs.rmSync(target, { force: true });
+    }
+  }
 }

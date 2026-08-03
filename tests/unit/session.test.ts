@@ -142,4 +142,40 @@ describe("SessionStore", () => {
     expect(diag.corrupt).toBe(false);
     expect(diag.meta).toBeNull();
   });
+
+  it("deletes a session's checkpoint and every sidecar, sparing siblings", () => {
+    const victim = store.newId();
+    const sibling = store.newId();
+    store.append(victim, { role: "user", content: "gone" });
+    store.append(sibling, { role: "user", content: "kept" });
+    store.writeName(victim, "Named session");
+    store.writeGoal(victim, {
+      revision: 1,
+      goal: { objective: "x", status: "active", createdAt: 1, updatedAt: 1 },
+    });
+    fs.writeFileSync(store.tempPath(victim), "partial");
+    fs.writeFileSync(store.compactPath(victim), "{}");
+
+    store.deleteSession(victim);
+
+    expect(store.listIds()).toEqual([sibling]);
+    expect(store.load(sibling).length).toBe(1);
+    expect(store.readName(victim)).toBeNull();
+    expect(store.readGoal(victim)).toEqual({ revision: 0, goal: null });
+    expect(fs.existsSync(store.filePath(victim))).toBe(false);
+    expect(fs.existsSync(store.tempPath(victim))).toBe(false);
+    expect(fs.existsSync(store.compactPath(victim))).toBe(false);
+    expect(fs.existsSync(store.namePath(victim))).toBe(false);
+    expect(fs.existsSync(store.goalPath(victim))).toBe(false);
+
+    // Deleting an unknown id touches nothing.
+    store.deleteSession("never-existed");
+    expect(store.listIds()).toEqual([sibling]);
+
+    // Ids that could escape the store directory are refused.
+    expect(() => store.deleteSession("../escape")).toThrow(
+      "Invalid session id",
+    );
+    expect(() => store.deleteSession("a/b")).toThrow("Invalid session id");
+  });
 });

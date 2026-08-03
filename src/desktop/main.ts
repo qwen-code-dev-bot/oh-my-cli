@@ -15,10 +15,23 @@ ipcMain.handle(DESKTOP_CHANNELS.createSession, () => service.createSession());
 ipcMain.handle(DESKTOP_CHANNELS.loadSession, (_event, sessionId: string) =>
   service.loadSession(sessionId),
 );
+ipcMain.handle(DESKTOP_CHANNELS.renameSession, (_event, request) =>
+  service.renameSession(request),
+);
+ipcMain.handle(DESKTOP_CHANNELS.setSessionArchived, (_event, request) =>
+  service.setSessionArchived(request),
+);
+ipcMain.handle(DESKTOP_CHANNELS.deleteSession, (_event, sessionId: string) =>
+  service.deleteSession(sessionId),
+);
 ipcMain.handle(DESKTOP_CHANNELS.sendMessage, (event, request) =>
   service.sendMessage(request, (payload) => {
     event.sender.send(DESKTOP_CHANNELS.agentEvent, payload);
   }),
+);
+ipcMain.handle(DESKTOP_CHANNELS.getUiState, () => service.getUiState());
+ipcMain.handle(DESKTOP_CHANNELS.saveUiState, (_event, request) =>
+  service.saveUiState(request),
 );
 ipcMain.handle(DESKTOP_CHANNELS.listWorkspaceFiles, () =>
   service.listWorkspaceFiles(),

@@ -1,9 +1,14 @@
-import type { DesktopBridge } from "./contracts.js";
+import type {
+  DesktopBridge,
+  DesktopSaveUiStateRequest,
+  DesktopUiState,
+} from "./contracts.js";
 import {
   createDesktopViewModel,
   createInitialDesktopState,
   reduceDesktopState,
   renderDesktopWorkbench,
+  renderSessionRail,
   type DesktopAction,
   type DesktopPrimaryView,
 } from "./renderer.js";
@@ -15,12 +20,40 @@ declare global {
 }
 
 let state = createInitialDesktopState();
+// Local mirror of the persisted workspace UI state. The service responds to
+// every save with the merged truth, so the mirror never drifts on writes.
+let uiState: DesktopUiState = { activeSessionId: null, sessions: {} };
+let restoreScrollTop: number | null = null;
+let draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let scrollSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
 function render(): void {
   const root = document.querySelector<HTMLElement>("#desktop-root");
   if (!root) return;
   root.innerHTML = renderDesktopWorkbench(createDesktopViewModel(state));
+  // The rebuild wipes renderer-owned DOM state; put it back synchronously so
+  // a navigation or a save never eats the unsent draft of the active session.
+  const composer = document.querySelector<HTMLTextAreaElement>(
+    '[aria-label="Message"]',
+  );
+  const activeId = state.activeSession?.id;
+  if (composer && activeId && composer.value === "") {
+    composer.value = uiState.sessions[activeId]?.draft ?? "";
+  }
+  if (state.renaming) {
+    const rename = document.querySelector<HTMLInputElement>(
+      '[aria-label="Rename session"]',
+    );
+    rename?.focus();
+    rename?.select();
+  }
   requestAnimationFrame(() => {
+    const stage = document.querySelector<HTMLElement>(".stage");
+    if (stage && restoreScrollTop !== null) {
+      stage.scrollTop = restoreScrollTop;
+      restoreScrollTop = null;
+      return;
+    }
     const conversation = document.querySelector<HTMLElement>(
       "[data-conversation]",
     );
@@ -34,10 +67,98 @@ function dispatch(action: DesktopAction, shouldRender = true): void {
   if (shouldRender) render();
 }
 
+function mergeMirrorEntry(
+  sessionId: string,
+  patch: Record<string, unknown>,
+): void {
+  uiState = {
+    ...uiState,
+    sessions: {
+      ...uiState.sessions,
+      [sessionId]: { ...(uiState.sessions[sessionId] ?? {}), ...patch },
+    },
+  };
+}
+
+function persistUi(request: DesktopSaveUiStateRequest): void {
+  void window.ohMyCliDesktop
+    .saveUiState(request)
+    .then((next) => {
+      uiState = next;
+    })
+    .catch(() => {
+      // Persistence is best-effort; a failed save must never break the UI.
+    });
+}
+
+function composerElement(): HTMLTextAreaElement | null {
+  return document.querySelector<HTMLTextAreaElement>('[aria-label="Message"]');
+}
+
+function stageElement(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(".stage");
+}
+
+// Snapshot the active session's draft and reading position into the mirror
+// before the view switches away from it.
+function captureActiveContext(): void {
+  const id = state.activeSession?.id;
+  if (!id) return;
+  const patch: Record<string, unknown> = {};
+  const composer = composerElement();
+  if (composer) patch.draft = composer.value;
+  const stage = stageElement();
+  if (stage) patch.scrollTop = stage.scrollTop;
+  if (Object.keys(patch).length > 0) mergeMirrorEntry(id, patch);
+}
+
+function queueDraftPersist(): void {
+  const id = state.activeSession?.id;
+  const composer = composerElement();
+  if (!id || !composer) return;
+  const draft = composer.value;
+  mergeMirrorEntry(id, { draft });
+  if (draftSaveTimer) clearTimeout(draftSaveTimer);
+  draftSaveTimer = setTimeout(() => {
+    draftSaveTimer = null;
+    persistUi({ sessions: { [id]: { draft } } });
+  }, 300);
+}
+
+function queueScrollPersist(): void {
+  if (scrollSaveTimer) return;
+  scrollSaveTimer = setTimeout(() => {
+    scrollSaveTimer = null;
+    const id = state.activeSession?.id;
+    const stage = stageElement();
+    if (!id || !stage) return;
+    persistUi({ sessions: { [id]: { scrollTop: stage.scrollTop } } });
+  }, 400);
+}
+
+// The read watermark uses the summary's messageCount so tool messages count
+// the same way in the rail badge and in the watermark.
+function markActiveRead(): void {
+  const id = state.activeSession?.id;
+  if (!id) return;
+  const summary = state.sessions.find((session) => session.id === id);
+  if (!summary) return;
+  mergeMirrorEntry(id, { lastSeenMessageCount: summary.messageCount });
+  persistUi({ sessions: { [id]: { lastSeenMessageCount: summary.messageCount } } });
+}
+
 async function selectSession(sessionId: string): Promise<void> {
+  captureActiveContext();
   try {
     const session = await window.ohMyCliDesktop.loadSession(sessionId);
+    const entry = uiState.sessions[sessionId] ?? {};
+    restoreScrollTop =
+      typeof entry.scrollTop === "number" ? entry.scrollTop : null;
     dispatch({ type: "select-session", session });
+    const composer = composerElement();
+    if (composer) composer.value = entry.draft ?? "";
+    persistUi({ activeSessionId: sessionId });
+    markActiveRead();
   } catch (error) {
     dispatch({
       type: "set-error",
@@ -52,15 +173,93 @@ async function refreshSessions(): Promise<void> {
   dispatch({ type: "set-sessions", sessions });
 }
 
+async function createSession(): Promise<void> {
+  try {
+    const session = await window.ohMyCliDesktop.createSession();
+    await refreshSessions();
+    await selectSession(session.id);
+    composerElement()?.focus();
+  } catch (error) {
+    dispatch({
+      type: "set-error",
+      message:
+        error instanceof Error ? error.message : "Unable to create session",
+    });
+  }
+}
+
+async function commitRename(): Promise<void> {
+  const input = document.querySelector<HTMLInputElement>(
+    '[aria-label="Rename session"]',
+  );
+  const sessionId = input?.dataset.sessionId;
+  if (!input || !sessionId) return;
+  try {
+    await window.ohMyCliDesktop.renameSession({
+      sessionId,
+      title: input.value,
+    });
+    dispatch({ type: "set-renaming", renaming: false });
+    await refreshSessions();
+    if (state.activeSession?.id === sessionId) {
+      const session = await window.ohMyCliDesktop.loadSession(sessionId);
+      dispatch({ type: "select-session", session });
+    }
+  } catch (error) {
+    dispatch({
+      type: "set-error",
+      message:
+        error instanceof Error ? error.message : "Unable to rename session",
+    });
+  }
+}
+
+async function setArchived(sessionId: string, archived: boolean): Promise<void> {
+  try {
+    await window.ohMyCliDesktop.setSessionArchived({ sessionId, archived });
+    await refreshSessions();
+  } catch (error) {
+    dispatch({
+      type: "set-error",
+      message:
+        error instanceof Error ? error.message : "Unable to update session",
+    });
+  }
+}
+
+async function deleteConfirmed(): Promise<void> {
+  const sessionId = state.confirmDeleteId;
+  dispatch({ type: "confirm-delete" });
+  if (!sessionId) return;
+  try {
+    await window.ohMyCliDesktop.deleteSession(sessionId);
+    if (state.activeSession?.id === sessionId) {
+      dispatch({ type: "clear-session" });
+    }
+    await refreshSessions();
+  } catch (error) {
+    dispatch({
+      type: "set-error",
+      message:
+        error instanceof Error ? error.message : "Unable to delete session",
+    });
+  }
+}
+
 async function bootstrap(): Promise<void> {
   dispatch({ type: "bootstrap-started" });
   try {
-    const [payload, sessions, files] = await Promise.all([
+    const [payload, sessions, files, ui] = await Promise.all([
       window.ohMyCliDesktop.getBootstrapState(),
       window.ohMyCliDesktop.listSessions(),
       window.ohMyCliDesktop.listWorkspaceFiles(),
+      window.ohMyCliDesktop.getUiState(),
     ]);
+    uiState = ui;
     dispatch({ type: "bootstrap-resolved", payload, sessions, files });
+    if (ui.activeSessionId) {
+      await selectSession(ui.activeSessionId);
+    }
   } catch (error) {
     dispatch({
       type: "bootstrap-rejected",
@@ -72,6 +271,14 @@ async function bootstrap(): Promise<void> {
 
 window.ohMyCliDesktop.onAgentEvent((event) => {
   dispatch({ type: "agent-event", event });
+  // Late events for other sessions never touch the active transcript (the
+  // reducer drops them), but a background completion still changes rail
+  // truth (unread, failed, title), so refresh the summaries.
+  if (event.type === "complete") {
+    void refreshSessions().then(() => {
+      if (state.activeSession?.id === event.sessionId) markActiveRead();
+    });
+  }
 });
 
 document.addEventListener("click", (event) => {
@@ -84,7 +291,7 @@ document.addEventListener("click", (event) => {
   }
   const sessionId =
     target.closest<HTMLElement>("[data-session-id]")?.dataset.sessionId;
-  if (sessionId) {
+  if (sessionId && !state.renaming) {
     void selectSession(sessionId);
     return;
   }
@@ -105,22 +312,21 @@ document.addEventListener("click", (event) => {
   }
   const action = target.closest<HTMLElement>("[data-action]")?.dataset.action;
   if (action === "new-session") {
-    void window.ohMyCliDesktop
-      .createSession()
-      .then(async (session) => {
-        await refreshSessions();
-        dispatch({ type: "select-session", session });
-        document
-          .querySelector<HTMLTextAreaElement>('[aria-label="Message"]')
-          ?.focus();
-      })
-      .catch((error: unknown) =>
-        dispatch({
-          type: "set-error",
-          message:
-            error instanceof Error ? error.message : "Unable to create session",
-        }),
-      );
+    void createSession();
+  } else if (action === "rename-session" && state.activeSession) {
+    dispatch({ type: "set-renaming", renaming: true });
+  } else if (action === "archive-session" && state.activeSession) {
+    void setArchived(state.activeSession.id, true);
+  } else if (action === "restore-session" && state.activeSession) {
+    void setArchived(state.activeSession.id, false);
+  } else if (action === "request-delete-session" && state.activeSession) {
+    dispatch({ type: "confirm-delete", sessionId: state.activeSession.id });
+  } else if (action === "confirm-delete-session") {
+    void deleteConfirmed();
+  } else if (action === "cancel-delete") {
+    dispatch({ type: "confirm-delete" });
+  } else if (action === "toggle-archived") {
+    dispatch({ type: "set-show-archived", show: !state.showArchived });
   } else if (action === "save-file" && state.activeFile) {
     const editor = document.querySelector<HTMLTextAreaElement>(
       '[aria-label="File content"]',
@@ -149,6 +355,7 @@ document.addEventListener("click", (event) => {
     target.dataset.dialogBackdrop === "true"
   ) {
     dispatch({ type: "set-diagnostics", open: false });
+    dispatch({ type: "confirm-delete" });
   }
 });
 
@@ -162,8 +369,33 @@ document.addEventListener("input", (event) => {
     document
       .querySelector<HTMLButtonElement>('[data-action="save-file"]')
       ?.removeAttribute("disabled");
+    return;
+  }
+  if (
+    target instanceof HTMLTextAreaElement &&
+    target.getAttribute("aria-label") === "Message"
+  ) {
+    queueDraftPersist();
+    return;
+  }
+  if (
+    target instanceof HTMLInputElement &&
+    target.getAttribute("aria-label") === "Search sessions"
+  ) {
+    // Patch only the rail so typing never rebuilds the composer or steals
+    // focus from the search field.
+    dispatch({ type: "set-session-search", value: target.value }, false);
+    const list = document.querySelector<HTMLElement>(".session-list");
+    if (list) list.innerHTML = renderSessionRail(createDesktopViewModel(state));
   }
 });
+
+document.addEventListener("scroll", (event) => {
+  const target = event.target;
+  if (!(target instanceof Element) || !target.classList.contains("stage"))
+    return;
+  queueScrollPersist();
+}, true);
 
 document.addEventListener("submit", (event) => {
   const form = event.target;
@@ -180,6 +412,14 @@ document.addEventListener("submit", (event) => {
   const sessionId = state.activeSession?.id;
   if (!prompt || !sessionId || state.busy) return;
   if (input) input.value = "";
+  // Cancel any pending draft debounce so the just-sent text cannot be written
+  // back as a phantom draft after the composer is cleared.
+  if (draftSaveTimer) {
+    clearTimeout(draftSaveTimer);
+    draftSaveTimer = null;
+  }
+  mergeMirrorEntry(sessionId, { draft: "" });
+  persistUi({ sessions: { [sessionId]: { draft: "" } } });
   dispatch({ type: "optimistic-user", content: prompt });
   dispatch({ type: "set-busy", busy: true });
   void window.ohMyCliDesktop
@@ -189,6 +429,7 @@ document.addEventListener("submit", (event) => {
       dispatch({ type: "select-session", session });
       dispatch({ type: "set-busy", busy: false });
       await refreshSessions();
+      markActiveRead();
     })
     .catch((error: unknown) => {
       dispatch({ type: "set-busy", busy: false });
@@ -196,11 +437,25 @@ document.addEventListener("submit", (event) => {
         type: "set-error",
         message: error instanceof Error ? error.message : "Agent turn failed",
       });
+      void refreshSessions();
     });
 });
 
 document.addEventListener("keydown", (event) => {
   const target = event.target;
+  if (
+    target instanceof HTMLInputElement &&
+    target.getAttribute("aria-label") === "Rename session"
+  ) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void commitRename();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      dispatch({ type: "set-renaming", renaming: false });
+    }
+    return;
+  }
   if (
     target instanceof HTMLTextAreaElement &&
     target.getAttribute("aria-label") === "Message" &&
@@ -209,6 +464,21 @@ document.addEventListener("keydown", (event) => {
   ) {
     event.preventDefault();
     target.closest("form")?.requestSubmit();
+    return;
+  }
+  if (
+    target instanceof HTMLElement &&
+    target.classList.contains("session-item") &&
+    (event.key === "ArrowDown" || event.key === "ArrowUp")
+  ) {
+    event.preventDefault();
+    const items = [
+      ...document.querySelectorAll<HTMLElement>(".session-item"),
+    ];
+    const index = items.indexOf(target);
+    const next =
+      items[(index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length];
+    next?.focus();
     return;
   }
   if (
@@ -227,12 +497,31 @@ document.addEventListener("keydown", (event) => {
   }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
     event.preventDefault();
-    document
-      .querySelector<HTMLTextAreaElement>('[aria-label="Message"]')
-      ?.focus();
-  } else if (event.key === "Escape" && state.diagnosticsOpen) {
-    dispatch({ type: "set-diagnostics", open: false });
+    composerElement()?.focus();
+  } else if (
+    (event.metaKey || event.ctrlKey) &&
+    event.key.toLowerCase() === "n"
+  ) {
+    event.preventDefault();
+    void createSession();
+  } else if (event.key === "Escape") {
+    if (state.confirmDeleteId) {
+      dispatch({ type: "confirm-delete" });
+    } else if (state.diagnosticsOpen) {
+      dispatch({ type: "set-diagnostics", open: false });
+    }
   }
+});
+
+window.addEventListener("beforeunload", () => {
+  captureActiveContext();
+  const id = state.activeSession?.id;
+  if (!id) return;
+  const entry = uiState.sessions[id] ?? {};
+  void window.ohMyCliDesktop.saveUiState({
+    activeSessionId: id,
+    sessions: { [id]: entry },
+  });
 });
 
 render();
