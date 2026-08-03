@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { SessionStore } from "../../src/session.js";
-import { collectSessionSummaries, formatSessionList } from "../../src/session-summary.js";
+import {
+  collectSessionSummaries,
+  formatSessionList,
+  pickContinueSession,
+} from "../../src/session-summary.js";
 import type { SessionSummary } from "../../src/session-summary.js";
+import { workspaceTrustKey } from "../../src/folder-trust.js";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -187,5 +192,115 @@ describe("session summary: formatSessionList", () => {
     expect(formatSessionList([mk({ ageMs: 5 * 60 * 1000 })])).toContain("last active 5m ago");
     expect(formatSessionList([mk({ ageMs: 5 * 60 * 60 * 1000 })])).toContain("last active 5h ago");
     expect(formatSessionList([mk({ ageMs: 5 * 24 * 60 * 60 * 1000 })])).toContain("last active 5d ago");
+  });
+});
+
+describe("session summary: pickContinueSession (Issue #513)", () => {
+  const mk = (over: Partial<SessionSummary>): SessionSummary => ({
+    id: "x",
+    messageCount: 0,
+    userTurns: 0,
+    assistantTurns: 0,
+    toolCalls: 0,
+    totalChars: 0,
+    approxTokens: 0,
+    model: "m",
+    workspace: "/w",
+    createdAt: 0,
+    lastModified: 0,
+    ageMs: 0,
+    corrupt: false,
+    ...over,
+  });
+
+  // Deterministic injected identity: sessions match when their declared
+  // workspace carries the same injected key.
+  const keyOf = (p: string): string => (p.startsWith("/ws-a") ? "key-a" : `key:${p}`);
+
+  it("picks the most recent healthy session declared for the current workspace", () => {
+    const picked = pickContinueSession(
+      [
+        mk({ id: "other-ws", workspace: "/srv/elsewhere" }),
+        mk({ id: "target", workspace: "/ws-a/project", model: "fake-model" }),
+        mk({ id: "older-same-ws", workspace: "/ws-a/project" }),
+      ],
+      "key-a",
+      keyOf,
+    );
+    expect(picked).toEqual({
+      ok: true,
+      sessionId: "target",
+      workspace: "/ws-a/project",
+      model: "fake-model",
+    });
+  });
+
+  it("never resumes another workspace's session", () => {
+    const picked = pickContinueSession(
+      [mk({ id: "elsewhere", workspace: "/srv/elsewhere" })],
+      "key-a",
+      keyOf,
+    );
+    expect(picked).toEqual({ ok: false, reason: "no-session" });
+  });
+
+  it("skips corrupt matches and still selects an older healthy one", () => {
+    const picked = pickContinueSession(
+      [
+        mk({ id: "corrupt-new", workspace: "/ws-a/project", corrupt: true }),
+        mk({ id: "healthy-old", workspace: "/ws-a/project" }),
+      ],
+      "key-a",
+      keyOf,
+    );
+    expect(picked).toEqual({
+      ok: true,
+      sessionId: "healthy-old",
+      workspace: "/ws-a/project",
+      model: "m",
+    });
+  });
+
+  it("fails closed naming corruption when only corrupt sessions match", () => {
+    const picked = pickContinueSession(
+      [
+        mk({ id: "corrupt-1", workspace: "/ws-a/project", corrupt: true }),
+        mk({ id: "corrupt-2", workspace: "/ws-a/project", corrupt: true }),
+      ],
+      "key-a",
+      keyOf,
+    );
+    expect(picked).toEqual({ ok: false, reason: "only-corrupt" });
+  });
+
+  it("excludes sessions without workspace metadata", () => {
+    const picked = pickContinueSession(
+      [mk({ id: "legacy", workspace: undefined })],
+      "key-a",
+      keyOf,
+    );
+    expect(picked).toEqual({ ok: false, reason: "no-session" });
+  });
+
+  it("reports no-session for an empty list", () => {
+    expect(pickContinueSession([], "key-a", keyOf)).toEqual({ ok: false, reason: "no-session" });
+  });
+
+  it("matches a symlink alias of the current workspace via canonical identity", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "omc-continue-alias-"));
+    const realWs = path.join(root, "project");
+    const aliasWs = path.join(root, "alias");
+    fs.mkdirSync(realWs);
+    fs.symlinkSync(realWs, aliasWs);
+    try {
+      // A session declared for the alias must match when continuing from the
+      // real path: both collapse to one canonical workspace identity.
+      const summaries = [mk({ id: "s1", workspace: aliasWs })];
+      const picked = pickContinueSession(summaries, workspaceTrustKey(realWs));
+      expect(picked.ok).toBe(true);
+      if (picked.ok) expect(picked.sessionId).toBe("s1");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

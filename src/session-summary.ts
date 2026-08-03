@@ -9,6 +9,7 @@
 
 import fs from "node:fs";
 import { redactSecrets } from "./permission-impact.js";
+import { workspaceTrustKey } from "./folder-trust.js";
 import type { SessionStore } from "./session.js";
 
 export interface SessionSummary {
@@ -85,6 +86,52 @@ function summarize(store: SessionStore, id: string, now: number): SessionSummary
     ageMs: Math.max(0, now - lastModified),
     corrupt: diag.corrupt,
   };
+}
+
+// The result of selecting a session for `--continue` (Issue #513). Selection is
+// read-only and fail-closed: it yields either the most recent healthy session
+// declared for the current workspace, or an actionable reason — never another
+// workspace's session and never a corrupt one.
+export type ContinuePickResult =
+  | { ok: true; sessionId: string; workspace?: string; model?: string }
+  | { ok: false; reason: "no-session" | "only-corrupt" };
+
+// Pick the session `--continue` should resume from an already most-recent-first
+// summary list (collectSessionSummaries guarantees the ordering). A session
+// matches when its declared workspace collapses to the same canonical workspace
+// identity as the current one (symlink aliases and linked git worktrees share
+// their parent's identity). Corrupt matches are skipped but remembered: when
+// nothing healthy matches, reporting "only corrupt" is more actionable than
+// "none found". Sessions without workspace metadata never match. `keyOf` is
+// injectable for deterministic tests; it defaults to the folder-trust workspace
+// key.
+export function pickContinueSession(
+  summaries: readonly SessionSummary[],
+  currentKey: string,
+  keyOf: (workspacePath: string) => string = workspaceTrustKey,
+): ContinuePickResult {
+  let corruptMatch = false;
+  for (const s of summaries) {
+    if (!s.workspace) continue;
+    let key: string;
+    try {
+      key = keyOf(s.workspace);
+    } catch {
+      continue;
+    }
+    if (key !== currentKey) continue;
+    if (s.corrupt) {
+      corruptMatch = true;
+      continue;
+    }
+    return {
+      ok: true,
+      sessionId: s.id,
+      ...(s.workspace ? { workspace: s.workspace } : {}),
+      ...(s.model ? { model: s.model } : {}),
+    };
+  }
+  return corruptMatch ? { ok: false, reason: "only-corrupt" } : { ok: false, reason: "no-session" };
 }
 
 export function formatSessionList(summaries: SessionSummary[]): string {
