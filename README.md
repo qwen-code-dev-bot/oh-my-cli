@@ -245,6 +245,13 @@ under **View → Zoom In / Zoom Out / Actual Size**.
 oh-my-cli --resume <session-id>
 ```
 
+`--resume` also accepts a user-owned session name: if no session exists under
+the exact id, the value resolves as the name set with `--rename-session`
+(e.g. `oh-my-cli --resume "auth refactor"`). An exact id always wins; a name
+shared by several sessions fails closed listing their short ids, and corrupt
+or unknown values fail closed with an actionable reason — it never resumes a
+different session.
+
 Prefer one step? `oh-my-cli --continue` resumes the most recent healthy
 session declared for the current workspace — no id needed (workspace aliases
 and linked worktrees match the same sessions). With no matching session it

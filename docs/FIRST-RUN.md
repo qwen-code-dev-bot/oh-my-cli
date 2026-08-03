@@ -125,7 +125,10 @@ oh-my-cli -p "Summarize README.md" --output json
   ```
 
   Resume one (non-interactively) by id: `oh-my-cli --resume <session-id> -p
-  "Continue our conversation"`. To continue the most recent session for the
+  "Continue our conversation"`. `--resume` also accepts a user-owned session
+  name set with `--rename-session` (e.g. `oh-my-cli --resume "auth refactor"`);
+  an exact id wins, and ambiguous, corrupt, or unknown values fail closed. To
+  continue the most recent session for the
   current workspace without looking up an id, use `oh-my-cli --continue` (it
   fails closed when the workspace has no resumable session and never resumes
   another workspace's session). Or browse and pick one interactively with
