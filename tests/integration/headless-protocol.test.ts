@@ -203,6 +203,48 @@ describe("Integration: headless JSON protocol", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("invalid output format");
   });
+
+  it("emits per-chunk assistant_delta records with --include-partial-messages (#538)", async () => {
+    server.setResponses([{ type: "text", content: "Hello" }]);
+    const r = await runCli(
+      ["-p", "stream me", "--output", "json", "--include-partial-messages", "--workspace", tmpDir],
+      baseEnv,
+    );
+    expect(r.code).toBe(0);
+    const recs = parseHeadlessStream(r.stdout);
+
+    // The fake provider streams one char per chunk: one delta record each,
+    // all before the turn's aggregated record, in arrival order.
+    const deltas = recs.filter((x) => x.type === "assistant_delta");
+    expect(deltas.length).toBe("Hello".length);
+    expect(deltas.every((d) => d.type === "assistant_delta" && d.round === 0)).toBe(true);
+    expect(deltas.map((d) => (d.type === "assistant_delta" ? d.delta : ""))).toEqual(
+      "Hello".split(""),
+    );
+    const aggregatedAt = recs.findIndex((x) => x.type === "assistant");
+    const lastDeltaAt = recs.map((x) => x.type).lastIndexOf("assistant_delta");
+    expect(lastDeltaAt).toBeLessThan(aggregatedAt);
+
+    // The aggregated record is unchanged and the run completes normally.
+    const aggregated = recs[aggregatedAt];
+    if (aggregated.type !== "assistant") throw new Error("unreachable");
+    expect(aggregated.text).toContain("Hello");
+    expect(aggregated.final).toBe(true);
+    const term = terminalRecord(recs);
+    expect(term?.ok).toBe(true);
+  });
+
+  it("emits no assistant_delta records without the flag (default unchanged)", async () => {
+    server.setResponses([{ type: "text", content: "Hello" }]);
+    const r = await runCli(
+      ["-p", "stream me", "--output", "json", "--workspace", tmpDir],
+      baseEnv,
+    );
+    expect(r.code).toBe(0);
+    const recs = parseHeadlessStream(r.stdout);
+    expect(recs.some((x) => x.type === "assistant_delta")).toBe(false);
+    expect(recs.some((x) => x.type === "assistant")).toBe(true);
+  });
 });
 
 describe("Integration: headless JSON protocol process failure", () => {
