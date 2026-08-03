@@ -518,6 +518,10 @@ program
     "Output format for -p mode: text (default) or json (versioned NDJSON event stream)",
     "text",
   )
+  .option(
+    "--include-partial-messages",
+    "With --output json, emit per-chunk assistant_delta records for real-time monitoring (the default stays turn-aggregated)",
+  )
   .option("--no-color", "Disable ANSI color output (also honors the NO_COLOR env var)")
   .option("--summary", "Print a privacy-safe execution summary for the run (unattended use)")
   .option(
@@ -2659,7 +2663,9 @@ program
           // terminal record if the run fails with an uncaught asynchronous error.
           activeHeadlessWriter = writer;
           maybeInjectFault();
-          const sink = createHeadlessSink(writer);
+          const sink = createHeadlessSink(writer, {
+            includePartialMessages: Boolean(opts.includePartialMessages),
+          });
           const startedAt = Date.now();
           const turnImages = new TurnImageCollector();
           const bottleneck = opts.bottleneck ? createBottleneckCollector() : null;

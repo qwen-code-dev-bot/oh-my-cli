@@ -19,6 +19,9 @@ export const HEADLESS_VERSION = 1;
 const MAX_TEXT = 32_768;
 const MAX_TOOL_CONTENT = 8_192;
 const MAX_NAME = 256;
+// Per-chunk assistant deltas are small; bound them defensively so a malformed
+// oversized chunk can never bloat the stream.
+const MAX_DELTA = 4_096;
 
 export type HeadlessEvent =
   | { type: "start"; sessionId: string; model: string; prompt: string }
@@ -26,6 +29,11 @@ export type HeadlessEvent =
   // text (#243): the partial text is preserved and emitted before the terminal
   // failure record, and is never a completed final answer. False for normal turns.
   | { type: "assistant"; round: number; final: boolean; interrupted: boolean; text: string; truncated: boolean }
+  // Opt-in (`--include-partial-messages`, Issue #538): one record per provider
+  // text chunk for real-time monitoring, redacted and bounded like all content
+  // in this protocol. Purely additive — the per-turn aggregated `assistant`
+  // record is still emitted, and without the flag no deltas appear at all.
+  | { type: "assistant_delta"; round: number; delta: string; truncated: boolean }
   | { type: "tool_start"; round: number; id: string; name: string }
   | {
       type: "tool_result";
@@ -162,20 +170,37 @@ export class HeadlessWriter {
 
 // Renders the agent loop's lifecycle as headless records. Assistant text is
 // aggregated per turn (one record per turn) rather than emitted per token, which
-// keeps the stream compact and schema-stable for CI consumers.
-export function createHeadlessSink(writer: HeadlessWriter): AgentSink {
+// keeps the stream compact and schema-stable for CI consumers. With
+// `includePartialMessages` (#538), per-chunk `assistant_delta` records are
+// additionally emitted for real-time monitoring — the aggregated record and all
+// other behavior are unchanged, so the default stream stays byte-identical.
+export interface HeadlessSinkOptions {
+  includePartialMessages?: boolean;
+}
+
+export function createHeadlessSink(
+  writer: HeadlessWriter,
+  opts: HeadlessSinkOptions = {},
+): AgentSink {
+  // Deltas for round N arrive before that round's aggregated `assistant`
+  // record, so track the round the next chunk belongs to: it starts at 0 and
+  // advances each time a turn reports.
+  let pendingRound = 0;
   return {
-    assistantDelta: () => {
-      /* aggregated and emitted once per turn via assistantTurn */
+    assistantDelta: (delta) => {
+      if (!opts.includePartialMessages) return;
+      const s = safeText(delta, MAX_DELTA);
+      writer.emit({ type: "assistant_delta", round: pendingRound, delta: s.text, truncated: s.truncated });
     },
-    assistantTurn: (text, round, opts) => {
+    assistantTurn: (text, round, o) => {
+      pendingRound = round + 1;
       if (!text) return;
       const s = safeText(text, MAX_TEXT);
       writer.emit({
         type: "assistant",
         round,
-        final: opts.final,
-        interrupted: opts.interrupted === true,
+        final: o.final,
+        interrupted: o.interrupted === true,
         text: s.text,
         truncated: s.truncated,
       });

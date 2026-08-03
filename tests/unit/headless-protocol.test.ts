@@ -174,6 +174,71 @@ describe("createHeadlessSink: schema for every event", () => {
     expect(out.records().length).toBe(0);
   });
 
+  describe("opt-in partial messages (Issue #538)", () => {
+    it("emits one assistant_delta record per chunk when enabled", () => {
+      const out = new FakeOut();
+      const sink = createHeadlessSink(new HeadlessWriter(out), {
+        includePartialMessages: true,
+      });
+      sink.assistantDelta("hel");
+      sink.assistantDelta("lo");
+      sink.assistantTurn("hello", 0, { final: true });
+
+      const recs = out.records();
+      const deltas = recs.filter((r) => r.type === "assistant_delta");
+      expect(deltas).toHaveLength(2);
+      if (deltas[0].type !== "assistant_delta") throw new Error("unreachable");
+      expect(deltas[0].delta).toBe("hel");
+      expect(deltas[0].round).toBe(0);
+      expect(deltas[0].truncated).toBe(false);
+      // Deltas arrive before the turn's aggregated record, which is unchanged.
+      const types = recs.map((r) => r.type);
+      expect(types).toEqual(["assistant_delta", "assistant_delta", "assistant"]);
+      const aggregated = recs[2];
+      if (aggregated.type !== "assistant") throw new Error("unreachable");
+      expect(aggregated.text).toBe("hello");
+      expect(aggregated.final).toBe(true);
+    });
+
+    it("tracks the round across turns", () => {
+      const out = new FakeOut();
+      const sink = createHeadlessSink(new HeadlessWriter(out), {
+        includePartialMessages: true,
+      });
+      sink.assistantDelta("a");
+      sink.assistantTurn("a", 0, { final: false });
+      sink.assistantDelta("b");
+      sink.assistantTurn("b", 1, { final: true });
+      const deltas = out.records().filter((r) => r.type === "assistant_delta");
+      expect(deltas.map((d) => (d.type === "assistant_delta" ? d.round : -1))).toEqual([0, 1]);
+    });
+
+    it("stays silent without the flag (default byte-identical)", () => {
+      const out = new FakeOut();
+      const sink = createHeadlessSink(new HeadlessWriter(out));
+      sink.assistantDelta("x");
+      sink.assistantTurn("x", 0, { final: true });
+      expect(out.records().map((r) => r.type)).toEqual(["assistant"]);
+    });
+
+    it("redacts secrets and truncates oversized deltas", () => {
+      const out = new FakeOut();
+      const sink = createHeadlessSink(new HeadlessWriter(out), {
+        includePartialMessages: true,
+      });
+      sink.assistantDelta(`key ${SECRET}`);
+      sink.assistantDelta("z".repeat(10_000));
+      const [secretRec, bigRec] = out.records();
+      if (secretRec.type !== "assistant_delta" || bigRec.type !== "assistant_delta") {
+        throw new Error("unreachable");
+      }
+      expect(JSON.stringify(secretRec)).not.toContain(SECRET);
+      expect(secretRec.delta).toContain("[REDACTED]");
+      expect(bigRec.truncated).toBe(true);
+      expect(bigRec.delta.length).toBe(4_096);
+    });
+  });
+
   it("emits a usage record with cumulative tokens, cost, and budget state", () => {
     const out = new FakeOut();
     const sink = createHeadlessSink(new HeadlessWriter(out));
