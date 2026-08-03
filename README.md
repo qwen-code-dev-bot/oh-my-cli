@@ -192,6 +192,15 @@ loopback port with `--web-port <port>`. Open `/remote-control` or
 Use demo and do not expose credentials, settings, workspace paths, or a general
 file server.
 
+### Desktop shell
+
+The native Desktop shell (Electron) zooms layout-independently: **Ctrl/Cmd
+with the plus key** zooms in, **Ctrl/Cmd with the minus key** zooms out, and
+**Ctrl/Cmd+0** resets to 100% — the chords work whether or not your keyboard
+layout needs Shift to type "+" or "-" (the numpad add/subtract keys work
+too), and zoom is bounded between 50% and 200%. The same actions are available
+under **View → Zoom In / Zoom Out / Actual Size**.
+
 ### Resume a session
 
 ```bash
