@@ -1,5 +1,10 @@
 export const DESKTOP_CHANNELS = Object.freeze({
   getBootstrapState: "desktop:get-bootstrap-state",
+  getWorkspaceStatus: "desktop:get-workspace-status",
+  listRecents: "desktop:list-recents",
+  forgetWorkspace: "desktop:forget-workspace",
+  openWorkspaceDialog: "desktop:open-workspace-dialog",
+  switchWorkspace: "desktop:switch-workspace",
   listSessions: "desktop:list-sessions",
   createSession: "desktop:create-session",
   loadSession: "desktop:load-session",
@@ -26,6 +31,7 @@ export const DESKTOP_CHANNELS = Object.freeze({
   readWorkspaceFile: "desktop:read-workspace-file",
   writeWorkspaceFile: "desktop:write-workspace-file",
   agentEvent: "desktop:agent-event",
+  workspaceSwitched: "desktop:workspace-switched",
 });
 
 export type DesktopChannel =
@@ -35,6 +41,29 @@ export interface DesktopBootstrapState {
   platform: NodeJS.Platform;
   version: string;
   workspaceName: string;
+}
+
+/** One recent workspace entry (#491). Paths are canonical (realpath). */
+export interface DesktopRecentWorkspace {
+  path: string;
+  name: string;
+  lastOpenedAt: number;
+}
+
+export interface DesktopWorkspaceGitStatus {
+  branch: string;
+  head: string;
+  dirtyCount: number;
+}
+
+/**
+ * Active-workspace posture for the workbench (#491): canonical path, display
+ * name, and honest Git state (null when the workspace is not a repository).
+ */
+export interface DesktopWorkspaceStatus {
+  path: string;
+  name: string;
+  git: DesktopWorkspaceGitStatus | null;
 }
 
 export interface DesktopSessionSummary {
@@ -107,6 +136,8 @@ export interface DesktopUiState {
   sessions: Record<string, DesktopSessionUiEntry>;
   editorTabs?: DesktopEditorTabState[];
   activeEditorTab?: string | null;
+  /** Persisted primary view so reload restores the layout (#491). */
+  activeView?: string | null;
 }
 
 export interface DesktopSaveUiStateRequest {
@@ -114,6 +145,7 @@ export interface DesktopSaveUiStateRequest {
   sessions?: Record<string, DesktopSessionUiEntry>;
   editorTabs?: DesktopEditorTabState[];
   activeEditorTab?: string | null;
+  activeView?: string | null;
 }
 
 export interface DesktopWorkspaceFile {
@@ -176,7 +208,8 @@ export type DesktopAgentEvent =
   | { type: "status"; sessionId: string; message: string }
   | { type: "error"; sessionId: string; message: string }
   | { type: "cancelled"; sessionId: string }
-  | { type: "complete"; sessionId: string; ok: boolean };
+  | { type: "complete"; sessionId: string; ok: boolean }
+  | { type: "workspace-switched"; path: string; name: string };
 
 export interface DesktopSendMessageRequest {
   sessionId: string;
@@ -220,6 +253,11 @@ export interface DesktopWriteFileRequest {
 
 export interface DesktopBridge {
   getBootstrapState(): Promise<DesktopBootstrapState>;
+  getWorkspaceStatus(): Promise<DesktopWorkspaceStatus>;
+  listRecents(): Promise<DesktopRecentWorkspace[]>;
+  forgetWorkspace(path: string): Promise<DesktopRecentWorkspace[]>;
+  openWorkspaceDialog(): Promise<DesktopWorkspaceStatus | null>;
+  switchWorkspace(path: string): Promise<DesktopWorkspaceStatus>;
   listSessions(): Promise<DesktopSessionSummary[]>;
   createSession(): Promise<DesktopSession>;
   loadSession(sessionId: string): Promise<DesktopSession>;
@@ -278,6 +316,28 @@ export function createDesktopBridge(
       invoke(
         DESKTOP_CHANNELS.getBootstrapState,
       ) as Promise<DesktopBootstrapState>,
+    getWorkspaceStatus: () =>
+      invoke(
+        DESKTOP_CHANNELS.getWorkspaceStatus,
+      ) as Promise<DesktopWorkspaceStatus>,
+    listRecents: () =>
+      invoke(DESKTOP_CHANNELS.listRecents) as Promise<
+        DesktopRecentWorkspace[]
+      >,
+    forgetWorkspace: (workspacePath: string) =>
+      invoke(
+        DESKTOP_CHANNELS.forgetWorkspace,
+        workspacePath,
+      ) as Promise<DesktopRecentWorkspace[]>,
+    openWorkspaceDialog: () =>
+      invoke(DESKTOP_CHANNELS.openWorkspaceDialog) as Promise<
+        DesktopWorkspaceStatus | null
+      >,
+    switchWorkspace: (workspacePath: string) =>
+      invoke(
+        DESKTOP_CHANNELS.switchWorkspace,
+        workspacePath,
+      ) as Promise<DesktopWorkspaceStatus>,
     listSessions: () =>
       invoke(DESKTOP_CHANNELS.listSessions) as Promise<DesktopSessionSummary[]>,
     createSession: () =>

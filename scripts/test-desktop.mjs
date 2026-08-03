@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { app, ipcMain } from "electron";
@@ -67,17 +67,34 @@ execFileSync("git", ["-C", fixtureRoot, "commit", "-q", "-m", "base"], {
 
 let retryCalls = 0;
 
-const service = new DesktopService({
-  workspaceRoot: fixtureRoot,
-  store: new SessionStore(sessionRoot),
-  uiStatePath: path.join(sessionRoot, "desktop-ui.json"),
-  settingsPath,
-  resolveConfig: () => ({
-    apiKey: "test",
-    baseUrl: "https://example.test/v1",
-    model: "qwen3.8-max",
-  }),
-  run: async (prompt, _messages, options) => {
+// A second workspace for the open/switch/recovery flows (#491).
+const secondRoot = await mkdtemp(
+  path.join(os.tmpdir(), "oh-my-cli-desktop-e2e-second-"),
+);
+await writeFile(
+  path.join(secondRoot, "second-notes.md"),
+  "second workspace\n",
+  "utf-8",
+);
+const recentsPath = path.join(sessionRoot, "desktop-recents.json");
+
+function makeE2eService(workspaceRoot) {
+  return new DesktopService({
+    workspaceRoot,
+    store: new SessionStore(sessionRoot),
+    uiStatePath: path.join(sessionRoot, "desktop-ui.json"),
+    settingsPath,
+    recentsPath,
+    resolveConfig: () => ({
+      apiKey: "test",
+      baseUrl: "https://example.test/v1",
+      model: "qwen3.8-max",
+    }),
+    run: e2eRun,
+  });
+}
+
+async function e2eRun(prompt, _messages, options) {
     const appendUser = () => {
       if (options.appendUserMessage !== false)
         options.onMessage({ role: "user", content: prompt });
@@ -189,14 +206,26 @@ const service = new DesktopService({
       estimatedCostUsd: null,
       costKnown: false,
     };
-  },
-});
+}
+
+let service = makeE2eService(fixtureRoot);
+service.markWorkspaceOpened();
 
 ipcMain.handle(DESKTOP_CHANNELS.getBootstrapState, () => ({
   platform: process.platform,
   version: app.getVersion(),
-  workspaceName: "desktop-e2e",
+  workspaceName:
+    service.workspace.root.split(/[\\/]/).filter(Boolean).at(-1) ??
+    "desktop-e2e",
 }));
+ipcMain.handle(DESKTOP_CHANNELS.getWorkspaceStatus, () =>
+  service.getWorkspaceStatus(),
+);
+ipcMain.handle(DESKTOP_CHANNELS.listRecents, () => service.listRecents());
+ipcMain.handle(DESKTOP_CHANNELS.forgetWorkspace, (_event, workspacePath) =>
+  service.forgetWorkspace(workspacePath),
+);
+ipcMain.handle(DESKTOP_CHANNELS.openWorkspaceDialog, async () => null);
 ipcMain.handle(DESKTOP_CHANNELS.listSessions, () => service.listSessions());
 ipcMain.handle(DESKTOP_CHANNELS.createSession, () => service.createSession());
 ipcMain.handle(DESKTOP_CHANNELS.loadSession, (_event, id) =>
@@ -290,6 +319,25 @@ async function run() {
   console.log("Electron Xvfb interaction: app ready");
   const window = await createDesktopWindow();
   console.log("Electron Xvfb interaction: window loaded");
+
+  // Workspace switching needs the window to broadcast the re-bootstrap event
+  // (#491), so it is registered here rather than at module scope.
+  ipcMain.handle(DESKTOP_CHANNELS.switchWorkspace, (_event, requested) => {
+    const canonical = service.canonicalWorkspacePath(requested);
+    if (canonical === service.workspace.root) {
+      return service.getWorkspaceStatus();
+    }
+    service = makeE2eService(canonical);
+    service.markWorkspaceOpened();
+    const status = service.getWorkspaceStatus();
+    window.webContents.send(DESKTOP_CHANNELS.agentEvent, {
+      type: "workspace-switched",
+      path: status.path,
+      name: status.name,
+    });
+    return status;
+  });
+
   await waitFor(
     window,
     `document.querySelector('[data-workbench-state="ready"]')`,
@@ -830,6 +878,80 @@ async function run() {
     `document.querySelector('[aria-label="File content"]')?.value === 'after\\n'`,
   );
 
+  // --- Workspace entry and recovery (#491) ---
+  const secondReal = await realpath(secondRoot);
+  const secondName = path.basename(secondReal);
+
+  // Posture: the fixture repo reports its branch and dirty truth.
+  await waitFor(
+    window,
+    `document.querySelector('[data-workspace-current="true"]')?.textContent.includes('main') && document.querySelector('[data-workspace-current="true"]')?.textContent.includes('changed')`,
+  );
+
+  // Switch to the second workspace: no session or file crosses the boundary.
+  await window.webContents.executeJavaScript(
+    `window.ohMyCliDesktop.switchWorkspace(${JSON.stringify(secondReal)})`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-workbench-state="ready"]') && document.querySelector('[data-workspace-current="true"]')?.textContent.includes(${JSON.stringify(secondName)})`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('.session-list')?.textContent.includes('No sessions yet')`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-file-path="second-notes.md"]') && !document.querySelector('[data-file-path="demo.txt"]')`,
+  );
+  // The original workspace is offered as a recent.
+  await waitFor(
+    window,
+    `document.querySelector('[data-recent-path]') !== null`,
+  );
+
+  // Restart recovery: a reload stays on the second workspace.
+  window.webContents.reload();
+  await new Promise((resolve) =>
+    window.webContents.once("did-finish-load", resolve),
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-workbench-state="ready"]') && document.querySelector('[data-workspace-current="true"]')?.textContent.includes(${JSON.stringify(secondName)}) && document.querySelector('[data-file-path="second-notes.md"]')`,
+  );
+
+  // Switch back through the recents list; the original sessions return.
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-recent-path]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-workbench-state="ready"]') && document.querySelectorAll('[data-session-id]').length === 2`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('.workspace-bar strong')?.textContent === 'Renamed draft'`,
+  );
+
+  // Forgetting removes the recents entry.
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-forget-workspace]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `!document.querySelector('[data-forget-workspace]')`,
+  );
+
+  // Stale paths fail closed without moving the boundary.
+  const staleError = await window.webContents.executeJavaScript(
+    `window.ohMyCliDesktop.switchWorkspace('/nonexistent-workspace-404').then(() => 'no-error').catch((e) => e.message)`,
+  );
+  assert.match(staleError, /Workspace not found/);
+  await waitFor(
+    window,
+    `document.querySelector('[data-workspace-current="true"]')?.textContent.includes('main')`,
+  );
+
   const result = await window.webContents.executeJavaScript(`(() => ({
     state: document.querySelector('[data-workbench-state]')?.dataset.workbenchState,
     projects: Boolean(document.querySelector('[aria-label="Projects and sessions"]')),
@@ -876,6 +998,7 @@ async function run() {
   console.log("Electron Xvfb interaction: PASS");
   await rm(fixtureRoot, { recursive: true, force: true });
   await rm(sessionRoot, { recursive: true, force: true });
+  await rm(secondRoot, { recursive: true, force: true });
   app.quit();
 }
 
@@ -883,6 +1006,7 @@ function fail(error) {
   console.error(error);
   void rm(fixtureRoot, { recursive: true, force: true });
   void rm(sessionRoot, { recursive: true, force: true });
+  void rm(secondRoot, { recursive: true, force: true });
   app.exit(1);
 }
 

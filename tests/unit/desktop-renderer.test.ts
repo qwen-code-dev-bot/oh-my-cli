@@ -649,6 +649,70 @@ describe("desktop workbench renderer", () => {
     expect(html).toContain('data-action="file-delete-cancel"');
   });
 
+  it("renders workspace posture, recents, and the open-folder journey", () => {
+    let state = readyWith({ sessions: [] });
+    state = reduceDesktopState(state, {
+      type: "set-workspace-status",
+      status: {
+        path: "/repos/demo",
+        name: "demo",
+        git: { branch: "main", head: "abc1234", dirtyCount: 2 },
+      },
+    });
+    state = reduceDesktopState(state, {
+      type: "set-recents",
+      recents: [
+        { path: "/repos/demo", name: "demo", lastOpenedAt: 2 },
+        { path: "/repos/other", name: "other", lastOpenedAt: 1 },
+      ],
+    });
+    const html = renderDesktopWorkbench(createDesktopViewModel(state));
+    // Rail: current workspace with honest git posture, recents without the
+    // current one, and the open-folder affordance.
+    expect(html).toContain('data-workspace-current="true"');
+    expect(html).toContain("main · 2 changed");
+    expect(html).toContain('data-recent-path="/repos/other"');
+    expect(html).toContain('data-forget-workspace="/repos/other"');
+    expect(html).not.toContain('data-recent-path="/repos/demo"');
+    expect(html).toContain('data-action="open-workspace"');
+    // Workbench repo line shows branch/head/dirty truth.
+    expect(html).toContain("main @ abc1234 · 2 changed");
+    // First-run empty state offers exactly the safe next actions.
+    expect(html).toContain('data-action="new-session"');
+    expect(html).toContain("Open folder…");
+
+    const clean = reduceDesktopState(state, {
+      type: "set-workspace-status",
+      status: { path: "/repos/demo", name: "demo", git: { branch: "main", head: "abc1234", dirtyCount: 0 } },
+    });
+    expect(
+      renderDesktopWorkbench(createDesktopViewModel(clean)),
+    ).toContain("main @ abc1234 · clean");
+
+    const plain = reduceDesktopState(state, {
+      type: "set-workspace-status",
+      status: { path: "/plain", name: "plain", git: null },
+    });
+    const plainHtml = renderDesktopWorkbench(createDesktopViewModel(plain));
+    expect(plainHtml).toContain("no git repository");
+    expect(plainHtml).toContain("no git");
+  });
+
+  it("ignores session-scoped events after a workspace switch signal", () => {
+    let state = reduceDesktopState(readyWith({}), {
+      type: "select-session",
+      session: { id: "one", title: "Build desktop", messages: [] },
+    });
+    state = reduceDesktopState(state, {
+      type: "agent-event",
+      event: { type: "workspace-switched", path: "/repos/other", name: "other" },
+    });
+    // The state machine itself does not mix workspaces; the active session is
+    // untouched here and entry performs the full re-bootstrap.
+    expect(state.activeSession?.id).toBe("one");
+    expect(state.streamingText).toBe("");
+  });
+
   it("keeps the document locked to local content", () => {
     const html = renderDesktopShell(createDesktopViewModel("ready"));
     expect(html).toContain('meta name="color-scheme" content="light"');

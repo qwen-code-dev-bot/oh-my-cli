@@ -4,12 +4,14 @@ import type {
   DesktopBootstrapState,
   DesktopFileDiff,
   DesktopFileDocument,
+  DesktopRecentWorkspace,
   DesktopRuntimeInfo,
   DesktopSession,
   DesktopSessionSummary,
   DesktopTreeEntry,
   DesktopWorkspaceDiff,
   DesktopWorkspaceFile,
+  DesktopWorkspaceStatus,
 } from "./contracts.js";
 
 export type DesktopWorkbenchState = "empty" | "loading" | "ready" | "error";
@@ -49,6 +51,8 @@ export interface DesktopRuntimeState {
   fileDiff?: DesktopFileDiff;
   confirmFileDelete?: string;
   fileDialog?: DesktopFileDialog;
+  workspaceStatus: DesktopWorkspaceStatus | null;
+  recents: DesktopRecentWorkspace[];
 }
 
 /** One open editor tab (#490). Dirty state is derived from baseline/content. */
@@ -113,6 +117,8 @@ export type DesktopAction =
   | { type: "diff-file-selected"; path: string; fileDiff: DesktopFileDiff }
   | { type: "confirm-file-delete"; path?: string }
   | { type: "file-dialog"; dialog?: DesktopFileDialog }
+  | { type: "set-workspace-status"; status: DesktopWorkspaceStatus }
+  | { type: "set-recents"; recents: DesktopRecentWorkspace[] }
   | { type: "optimistic-user"; content: string }
   | { type: "set-busy"; busy: boolean }
   | { type: "agent-event"; event: DesktopAgentEvent }
@@ -172,6 +178,8 @@ export function createInitialDesktopState(): DesktopRuntimeState {
     fileSearchResults: null,
     diff: null,
     diffOpen: false,
+    workspaceStatus: null,
+    recents: [],
   };
 }
 
@@ -270,6 +278,11 @@ export function reduceDesktopState(
         ? { ...state, busy: true, turnOutcome: "idle", cancelling: false }
         : { ...state, busy: false };
     case "agent-event": {
+      if (action.event.type === "workspace-switched") {
+        // Entry re-bootstraps against the new workspace; the state machine
+        // itself never mixes two workspaces' truth.
+        return state;
+      }
       if (action.event.sessionId !== state.activeSession?.id) return state;
       if (action.event.type === "assistant-delta") {
         return {
@@ -490,6 +503,10 @@ export function reduceDesktopState(
       return { ...state, confirmFileDelete: action.path };
     case "file-dialog":
       return { ...state, fileDialog: action.dialog };
+    case "set-workspace-status":
+      return { ...state, workspaceStatus: action.status };
+    case "set-recents":
+      return { ...state, recents: action.recents };
     case "set-error":
       return { ...state, error: action.message };
   }
@@ -594,7 +611,11 @@ export function renderSessionRail(model: DesktopViewModel): string {
 
 function renderMessages(model: DesktopViewModel): string {
   if (!model.activeSession) {
-    return `<div class="state-card"><span class="state-symbol">＋</span><p class="eyebrow">Local sessions</p><h1>${model.heading}</h1><p>${model.detail}</p><button class="primary-button" type="button" data-action="new-session">New session</button></div>`;
+    const modelHint =
+      model.runtime && !model.runtime.model
+        ? `<p class="first-run-hint">No model is configured yet — the composer shows the runtime state; set a profile or OPENAI_MODEL to start a turn.</p>`
+        : "";
+    return `<div class="state-card"><span class="state-symbol">＋</span><p class="eyebrow">Local sessions</p><h1>${model.heading}</h1><p>${model.detail}</p>${modelHint}<div class="state-actions"><button class="primary-button" type="button" data-action="new-session">New session</button><button class="secondary-button" type="button" data-action="open-workspace">Open folder…</button></div></div>`;
   }
   const messages = model.activeSession.messages
     .map(
@@ -765,6 +786,36 @@ function renderFileDeleteConfirm(model: DesktopViewModel): string {
   return `<div class="dialog-backdrop" data-dialog-backdrop="true"><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="delete-file-title"><div class="dialog-heading"><div><p class="eyebrow">Destructive action</p><h2 id="delete-file-title">Delete “${escapeHtml(model.confirmFileDelete)}”?</h2></div></div><p class="dialog-note">The file is removed from the workspace on disk. This cannot be undone.</p><div class="dialog-actions"><button class="secondary-button" type="button" data-action="file-delete-cancel">Cancel</button><button class="danger-button" type="button" data-action="file-delete-confirm">Delete file</button></div></section></div>`;
 }
 
+function renderWorkspaceRail(model: DesktopViewModel): string {
+  const status = model.workspaceStatus;
+  const name = status?.name ?? model.bootstrap?.workspaceName ?? "Local workspace";
+  const gitSmall = status?.git
+    ? `${escapeHtml(status.git.branch)}${status.git.dirtyCount > 0 ? ` · ${status.git.dirtyCount} changed` : " · clean"}`
+    : "no git";
+  const current = `<button class="rail-item workspace-item" type="button" data-workspace-current="true" title="${escapeHtml(status?.path ?? "")}"><span class="rail-icon">□</span><span>${escapeHtml(name)}</span><small>${gitSmall}</small></button>`;
+  const otherRecents = model.recents.filter(
+    (recent) => recent.path !== status?.path,
+  );
+  const recents = otherRecents.length
+    ? `<div class="section-heading"><p class="section-label">Recents</p></div>${otherRecents
+        .map(
+          (recent) =>
+            `<span class="recent-row"><button class="rail-item recent-item" type="button" data-recent-path="${escapeHtml(recent.path)}" title="${escapeHtml(recent.path)}"><span class="rail-icon">□</span><span>${escapeHtml(recent.name)}</span></button><button class="recent-forget" type="button" data-forget-workspace="${escapeHtml(recent.path)}" aria-label="Forget ${escapeHtml(recent.name)}">×</button></span>`,
+        )
+        .join("")}`
+    : "";
+  return `${current}<div class="section-heading"><p class="section-label">Open</p></div><button class="rail-item open-folder" type="button" data-action="open-workspace"><span class="rail-icon">⌄</span><span>Open folder…</span><small>browse</small></button>${recents}`;
+}
+
+function renderRepoLine(model: DesktopViewModel): string {
+  const status = model.workspaceStatus;
+  if (!status) return "";
+  const text = status.git
+    ? `${status.git.branch} @ ${status.git.head || "HEAD"} · ${status.git.dirtyCount > 0 ? `${status.git.dirtyCount} changed` : "clean"}`
+    : "no git repository";
+  return `<small class="repo-line" data-repo-line="${status.git ? "git" : "plain"}">${escapeHtml(text)}</small>`;
+}
+
 function renderStage(model: DesktopViewModel): string {
   if (model.phase === "loading") {
     return `<div class="state-card is-loading"><span class="spinner" aria-hidden="true"></span><p class="eyebrow">Secure local bridge</p><h1>${model.heading}</h1><p>${model.detail}</p></div>`;
@@ -876,7 +927,7 @@ export function renderDesktopWorkbench(model: DesktopViewModel): string {
   const titleBlock =
     model.renaming && model.activeSession
       ? `<div class="title-edit"><input class="rename-input" type="text" aria-label="Rename session" value="${escapeHtml(model.activeSession.title)}" data-session-id="${escapeHtml(model.activeSession.id)}" spellcheck="false"><small>Enter saves · Esc cancels</small></div>`
-      : `<div><strong>${escapeHtml(model.activeSession?.title ?? "Local agent workbench")}</strong><small>${escapeHtml(sessionStatusLine(model))}</small></div>`;
+      : `<div><strong>${escapeHtml(model.activeSession?.title ?? "Local agent workbench")}</strong><small>${escapeHtml(sessionStatusLine(model))}</small>${renderRepoLine(model)}</div>`;
   const sessionActions = model.activeSession
     ? `<div class="session-actions"><button class="ghost-button" type="button" data-action="rename-session">Rename</button><button class="ghost-button" type="button" data-action="${summary?.archived ? "restore-session" : "archive-session"}">${summary?.archived ? "Restore" : "Archive"}</button><button class="ghost-button is-danger" type="button" aria-label="Delete session" data-action="request-delete-session">Delete</button></div>`
     : "";
@@ -900,7 +951,7 @@ export function renderDesktopWorkbench(model: DesktopViewModel): string {
     <nav class="rail" aria-label="Projects and sessions">
       <div class="brand"><span class="mark">OM</span><span>Oh My CLI</span></div>
       <div class="section-heading"><p class="section-label">Workspace</p></div>
-      <button class="rail-item workspace-item" type="button"><span class="rail-icon">□</span><span>${escapeHtml(model.bootstrap?.workspaceName ?? "Local workspace")}</span><small>local</small></button>
+      ${renderWorkspaceRail(model)}
       <div class="section-heading"><p class="section-label">Sessions</p><button class="new-session" type="button" aria-label="New session" data-action="new-session">＋</button></div>
       <input class="session-search" type="search" aria-label="Search sessions" placeholder="Search sessions" value="${escapeHtml(model.sessionSearch)}"${model.sessions.length > 0 ? "" : " disabled"}>
       <div class="session-list">${renderSessionRail(model)}</div>
@@ -945,6 +996,7 @@ export function renderDesktopShell(model: DesktopViewModel): string {
     .composer-side { display:flex; align-items:center; gap:8px; }.composer-hint { color:#858a96; font-size:9px; }.runtime-chip { padding:3px 7px; border:1px solid #e2e4e9; border-radius:6px; color:#5f6470; background:#f5f6f8; font:9px "SFMono-Regular",Consolas,monospace; }.runtime-chip[data-runtime-chip="degraded"] { color:#9b2727; border-color:#e5b8b8; }.profile-select { max-width:130px; padding:3px 5px; border:1px solid #d8dbe2; border-radius:6px; color:#5f6470; background:white; font-size:9px; }
     .attachment-tray { display:flex; flex-wrap:wrap; gap:6px; padding:0 0 8px; }.attachment-chip { display:inline-flex; align-items:center; gap:6px; max-width:340px; padding:4px 8px; border:1px solid #d5d8df; border-radius:6px; color:#505562; background:#f5f6f8; font-size:9px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.attachment-chip.is-error { color:#9b2727; border-color:#e5b8b8; background:#fff1f1; }.chip-remove { border:0; color:inherit; background:transparent; font-size:10px; padding:0 2px; }
     .attach-list { max-height:260px; overflow:auto; display:flex; flex-direction:column; gap:4px; }.attach-option { padding:8px 10px; border:1px solid #e2e4e9; border-radius:6px; color:#505562; background:white; text-align:left; font:9px "SFMono-Regular",Consolas,monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.attach-option:hover { background:#f1f2f6; }
+    .recent-row { display:flex; align-items:center; gap:2px; }.recent-row .rail-item { flex:1; min-width:0; }.recent-forget { flex:none; border:0; border-radius:5px; color:#9a9eaa; background:transparent; padding:3px 6px; font-size:9px; }.recent-forget:hover { color:#9b2727; background:#f1f2f6; }.open-folder span:nth-child(2) { color:#6257d9; }.repo-line { color:#858a96; }.state-actions { display:flex; gap:8px; justify-content:center; margin-top:4px; }.first-run-hint { margin-top:10px; color:#8a6d1a; font-size:11px; }
     .editor-tabs { display:flex; flex-wrap:wrap; gap:4px; padding:8px 0 0; }.editor-tab { display:inline-flex; align-items:center; gap:2px; border:1px solid #dfe2e8; border-radius:6px 6px 0 0; background:#f5f6f8; font-size:9px; }.editor-tab.active { background:white; border-bottom-color:white; }.editor-tab-name { padding:5px 6px 5px 9px; border:0; background:transparent; color:#505562; font:9px "SFMono-Regular",Consolas,monospace; max-width:170px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.editor-tab.dirty .editor-tab-name { color:#252832; }.editor-tab-close { padding:2px 6px 2px 0; border:0; background:transparent; color:#8a8f9b; font-size:9px; }.editor-tab-close:hover { color:#9b2727; }
     .file-toolbar { display:flex; justify-content:space-between; gap:8px; padding:8px 0 4px; }.file-toolbar-left,.file-toolbar-right { display:flex; align-items:center; gap:4px; }
     .editor-error { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:8px 0 0; padding:8px 10px; border:1px solid #e5b8b8; border-radius:6px; color:#9b2727; background:#fff1f1; font-size:10px; }

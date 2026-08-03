@@ -25,6 +25,7 @@ import type {
   DesktopFileDiff,
   DesktopFileDocument,
   DesktopListDirectoryResult,
+  DesktopRecentWorkspace,
   DesktopRenameFileRequest,
   DesktopRenameSessionRequest,
   DesktopRuntimeInfo,
@@ -36,6 +37,7 @@ import type {
   DesktopUiState,
   DesktopWorkspaceDiff,
   DesktopWorkspaceFile,
+  DesktopWorkspaceStatus,
   DesktopWriteFileRequest,
 } from "./contracts.js";
 
@@ -54,6 +56,8 @@ const MAX_DIFF_UNTRACKED_LINES = 1000;
 const MAX_EDITOR_TABS = 20;
 const MAX_TAB_DRAFT_CHARS = 100_000;
 const MAX_TREE_PATH_CHARS = 512;
+const MAX_RECENT_WORKSPACES = 8;
+const MAX_DIRTY_COUNT = 500;
 // Desktop turns run with file edits pre-approved and shell tools denied until
 // the Desktop grows a native approval surface; it is shown in the composer so
 // the effective boundary is never implicit.
@@ -75,6 +79,26 @@ interface DesktopUiFile {
   selectedProfile?: string | null;
 }
 
+// Recent-workspace registry file (#491): global to the Desktop app, shared by
+// every workspace. Paths are canonical so a moved or symlinked folder never
+// opens twice.
+interface DesktopRecentsFile {
+  version: 1;
+  workspaces: DesktopRecentWorkspace[];
+  lastWorkspacePath: string | null;
+}
+
+// Resolve a workspace root through symlinks so session ownership, recents,
+// and switched services all agree on one canonical identity (#491). Falls
+// back to the raw path when it cannot be resolved.
+function canonicalWorkspaceRoot(requested: string): string {
+  try {
+    return fs.realpathSync(requested);
+  } catch {
+    return requested;
+  }
+}
+
 export interface DesktopServiceOptions {
   workspaceRoot?: string;
   store?: SessionStore;
@@ -82,6 +106,7 @@ export interface DesktopServiceOptions {
   resolveConfig?: () => Config;
   uiStatePath?: string;
   settingsPath?: string;
+  recentsPath?: string;
 }
 
 export class DesktopService {
@@ -91,11 +116,14 @@ export class DesktopService {
   private readonly resolveConfig: () => Config;
   private readonly uiStatePath: string;
   private readonly settingsPath?: string;
+  private readonly recentsPath: string;
   private busySessionId: string | null = null;
   private turnCancelRequested = false;
 
   constructor(opts: DesktopServiceOptions = {}) {
-    this.workspace = new Workspace(opts.workspaceRoot ?? process.cwd());
+    this.workspace = new Workspace(
+      canonicalWorkspaceRoot(opts.workspaceRoot ?? process.cwd()),
+    );
     this.store = opts.store ?? new SessionStore();
     this.run = opts.run ?? runAgent;
     this.resolveConfig =
@@ -108,6 +136,189 @@ export class DesktopService {
         ".oh-my-cli",
         "desktop-ui.json",
       );
+    this.recentsPath =
+      opts.recentsPath ??
+      path.join(
+        process.env.HOME ?? "/root",
+        ".oh-my-cli",
+        "desktop-recents.json",
+      );
+  }
+
+  // --- Workspace entry and recovery (#491) ----------------------------------
+
+  // Resolve a requested workspace folder to its canonical path, fail-closed:
+  // the target must exist, resolve through symlinks, and be a directory.
+  canonicalWorkspacePath(requested: string): string {
+    if (typeof requested !== "string" || !requested.trim()) {
+      throw new Error("A workspace path is required");
+    }
+    let canonical: string;
+    try {
+      canonical = fs.realpathSync(requested);
+    } catch {
+      throw new Error(`Workspace not found: ${requested}`);
+    }
+    if (!fs.statSync(canonical).isDirectory()) {
+      throw new Error(`Not a directory: ${requested}`);
+    }
+    return canonical;
+  }
+
+  // Startup selection: the last valid workspace wins; a stale or missing path
+  // falls back to the default rather than failing the app.
+  static startupWorkspaceRoot(opts: { recentsPath?: string } = {}): string {
+    const recentsPath =
+      opts.recentsPath ??
+      path.join(
+        process.env.HOME ?? "/root",
+        ".oh-my-cli",
+        "desktop-recents.json",
+      );
+    const file = DesktopService.readRecentsFile(recentsPath);
+    const last = file.lastWorkspacePath;
+    if (last) {
+      try {
+        const canonical = fs.realpathSync(last);
+        if (fs.statSync(canonical).isDirectory()) return canonical;
+      } catch {
+        // Stale entry: fall through to the default.
+      }
+    }
+    return process.cwd();
+  }
+
+  getWorkspaceStatus(): DesktopWorkspaceStatus {
+    const name =
+      this.workspace.root.split(/[\\/]/).filter(Boolean).at(-1) ?? "Workspace";
+    const status: DesktopWorkspaceStatus = {
+      path: this.workspace.root,
+      name,
+      git: null,
+    };
+    if (!this.isGitWorkTree()) return status;
+    const branch = this.runGit(["rev-parse", "--abbrev-ref", "HEAD"], 4096);
+    const head = this.runGit(["rev-parse", "--short", "HEAD"], 4096);
+    const porcelain = this.runGit(
+      ["status", "--porcelain"],
+      MAX_DIRTY_COUNT * 512,
+    );
+    const dirtyCount = porcelain.ok
+      ? Math.min(
+          porcelain.stdout.split("\n").filter((l) => l.trim().length >= 4)
+            .length,
+          MAX_DIRTY_COUNT,
+        )
+      : 0;
+    status.git = {
+      branch: branch.ok ? branch.stdout.trim() || "HEAD" : "HEAD",
+      head: head.ok ? head.stdout.trim() : "",
+      dirtyCount,
+    };
+    return status;
+  }
+
+  listRecents(): DesktopRecentWorkspace[] {
+    return this.readRecents().workspaces;
+  }
+
+  // Record a successful open/switch so restarts can recover it. The recorded
+  // path is canonical so symlinked folders never appear twice in recents.
+  markWorkspaceOpened(): void {
+    let canonical = this.workspace.root;
+    try {
+      canonical = fs.realpathSync(canonical);
+    } catch {
+      // Keep the raw root if it cannot be resolved.
+    }
+    const name =
+      canonical.split(/[\\/]/).filter(Boolean).at(-1) ?? "Workspace";
+    const file = this.readRecents();
+    const remaining = file.workspaces.filter((w) => w.path !== canonical);
+    file.workspaces = [
+      { path: canonical, name, lastOpenedAt: Date.now() },
+      ...remaining,
+    ].slice(0, MAX_RECENT_WORKSPACES);
+    file.lastWorkspacePath = canonical;
+    this.writeRecents(file);
+  }
+
+  // Remove an entry from recents; forgetting the last workspace clears the
+  // restart target so the app never resurrects an unwanted folder.
+  forgetWorkspace(requested: string): DesktopRecentWorkspace[] {
+    if (typeof requested !== "string" || !requested.trim()) {
+      throw new Error("A workspace path is required");
+    }
+    let canonical = requested;
+    try {
+      canonical = fs.realpathSync(requested);
+    } catch {
+      // Already deleted: match the raw recorded path instead.
+    }
+    const file = this.readRecents();
+    file.workspaces = file.workspaces.filter(
+      (w) => w.path !== canonical && w.path !== requested,
+    );
+    if (file.lastWorkspacePath === canonical) {
+      file.lastWorkspacePath = file.workspaces[0]?.path ?? null;
+    }
+    this.writeRecents(file);
+    return file.workspaces;
+  }
+
+  private readRecents(): DesktopRecentsFile {
+    return DesktopService.readRecentsFile(this.recentsPath);
+  }
+
+  private static readRecentsFile(recentsPath: string): DesktopRecentsFile {
+    const empty: DesktopRecentsFile = {
+      version: 1,
+      workspaces: [],
+      lastWorkspacePath: null,
+    };
+    let raw: string;
+    try {
+      raw = fs.readFileSync(recentsPath, "utf-8");
+    } catch {
+      return empty;
+    }
+    try {
+      const parsed = JSON.parse(raw) as Partial<DesktopRecentsFile>;
+      if (parsed.version !== 1 || !Array.isArray(parsed.workspaces)) {
+        return empty;
+      }
+      const workspaces = parsed.workspaces
+        .filter(
+          (w): w is DesktopRecentWorkspace =>
+            Boolean(w) &&
+            typeof w === "object" &&
+            typeof (w as DesktopRecentWorkspace).path === "string" &&
+            typeof (w as DesktopRecentWorkspace).name === "string" &&
+            typeof (w as DesktopRecentWorkspace).lastOpenedAt === "number",
+        )
+        .slice(0, MAX_RECENT_WORKSPACES);
+      return {
+        version: 1,
+        workspaces,
+        lastWorkspacePath:
+          typeof parsed.lastWorkspacePath === "string"
+            ? parsed.lastWorkspacePath
+            : null,
+      };
+    } catch {
+      return empty;
+    }
+  }
+
+  private writeRecents(file: DesktopRecentsFile): void {
+    fs.mkdirSync(path.dirname(this.recentsPath), { recursive: true });
+    const temporaryPath = `${this.recentsPath}.oh-my-cli-desktop-${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(temporaryPath, `${JSON.stringify(file)}\n`, "utf-8");
+      fs.renameSync(temporaryPath, this.recentsPath);
+    } finally {
+      fs.rmSync(temporaryPath, { force: true });
+    }
   }
 
   listSessions(): DesktopSessionSummary[] {
@@ -272,6 +483,15 @@ export class DesktopService {
             ? candidate
             : null;
       }
+      if ("activeView" in request) {
+        const candidate = request.activeView;
+        ui.activeView =
+          candidate === "chat" ||
+          candidate === "workflow" ||
+          candidate === "changes"
+            ? candidate
+            : null;
+      }
     });
     return this.getUiState();
   }
@@ -297,7 +517,8 @@ export class DesktopService {
 
   // Validate files dropped into the composer (#489). Dropped paths are
   // absolute; only files inside this workspace are accepted (provenance),
-  // anything outside is rejected per file without touching the rest.
+  // anything outside is rejected per file without touching the rest. Both
+  // sides are canonical so symlinked roots compare honestly.
   attachImageFiles(paths: string[]): DesktopAttachmentReport[] {
     if (!Array.isArray(paths) || paths.length === 0) {
       throw new Error("No attachments provided");
@@ -311,7 +532,13 @@ export class DesktopService {
       if (typeof p !== "string" || !path.isAbsolute(p)) {
         return { path: "", ok: false, error: "Dropped file path is unavailable" };
       }
-      const relative = path.relative(this.workspace.root, p);
+      let incoming = p;
+      try {
+        incoming = fs.realpathSync(p);
+      } catch {
+        // Missing files keep their raw path; the read below reports them.
+      }
+      const relative = path.relative(this.workspace.root, incoming);
       if (relative.startsWith("..") || path.isAbsolute(relative)) {
         return {
           path: path.basename(p),
@@ -446,6 +673,12 @@ export class DesktopService {
       appendUserMessage: true,
       emit,
     });
+  }
+
+  // True while any turn is streaming; workspace switching refuses to run
+  // underneath an in-flight mutation (#491).
+  busyTurnRunning(): boolean {
+    return this.busySessionId !== null;
   }
 
   // Cancel the running turn of a session (#489). Cooperative: the agent loop
@@ -1084,6 +1317,11 @@ export class DesktopService {
       ...(typeof workspace.activeEditorTab === "string"
         ? { activeEditorTab: workspace.activeEditorTab }
         : {}),
+      ...(workspace.activeView === "chat" ||
+      workspace.activeView === "workflow" ||
+      workspace.activeView === "changes"
+        ? { activeView: workspace.activeView }
+        : {}),
     };
   }
 
@@ -1115,6 +1353,7 @@ export class DesktopService {
         editorTabs?.some((tab) => tab.path === ui.activeEditorTab)
           ? ui.activeEditorTab
           : null,
+      ...(ui.activeView ? { activeView: ui.activeView } : {}),
     };
   }
 

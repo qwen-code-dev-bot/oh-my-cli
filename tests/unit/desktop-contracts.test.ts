@@ -8,6 +8,11 @@ describe("desktop preload contract", () => {
   it("freezes the complete allowlist", () => {
     expect(DESKTOP_CHANNELS).toEqual({
       getBootstrapState: "desktop:get-bootstrap-state",
+      getWorkspaceStatus: "desktop:get-workspace-status",
+      listRecents: "desktop:list-recents",
+      forgetWorkspace: "desktop:forget-workspace",
+      openWorkspaceDialog: "desktop:open-workspace-dialog",
+      switchWorkspace: "desktop:switch-workspace",
       listSessions: "desktop:list-sessions",
       createSession: "desktop:create-session",
       loadSession: "desktop:load-session",
@@ -34,6 +39,7 @@ describe("desktop preload contract", () => {
       readWorkspaceFile: "desktop:read-workspace-file",
       writeWorkspaceFile: "desktop:write-workspace-file",
       agentEvent: "desktop:agent-event",
+      workspaceSwitched: "desktop:workspace-switched",
     });
     expect(Object.isFrozen(DESKTOP_CHANNELS)).toBe(true);
   });
@@ -46,6 +52,11 @@ describe("desktop preload contract", () => {
     const bridge = createDesktopBridge(invoke, subscribe, pathForFile);
 
     await bridge.getBootstrapState();
+    await bridge.getWorkspaceStatus();
+    await bridge.listRecents();
+    await bridge.forgetWorkspace("/workspace/a");
+    await bridge.openWorkspaceDialog();
+    await bridge.switchWorkspace("/workspace/b");
     await bridge.listSessions();
     await bridge.createSession();
     await bridge.loadSession("session-id");
@@ -78,6 +89,11 @@ describe("desktop preload contract", () => {
 
     expect(invoke.mock.calls).toEqual([
       [DESKTOP_CHANNELS.getBootstrapState],
+      [DESKTOP_CHANNELS.getWorkspaceStatus],
+      [DESKTOP_CHANNELS.listRecents],
+      [DESKTOP_CHANNELS.forgetWorkspace, "/workspace/a"],
+      [DESKTOP_CHANNELS.openWorkspaceDialog],
+      [DESKTOP_CHANNELS.switchWorkspace, "/workspace/b"],
       [DESKTOP_CHANNELS.listSessions],
       [DESKTOP_CHANNELS.createSession],
       [DESKTOP_CHANNELS.loadSession, "session-id"],
