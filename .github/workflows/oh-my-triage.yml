@@ -1,0 +1,78 @@
+# Simplified triage workflow, adapted from QwenLM/qwen-code's qwen-triage.yml.
+#
+# On issue / PR open, run an LLM agent (via qwen-code-action) that reads the
+# item, classifies it, applies labels, and posts a triage summary comment.
+# Read-mostly: it only writes labels + a comment on the triggering item.
+
+name: 'Oh-My Triage'
+
+on:
+  issues:
+    types: ['opened', 'reopened']
+  pull_request_target:
+    types: ['opened', 'ready_for_review']
+  workflow_dispatch:
+    inputs:
+      number:
+        description: 'Issue or PR number to triage'
+        required: true
+        type: 'number'
+
+permissions:
+  contents: 'read'
+  issues: 'write'
+  pull-requests: 'write'
+
+jobs:
+  triage:
+    name: 'Triage issue / PR'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: 'Resolve target'
+        id: 'target'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+        run: |-
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            NUMBER='${{ github.event.inputs.number }}'
+            # Decide issue vs PR by querying the API.
+            if gh pr view "${NUMBER}" --json number >/dev/null 2>&1; then
+              KIND='pr'
+            else
+              KIND='issue'
+            fi
+          elif [[ "${{ github.event_name }}" == pull_request_target ]]; then
+            NUMBER='${{ github.event.pull_request.number }}'
+            KIND='pr'
+          else
+            NUMBER='${{ github.event.issue.number }}'
+            KIND='issue'
+          fi
+          echo "number=${NUMBER}" >> "${GITHUB_OUTPUT}"
+          echo "kind=${KIND}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Run triage agent'
+        uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
+        with:
+          openai_api_key: '${{ secrets.OPENAI_API_KEY }}'
+          openai_base_url: '${{ secrets.OPENAI_BASE_URL }}'
+          openai_model: '${{ vars.OH_MY_TRIAGE_MODEL || 'qwen-coder-plus-latest' }}'
+          settings: |-
+            {
+              "tools": {
+                "core": ["read_file", "grep_search", "glob", "run_shell_command"]
+              }
+            }
+          prompt: |-
+            Use .qwen/skills/triage/SKILL.md.
+            Repository: ${{ github.repository }}
+            Target: ${{ steps.target.outputs.kind }} #${{ steps.target.outputs.number }}
+            Classify it, apply appropriate labels with `gh`, and post ONE concise
+            triage summary comment. Do not close, merge, or modify any code.
