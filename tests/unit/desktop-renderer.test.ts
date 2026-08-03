@@ -74,14 +74,40 @@ describe("desktop workbench renderer", () => {
     expect(html).toContain('data-fixed-composer="true"');
     expect(html).toContain('aria-label="New session"');
     expect(html).toContain('aria-label="Search sessions"');
+    expect(html).toContain('aria-label="Search workspace files"');
     expect(html).toContain('data-session-id="one"');
-    expect(html).toContain('data-file-path="src/app.ts"');
     expect(html).toContain("Make it work");
     expect(html).toContain("Ready");
     expect(html).toContain('data-action="rename-session"');
     expect(html).toContain('data-action="archive-session"');
     expect(html).toContain('aria-label="Delete session"');
     expect(html).not.toContain('aria-label="Send message" disabled');
+  });
+
+  it("renders the lazy workspace tree with files, dirs, and symlinks", () => {
+    let state = readyWith({});
+    state = reduceDesktopState(state, {
+      type: "tree-dir-loaded",
+      base: ".",
+      entries: [
+        { path: "src", type: "directory" },
+        { path: "README.md", type: "file" },
+        { path: "link", type: "symlink" },
+      ],
+    });
+    let html = renderDesktopWorkbench(createDesktopViewModel(state));
+    expect(html).toContain('data-tree-dir="src"');
+    expect(html).toContain('data-file-path="README.md"');
+    expect(html).toContain("Symlink — not followed");
+    expect(html).not.toContain('data-file-path="src"');
+
+    state = reduceDesktopState(state, {
+      type: "tree-dir-loaded",
+      base: "src",
+      entries: [{ path: "src/app.ts", type: "file" }],
+    });
+    html = renderDesktopWorkbench(createDesktopViewModel(state));
+    expect(html).toContain('data-file-path="src/app.ts"');
   });
 
   it("filters the rail by archive view and search text", () => {
@@ -444,21 +470,183 @@ describe("desktop workbench renderer", () => {
     );
   });
 
-  it("renders an editable file and tracks the dirty state", () => {
+  function doc(path: string, content: string) {
+    return { path, content, bytes: content.length, revision: "rev-" + path };
+  }
+
+  it("opens tabs, tracks dirty state, and applies save/reload/rename/close", () => {
     let state = reduceDesktopState(readyWith({ sessions: [] }), {
-      type: "select-file",
-      file: { path: "src/app.ts", content: "const value = 1;", bytes: 16 },
+      type: "select-view",
+      view: "changes",
     });
     state = reduceDesktopState(state, {
-      type: "file-changed",
+      type: "file-opened",
+      doc: doc("src/app.ts", "const value = 1;"),
+    });
+    state = reduceDesktopState(state, {
+      type: "file-opened",
+      doc: doc("notes.md", "hello"),
+    });
+    state = reduceDesktopState(state, {
+      type: "file-tab-content",
+      path: "src/app.ts",
       content: "const value = 2;",
     });
-    const html = renderDesktopWorkbench(createDesktopViewModel(state));
-
+    state = reduceDesktopState(state, {
+      type: "file-tab-select",
+      path: "src/app.ts",
+    });
+    let html = renderDesktopWorkbench(createDesktopViewModel(state));
     expect(html).toContain('aria-label="File content"');
     expect(html).toContain("const value = 2;");
-    expect(html).toContain("Unsaved");
+    expect(html).toContain("Unsaved changes");
+    expect(html).toContain('data-file-status="dirty"');
+    expect(html).toContain('data-tab-path="src/app.ts"');
+    expect(html).toContain('data-tab-path="notes.md"');
+    expect(html).toContain('data-action="file-new"');
+    expect(html).toContain('data-action="open-diff"');
     expect(html).toContain('data-action="save-file"');
+
+    // Save updates the baseline and clears the dirty flag.
+    state = reduceDesktopState(state, {
+      type: "file-tab-saved",
+      doc: doc("src/app.ts", "const value = 2;"),
+    });
+    html = renderDesktopWorkbench(createDesktopViewModel(state));
+    expect(html).toContain('data-file-status="clean"');
+
+    // Reload from disk overwrites the editor content.
+    state = reduceDesktopState(state, {
+      type: "file-tab-content",
+      path: "src/app.ts",
+      content: "stale edit",
+    });
+    state = reduceDesktopState(state, {
+      type: "file-tab-reloaded",
+      doc: doc("src/app.ts", "const value = 3;"),
+    });
+    html = renderDesktopWorkbench(createDesktopViewModel(state));
+    expect(html).toContain("const value = 3;");
+    expect(html).not.toContain("stale edit");
+
+    // Rename moves the tab and its active selection.
+    state = reduceDesktopState(state, {
+      type: "file-tab-select",
+      path: "src/app.ts",
+    });
+    state = reduceDesktopState(state, {
+      type: "file-tab-renamed",
+      from: "src/app.ts",
+      doc: doc("src/main.ts", "const value = 3;"),
+    });
+    html = renderDesktopWorkbench(createDesktopViewModel(state));
+    expect(html).toContain('data-tab-path="src/main.ts"');
+    expect(html).not.toContain('data-tab-path="src/app.ts"');
+
+    // Close removes the tab and falls back to the previous one.
+    state = reduceDesktopState(state, {
+      type: "file-tab-close",
+      path: "src/main.ts",
+    });
+    expect(state.activeTabPath).toBe("notes.md");
+    html = renderDesktopWorkbench(createDesktopViewModel(state));
+    expect(html).not.toContain('data-tab-path="src/main.ts"');
+
+    // Deleting the underlying file removes its tab.
+    state = reduceDesktopState(state, { type: "file-tab-gone", path: "notes.md" });
+    expect(state.editorTabs).toHaveLength(0);
+    expect(state.activeTabPath).toBeUndefined();
+  });
+
+  it("shows tab errors with a reload affordance", () => {
+    let state = reduceDesktopState(readyWith({ sessions: [] }), {
+      type: "select-view",
+      view: "changes",
+    });
+    state = reduceDesktopState(state, {
+      type: "file-opened",
+      doc: doc("src/app.ts", "a"),
+    });
+    state = reduceDesktopState(state, {
+      type: "file-tab-error",
+      path: "src/app.ts",
+      message: "File changed outside Desktop — reload it before saving",
+    });
+    const html = renderDesktopWorkbench(createDesktopViewModel(state));
+    expect(html).toContain("File changed outside Desktop");
+    expect(html).toContain('data-action="file-reload"');
+  });
+
+  it("renders the diff overlay with changed files and a patch", () => {
+    let state = reduceDesktopState(readyWith({ sessions: [] }), {
+      type: "diff-opened",
+      diff: {
+        git: true,
+        files: [
+          { path: "src/app.ts", status: "M" },
+          { path: "new.md", status: "??" },
+        ],
+        truncated: false,
+      },
+    });
+    let html = renderDesktopWorkbench(createDesktopViewModel(state));
+    expect(html).toContain('data-diff-file-path="src/app.ts"');
+    expect(html).toContain('data-diff-file-path="new.md"');
+    expect(html).toContain('data-action="refresh-diff"');
+
+    state = reduceDesktopState(state, {
+      type: "diff-file-selected",
+      path: "src/app.ts",
+      fileDiff: {
+        path: "src/app.ts",
+        patch: "@@ -1 +1 @@\n-const value = 1;\n+const value = 2;",
+        truncated: false,
+      },
+    });
+    html = renderDesktopWorkbench(createDesktopViewModel(state));
+    expect(html).toContain("diff-add");
+    expect(html).toContain("diff-del");
+    expect(html).toContain("diff-hunk");
+
+    const closed = reduceDesktopState(state, { type: "diff-closed" });
+    expect(
+      renderDesktopWorkbench(createDesktopViewModel(closed)),
+    ).not.toContain('data-diff-file-path');
+
+    const nonGit = reduceDesktopState(readyWith({ sessions: [] }), {
+      type: "diff-opened",
+      diff: { git: false, files: [], truncated: false },
+    });
+    expect(
+      renderDesktopWorkbench(createDesktopViewModel(nonGit)),
+    ).toContain("not a Git repository");
+  });
+
+  it("renders new/rename dialogs and the delete confirmation", () => {
+    const dialogNew = reduceDesktopState(readyWith({ sessions: [] }), {
+      type: "file-dialog",
+      dialog: { kind: "new", value: "" },
+    });
+    expect(
+      renderDesktopWorkbench(createDesktopViewModel(dialogNew)),
+    ).toContain('aria-label="New file path"');
+
+    const dialogRename = reduceDesktopState(readyWith({ sessions: [] }), {
+      type: "file-dialog",
+      dialog: { kind: "rename", path: "a.md", value: "a.md" },
+    });
+    expect(
+      renderDesktopWorkbench(createDesktopViewModel(dialogRename)),
+    ).toContain('aria-label="Rename file path"');
+
+    const confirm = reduceDesktopState(readyWith({ sessions: [] }), {
+      type: "confirm-file-delete",
+      path: "gone.md",
+    });
+    const html = renderDesktopWorkbench(createDesktopViewModel(confirm));
+    expect(html).toContain("gone.md");
+    expect(html).toContain('data-action="file-delete-confirm"');
+    expect(html).toContain('data-action="file-delete-cancel"');
   });
 
   it("keeps the document locked to local content", () => {

@@ -24,6 +24,13 @@ describe("desktop preload contract", () => {
       getUiState: "desktop:get-ui-state",
       saveUiState: "desktop:save-ui-state",
       listWorkspaceFiles: "desktop:list-workspace-files",
+      listWorkspaceDirectory: "desktop:list-workspace-directory",
+      searchWorkspaceFiles: "desktop:search-workspace-files",
+      createWorkspaceFile: "desktop:create-workspace-file",
+      renameWorkspaceFile: "desktop:rename-workspace-file",
+      deleteWorkspaceFile: "desktop:delete-workspace-file",
+      getWorkspaceDiff: "desktop:get-workspace-diff",
+      getWorkspaceFileDiff: "desktop:get-workspace-file-diff",
       readWorkspaceFile: "desktop:read-workspace-file",
       writeWorkspaceFile: "desktop:write-workspace-file",
       agentEvent: "desktop:agent-event",
@@ -55,6 +62,13 @@ describe("desktop preload contract", () => {
     await bridge.getUiState();
     await bridge.saveUiState({ activeSessionId: "session-id" });
     await bridge.listWorkspaceFiles();
+    await bridge.listWorkspaceDirectory("src");
+    await bridge.searchWorkspaceFiles("app");
+    await bridge.createWorkspaceFile("src/new.ts");
+    await bridge.renameWorkspaceFile({ from: "src/a.ts", to: "src/b.ts" });
+    await bridge.deleteWorkspaceFile("src/b.ts");
+    await bridge.getWorkspaceDiff();
+    await bridge.getWorkspaceFileDiff("src/app.ts");
     await bridge.readWorkspaceFile("src/index.ts");
     await bridge.writeWorkspaceFile({ path: "src/index.ts", content: "next" });
     const dropped = { name: "pic.png" } as File;
@@ -89,6 +103,16 @@ describe("desktop preload contract", () => {
       [DESKTOP_CHANNELS.getUiState],
       [DESKTOP_CHANNELS.saveUiState, { activeSessionId: "session-id" }],
       [DESKTOP_CHANNELS.listWorkspaceFiles],
+      [DESKTOP_CHANNELS.listWorkspaceDirectory, "src"],
+      [DESKTOP_CHANNELS.searchWorkspaceFiles, "app"],
+      [DESKTOP_CHANNELS.createWorkspaceFile, "src/new.ts"],
+      [
+        DESKTOP_CHANNELS.renameWorkspaceFile,
+        { from: "src/a.ts", to: "src/b.ts" },
+      ],
+      [DESKTOP_CHANNELS.deleteWorkspaceFile, "src/b.ts"],
+      [DESKTOP_CHANNELS.getWorkspaceDiff],
+      [DESKTOP_CHANNELS.getWorkspaceFileDiff, "src/app.ts"],
       [DESKTOP_CHANNELS.readWorkspaceFile, "src/index.ts"],
       [
         DESKTOP_CHANNELS.writeWorkspaceFile,

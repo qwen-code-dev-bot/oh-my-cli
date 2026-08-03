@@ -16,6 +16,13 @@ export const DESKTOP_CHANNELS = Object.freeze({
   getUiState: "desktop:get-ui-state",
   saveUiState: "desktop:save-ui-state",
   listWorkspaceFiles: "desktop:list-workspace-files",
+  listWorkspaceDirectory: "desktop:list-workspace-directory",
+  searchWorkspaceFiles: "desktop:search-workspace-files",
+  createWorkspaceFile: "desktop:create-workspace-file",
+  renameWorkspaceFile: "desktop:rename-workspace-file",
+  deleteWorkspaceFile: "desktop:delete-workspace-file",
+  getWorkspaceDiff: "desktop:get-workspace-diff",
+  getWorkspaceFileDiff: "desktop:get-workspace-file-diff",
   readWorkspaceFile: "desktop:read-workspace-file",
   writeWorkspaceFile: "desktop:write-workspace-file",
   agentEvent: "desktop:agent-event",
@@ -83,14 +90,30 @@ export interface DesktopSessionUiEntry {
   lastTurnFailed?: boolean;
 }
 
+/**
+ * Persisted editor tab for reload recovery (#490). The baseline content lives
+ * on disk and is re-read on restore; only bounded editor state survives here.
+ */
+export interface DesktopEditorTabState {
+  path: string;
+  scrollTop?: number;
+  dirty?: boolean;
+  /** Unsaved content for dirty tabs, bounded; absent tabs reload from disk. */
+  draft?: string;
+}
+
 export interface DesktopUiState {
   activeSessionId: string | null;
   sessions: Record<string, DesktopSessionUiEntry>;
+  editorTabs?: DesktopEditorTabState[];
+  activeEditorTab?: string | null;
 }
 
 export interface DesktopSaveUiStateRequest {
   activeSessionId?: string | null;
   sessions?: Record<string, DesktopSessionUiEntry>;
+  editorTabs?: DesktopEditorTabState[];
+  activeEditorTab?: string | null;
 }
 
 export interface DesktopWorkspaceFile {
@@ -101,6 +124,49 @@ export interface DesktopFileDocument {
   path: string;
   content: string;
   bytes: number;
+  /**
+   * Content fingerprint at read time (#490). A save carrying the fingerprint
+   * fails closed when the file changed on disk since, so external edits are
+   * never silently overwritten.
+   */
+  revision: string;
+}
+
+/** One entry of the lazy workspace tree (#490). Symlinks are reported but never followed. */
+export interface DesktopTreeEntry {
+  path: string;
+  type: "file" | "directory" | "symlink" | "other";
+}
+
+export interface DesktopListDirectoryResult {
+  base: string;
+  entries: DesktopTreeEntry[];
+  totalEntries: number;
+  truncated: boolean;
+}
+
+export interface DesktopRenameFileRequest {
+  from: string;
+  to: string;
+}
+
+/** One changed file in the Git working tree (#490). */
+export interface DesktopDiffFile {
+  path: string;
+  /** Porcelain status code (M, A, D, R, ?? ...), truthfully passed through. */
+  status: string;
+}
+
+export interface DesktopWorkspaceDiff {
+  git: boolean;
+  files: DesktopDiffFile[];
+  truncated: boolean;
+}
+
+export interface DesktopFileDiff {
+  path: string;
+  patch: string;
+  truncated: boolean;
 }
 
 export type DesktopAgentEvent =
@@ -148,6 +214,8 @@ export interface DesktopRuntimeInfo {
 export interface DesktopWriteFileRequest {
   path: string;
   content: string;
+  /** When present, the save fails closed if the on-disk content moved on. */
+  expectedRevision?: string;
 }
 
 export interface DesktopBridge {
@@ -172,6 +240,15 @@ export interface DesktopBridge {
   getUiState(): Promise<DesktopUiState>;
   saveUiState(request: DesktopSaveUiStateRequest): Promise<DesktopUiState>;
   listWorkspaceFiles(): Promise<DesktopWorkspaceFile[]>;
+  listWorkspaceDirectory(path: string): Promise<DesktopListDirectoryResult>;
+  searchWorkspaceFiles(query: string): Promise<DesktopWorkspaceFile[]>;
+  createWorkspaceFile(path: string): Promise<DesktopFileDocument>;
+  renameWorkspaceFile(
+    request: DesktopRenameFileRequest,
+  ): Promise<DesktopFileDocument>;
+  deleteWorkspaceFile(path: string): Promise<{ ok: boolean }>;
+  getWorkspaceDiff(): Promise<DesktopWorkspaceDiff>;
+  getWorkspaceFileDiff(path: string): Promise<DesktopFileDiff>;
   readWorkspaceFile(path: string): Promise<DesktopFileDocument>;
   writeWorkspaceFile(
     request: DesktopWriteFileRequest,
@@ -258,6 +335,38 @@ export function createDesktopBridge(
       invoke(DESKTOP_CHANNELS.listWorkspaceFiles) as Promise<
         DesktopWorkspaceFile[]
       >,
+    listWorkspaceDirectory: (dirPath: string) =>
+      invoke(
+        DESKTOP_CHANNELS.listWorkspaceDirectory,
+        dirPath,
+      ) as Promise<DesktopListDirectoryResult>,
+    searchWorkspaceFiles: (query: string) =>
+      invoke(
+        DESKTOP_CHANNELS.searchWorkspaceFiles,
+        query,
+      ) as Promise<DesktopWorkspaceFile[]>,
+    createWorkspaceFile: (filePath: string) =>
+      invoke(
+        DESKTOP_CHANNELS.createWorkspaceFile,
+        filePath,
+      ) as Promise<DesktopFileDocument>,
+    renameWorkspaceFile: (request: DesktopRenameFileRequest) =>
+      invoke(
+        DESKTOP_CHANNELS.renameWorkspaceFile,
+        request,
+      ) as Promise<DesktopFileDocument>,
+    deleteWorkspaceFile: (filePath: string) =>
+      invoke(
+        DESKTOP_CHANNELS.deleteWorkspaceFile,
+        filePath,
+      ) as Promise<{ ok: boolean }>,
+    getWorkspaceDiff: () =>
+      invoke(DESKTOP_CHANNELS.getWorkspaceDiff) as Promise<DesktopWorkspaceDiff>,
+    getWorkspaceFileDiff: (filePath: string) =>
+      invoke(
+        DESKTOP_CHANNELS.getWorkspaceFileDiff,
+        filePath,
+      ) as Promise<DesktopFileDiff>,
     readWorkspaceFile: (path: string) =>
       invoke(
         DESKTOP_CHANNELS.readWorkspaceFile,

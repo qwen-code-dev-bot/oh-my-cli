@@ -2,10 +2,13 @@ import type {
   DesktopAgentEvent,
   DesktopAttachmentReport,
   DesktopBootstrapState,
+  DesktopFileDiff,
   DesktopFileDocument,
   DesktopRuntimeInfo,
   DesktopSession,
   DesktopSessionSummary,
+  DesktopTreeEntry,
+  DesktopWorkspaceDiff,
   DesktopWorkspaceFile,
 } from "./contracts.js";
 
@@ -23,8 +26,6 @@ export interface DesktopRuntimeState {
   streamingText: string;
   activity: string[];
   files: DesktopWorkspaceFile[];
-  activeFile?: DesktopFileDocument;
-  fileDirty: boolean;
   notice?: string;
   error?: string;
   sessionSearch: string;
@@ -36,6 +37,38 @@ export interface DesktopRuntimeState {
   attachments: DesktopAttachmentReport[];
   attachPickerOpen: boolean;
   runtime: DesktopRuntimeInfo | null;
+  editorTabs: DesktopEditorTab[];
+  activeTabPath?: string;
+  treeDirs: Record<string, DesktopTreeEntry[]>;
+  expandedDirs: string[];
+  fileSearch: string;
+  fileSearchResults: DesktopWorkspaceFile[] | null;
+  diff: DesktopWorkspaceDiff | null;
+  diffOpen: boolean;
+  activeDiffPath?: string;
+  fileDiff?: DesktopFileDiff;
+  confirmFileDelete?: string;
+  fileDialog?: DesktopFileDialog;
+}
+
+/** One open editor tab (#490). Dirty state is derived from baseline/content. */
+export interface DesktopEditorTab {
+  path: string;
+  baseline: DesktopFileDocument;
+  content: string;
+  scrollTop: number;
+  error?: string;
+}
+
+export interface DesktopFileDialog {
+  kind: "new" | "rename";
+  /** The target path for rename; the parent directory hint for new. */
+  path?: string;
+  value: string;
+}
+
+export function isTabDirty(tab: DesktopEditorTab): boolean {
+  return tab.content !== tab.baseline.content;
 }
 
 export type DesktopTurnOutcome = "idle" | "ok" | "failed" | "cancelled";
@@ -62,12 +95,27 @@ export type DesktopAction =
   | { type: "set-attachments"; attachments: DesktopAttachmentReport[] }
   | { type: "attach-picker"; open: boolean }
   | { type: "set-runtime"; runtime: DesktopRuntimeInfo | null }
+  | { type: "file-opened"; doc: DesktopFileDocument }
+  | { type: "file-tab-select"; path: string }
+  | { type: "file-tab-close"; path: string }
+  | { type: "file-tab-content"; path: string; content: string }
+  | { type: "file-tab-scroll"; path: string; scrollTop: number }
+  | { type: "file-tab-saved"; doc: DesktopFileDocument }
+  | { type: "file-tab-reloaded"; doc: DesktopFileDocument }
+  | { type: "file-tab-error"; path: string; message: string }
+  | { type: "file-tab-gone"; path: string }
+  | { type: "file-tab-renamed"; from: string; doc: DesktopFileDocument }
+  | { type: "tree-dir-loaded"; base: string; entries: DesktopTreeEntry[] }
+  | { type: "tree-dir-toggle"; base: string }
+  | { type: "file-search"; query: string; results: DesktopWorkspaceFile[] | null }
+  | { type: "diff-opened"; diff: DesktopWorkspaceDiff }
+  | { type: "diff-closed" }
+  | { type: "diff-file-selected"; path: string; fileDiff: DesktopFileDiff }
+  | { type: "confirm-file-delete"; path?: string }
+  | { type: "file-dialog"; dialog?: DesktopFileDialog }
   | { type: "optimistic-user"; content: string }
   | { type: "set-busy"; busy: boolean }
   | { type: "agent-event"; event: DesktopAgentEvent }
-  | { type: "select-file"; file: DesktopFileDocument }
-  | { type: "file-changed"; content: string }
-  | { type: "file-saved"; file: DesktopFileDocument }
   | { type: "set-error"; message?: string };
 
 export interface DesktopViewModel extends DesktopRuntimeState {
@@ -109,7 +157,6 @@ export function createInitialDesktopState(): DesktopRuntimeState {
     streamingText: "",
     activity: [],
     files: [],
-    fileDirty: false,
     sessionSearch: "",
     showArchived: false,
     renaming: false,
@@ -118,6 +165,13 @@ export function createInitialDesktopState(): DesktopRuntimeState {
     attachments: [],
     attachPickerOpen: false,
     runtime: null,
+    editorTabs: [],
+    treeDirs: {},
+    expandedDirs: [],
+    fileSearch: "",
+    fileSearchResults: null,
+    diff: null,
+    diffOpen: false,
   };
 }
 
@@ -273,29 +327,169 @@ export function reduceDesktopState(
             : "failed",
       };
     }
-    case "select-file":
+    case "file-opened": {
+      const existing = state.editorTabs.find(
+        (tab) => tab.path === action.doc.path,
+      );
+      if (existing) {
+        return { ...state, activeTabPath: action.doc.path, activeView: "changes" };
+      }
+      if (state.editorTabs.length >= 12) {
+        return { ...state, error: "Too many open tabs — close one first" };
+      }
+      const tab: DesktopEditorTab = {
+        path: action.doc.path,
+        baseline: action.doc,
+        content: action.doc.content,
+        scrollTop: 0,
+      };
       return {
         ...state,
-        activeFile: action.file,
+        editorTabs: [...state.editorTabs, tab],
+        activeTabPath: action.doc.path,
         activeView: "changes",
-        fileDirty: false,
         error: undefined,
       };
-    case "file-changed":
-      return state.activeFile
-        ? {
-            ...state,
-            activeFile: { ...state.activeFile, content: action.content },
-            fileDirty: true,
-          }
+    }
+    case "file-tab-select":
+      return state.editorTabs.some((tab) => tab.path === action.path)
+        ? { ...state, activeTabPath: action.path }
         : state;
-    case "file-saved":
+    case "file-tab-close": {
+      const remaining = state.editorTabs.filter(
+        (tab) => tab.path !== action.path,
+      );
+      const activeTabPath =
+        state.activeTabPath === action.path
+          ? remaining[remaining.length - 1]?.path
+          : state.activeTabPath;
+      return { ...state, editorTabs: remaining, activeTabPath };
+    }
+    case "file-tab-content":
       return {
         ...state,
-        activeFile: action.file,
-        fileDirty: false,
-        notice: `Saved ${action.file.path}`,
+        editorTabs: state.editorTabs.map((tab) =>
+          tab.path === action.path
+            ? { ...tab, content: action.content }
+            : tab,
+        ),
       };
+    case "file-tab-scroll":
+      return {
+        ...state,
+        editorTabs: state.editorTabs.map((tab) =>
+          tab.path === action.path ? { ...tab, scrollTop: action.scrollTop } : tab,
+        ),
+      };
+    case "file-tab-saved":
+      return {
+        ...state,
+        editorTabs: state.editorTabs.map((tab) =>
+          tab.path === action.doc.path
+            ? {
+                ...tab,
+                baseline: action.doc,
+                content: action.doc.content,
+                error: undefined,
+              }
+            : tab,
+        ),
+        notice: `Saved ${action.doc.path}`,
+      };
+    case "file-tab-reloaded":
+      return {
+        ...state,
+        editorTabs: state.editorTabs.map((tab) =>
+          tab.path === action.doc.path
+            ? {
+                ...tab,
+                baseline: action.doc,
+                content: action.doc.content,
+                error: undefined,
+              }
+            : tab,
+        ),
+        notice: `Reloaded ${action.doc.path}`,
+      };
+    case "file-tab-error":
+      return {
+        ...state,
+        editorTabs: state.editorTabs.map((tab) =>
+          tab.path === action.path ? { ...tab, error: action.message } : tab,
+        ),
+      };
+    case "file-tab-gone": {
+      const remaining = state.editorTabs.filter(
+        (tab) => tab.path !== action.path,
+      );
+      const activeTabPath =
+        state.activeTabPath === action.path
+          ? remaining[remaining.length - 1]?.path
+          : state.activeTabPath;
+      return { ...state, editorTabs: remaining, activeTabPath };
+    }
+    case "file-tab-renamed": {
+      return {
+        ...state,
+        editorTabs: state.editorTabs.map((tab) =>
+          tab.path === action.from
+            ? {
+                ...tab,
+                path: action.doc.path,
+                baseline: action.doc,
+                content: action.doc.content,
+                error: undefined,
+              }
+            : tab,
+        ),
+        activeTabPath:
+          state.activeTabPath === action.from
+            ? action.doc.path
+            : state.activeTabPath,
+        notice: `Renamed to ${action.doc.path}`,
+      };
+    }
+    case "tree-dir-loaded":
+      return {
+        ...state,
+        treeDirs: { ...state.treeDirs, [action.base]: action.entries },
+        expandedDirs: state.expandedDirs.includes(action.base)
+          ? state.expandedDirs
+          : [...state.expandedDirs, action.base],
+      };
+    case "tree-dir-toggle":
+      return {
+        ...state,
+        expandedDirs: state.expandedDirs.includes(action.base)
+          ? state.expandedDirs.filter((dir) => dir !== action.base)
+          : [...state.expandedDirs, action.base],
+      };
+    case "file-search":
+      return {
+        ...state,
+        fileSearch: action.query,
+        fileSearchResults: action.results,
+      };
+    case "diff-opened":
+      return {
+        ...state,
+        diff: action.diff,
+        diffOpen: true,
+        activeDiffPath: action.diff.files[0]?.path,
+        fileDiff: undefined,
+      };
+    case "diff-closed":
+      return { ...state, diffOpen: false, fileDiff: undefined };
+    case "diff-file-selected":
+      return {
+        ...state,
+        activeDiffPath: action.path,
+        fileDiff: action.fileDiff,
+      };
+    case "confirm-file-delete":
+      return { ...state, confirmFileDelete: action.path };
+    case "file-dialog":
+      return { ...state, fileDialog: action.dialog };
     case "set-error":
       return { ...state, error: action.message };
   }
@@ -430,11 +624,145 @@ function renderWorkflow(model: DesktopViewModel): string {
   return `<div class="workflow-view"><p class="eyebrow">Live execution</p><h1>Agent activity</h1><ol>${items}</ol></div>`;
 }
 
+function activeTab(model: DesktopViewModel): DesktopEditorTab | undefined {
+  return model.editorTabs.find((tab) => tab.path === model.activeTabPath);
+}
+
+function renderEditorTabs(model: DesktopViewModel): string {
+  if (model.editorTabs.length === 0) return "";
+  return `<div class="editor-tabs" role="tablist" aria-label="Open files">${model.editorTabs
+    .map((tab) => {
+      const name = tab.path.split("/").pop() ?? tab.path;
+      const dirty = isTabDirty(tab);
+      const selected = tab.path === model.activeTabPath;
+      return `<span class="editor-tab ${selected ? "active" : ""} ${dirty ? "dirty" : ""}" role="tab" aria-selected="${selected}"><button class="editor-tab-name" type="button" data-tab-path="${escapeHtml(tab.path)}">${dirty ? "● " : ""}${escapeHtml(name)}</button><button class="editor-tab-close" type="button" data-tab-close="${escapeHtml(tab.path)}" aria-label="Close ${escapeHtml(name)}">×</button></span>`;
+    })
+    .join("")}</div>`;
+}
+
+function renderFileToolbar(model: DesktopViewModel): string {
+  const tab = activeTab(model);
+  const dirty = tab ? isTabDirty(tab) : false;
+  const dirtyCount = model.editorTabs.filter(isTabDirty).length;
+  const changed = model.diff?.files.length ?? 0;
+  return `<div class="file-toolbar"><span class="file-toolbar-left"><button class="ghost-button" type="button" data-action="file-new">New</button><button class="ghost-button" type="button" data-action="file-rename" ${tab ? "" : "disabled"}>Rename</button><button class="ghost-button is-danger" type="button" data-action="file-delete" ${tab ? "" : "disabled"}>Delete</button></span><span class="file-toolbar-right"><button class="ghost-button" type="button" data-action="file-revert" ${tab && dirty ? "" : "disabled"}>Revert</button><button class="ghost-button" type="button" data-action="file-save-all" ${dirtyCount > 0 ? "" : "disabled"}>Save all${dirtyCount > 1 ? ` (${dirtyCount})` : ""}</button><button class="primary-button" type="button" data-action="save-file" ${tab && dirty ? "" : "disabled"}>Save</button><button class="ghost-button" type="button" data-action="open-diff" data-diff-count="${changed}">Review diff${changed > 0 ? ` (${changed})` : ""}</button></span></div>`;
+}
+
 function renderEditor(model: DesktopViewModel): string {
-  if (!model.activeFile) {
-    return `<div class="state-card"><span class="state-symbol">{ }</span><p class="eyebrow">Workspace editor</p><h1>Open a text file</h1><p>Select a file from the right panel. Reads and saves are confined to this workspace.</p></div>`;
+  const tab = activeTab(model);
+  const tabs = renderEditorTabs(model);
+  const toolbar = renderFileToolbar(model);
+  if (!tab) {
+    return `${toolbar}${tabs}<div class="state-card"><span class="state-symbol">{ }</span><p class="eyebrow">Workspace editor</p><h1>Open a text file</h1><p>Select a file from the workspace tree. Reads and saves are confined to this workspace; external changes are detected before any save.</p></div>`;
   }
-  return `<div class="editor"><header><div><p class="eyebrow">Workspace file</p><h1>${escapeHtml(model.activeFile.path)}</h1></div><div class="editor-actions"><span>${model.fileDirty ? "Unsaved" : `${model.activeFile.bytes} bytes`}</span><button class="primary-button" type="button" data-action="save-file" ${model.fileDirty ? "" : "disabled"}>Save</button></div></header><textarea class="code-editor" aria-label="File content" spellcheck="false">${escapeHtml(model.activeFile.content)}</textarea></div>`;
+  const error = tab.error
+    ? `<div class="editor-error" role="alert">${escapeHtml(tab.error)} <button class="secondary-button" type="button" data-action="file-reload">Reload from disk</button></div>`
+    : "";
+  const status = isTabDirty(tab) ? "Unsaved changes" : `${tab.baseline.bytes} bytes · saved`;
+  return `${toolbar}${tabs}<div class="editor"><header><div><p class="eyebrow">Workspace file</p><h1>${escapeHtml(tab.path)}</h1></div><div class="editor-actions"><span data-file-status="${isTabDirty(tab) ? "dirty" : "clean"}">${status}</span></div></header>${error}<textarea class="code-editor" aria-label="File content" spellcheck="false" data-editor-path="${escapeHtml(tab.path)}">${escapeHtml(tab.content)}</textarea></div>`;
+}
+
+function renderTreeEntries(
+  model: DesktopViewModel,
+  entries: DesktopTreeEntry[],
+  depth: number,
+): string {
+  return entries
+    .map((entry) => {
+      const name = entry.path.split("/").pop() ?? entry.path;
+      const indent = `padding-left:${8 + depth * 14}px`;
+      if (entry.type === "directory") {
+        const expanded = model.expandedDirs.includes(entry.path);
+        const children = expanded
+          ? renderTreeEntries(model, model.treeDirs[entry.path] ?? [], depth + 1)
+          : "";
+        return `<button class="tree-item tree-dir" type="button" style="${indent}" data-tree-dir="${escapeHtml(entry.path)}" aria-expanded="${expanded}">${expanded ? "▾" : "▸"} ${escapeHtml(name)}</button>${children}`;
+      }
+      if (entry.type === "symlink") {
+        return `<span class="tree-item tree-link" style="${indent}" title="Symlink — not followed">⇢ ${escapeHtml(name)}</span>`;
+      }
+      if (entry.type !== "file") {
+        return "";
+      }
+      const open = model.editorTabs.some((tab) => tab.path === entry.path);
+      return `<button class="tree-item tree-file ${open ? "open" : ""}" type="button" style="${indent}" data-file-path="${escapeHtml(entry.path)}">⌁ ${escapeHtml(name)}</button>`;
+    })
+    .join("");
+}
+
+function renderFiles(model: DesktopViewModel): string {
+  const search = `<input class="file-search" type="search" aria-label="Search workspace files" placeholder="Search files" value="${escapeHtml(model.fileSearch)}">`;
+  if (model.fileSearchResults !== null) {
+    const results =
+      model.fileSearchResults.length > 0
+        ? model.fileSearchResults
+            .map(
+              (file) =>
+                `<button class="tree-item tree-file" type="button" data-file-path="${escapeHtml(file.path)}">⌁ ${escapeHtml(file.path)}</button>`,
+            )
+            .join("")
+        : `<p class="inspector-empty">No matching files.</p>`;
+    return `${search}${results}`;
+  }
+  const root = model.treeDirs["."];
+  if (!root) {
+    return `${search}<p class="inspector-empty">Loading workspace tree…</p>`;
+  }
+  if (root.length === 0)
+    return `${search}<p class="inspector-empty">No editable files found.</p>`;
+  return `${search}${renderTreeEntries(model, root, 0)}`;
+}
+
+function renderDiffOverlay(model: DesktopViewModel): string {
+  if (!model.diffOpen || !model.diff) return "";
+  if (!model.diff.git) {
+    return `<div class="dialog-backdrop" data-dialog-backdrop="true"><section class="dialog dialog-wide" role="dialog" aria-modal="true" aria-labelledby="diff-title"><div class="dialog-heading"><div><p class="eyebrow">Working tree</p><h2 id="diff-title">Changes</h2></div><button class="icon-button" type="button" aria-label="Close diff view" data-action="close-diff">×</button></div><p class="dialog-note">This workspace is not a Git repository, so there is no working-tree patch to review.</p></section></div>`;
+  }
+  const fileList =
+    model.diff.files.length > 0
+      ? model.diff.files
+          .map(
+            (file) =>
+              `<button class="diff-file ${file.path === model.activeDiffPath ? "active" : ""}" type="button" data-diff-file-path="${escapeHtml(file.path)}"><span class="diff-status">${escapeHtml(file.status)}</span>${escapeHtml(file.path)}</button>`,
+          )
+          .join("")
+      : `<p class="inspector-empty">No working-tree changes.</p>`;
+  const patch = model.fileDiff
+    ? `<pre class="diff-patch" aria-label="Patch for ${escapeHtml(model.fileDiff.path)}">${renderPatch(model.fileDiff.patch)}${model.fileDiff.truncated ? "\n… patch truncated" : ""}</pre>`
+    : `<p class="inspector-empty">Select a changed file to review its patch.</p>`;
+  return `<div class="dialog-backdrop" data-dialog-backdrop="true"><section class="dialog dialog-wide" role="dialog" aria-modal="true" aria-labelledby="diff-title"><div class="dialog-heading"><div><p class="eyebrow">Working tree</p><h2 id="diff-title">Changes${model.diff.truncated ? " (truncated)" : ""}</h2></div><span class="file-toolbar-right"><button class="ghost-button" type="button" data-action="refresh-diff">Refresh</button><button class="icon-button" type="button" aria-label="Close diff view" data-action="close-diff">×</button></span></div><div class="diff-layout"><div class="diff-files">${fileList}</div><div class="diff-detail">${patch}</div></div></section></div>`;
+}
+
+function renderPatch(patch: string): string {
+  return patch
+    .split("\n")
+    .slice(0, 2000)
+    .map((line) => {
+      const cls = line.startsWith("+")
+        ? "diff-add"
+        : line.startsWith("-")
+          ? "diff-del"
+          : line.startsWith("@@")
+            ? "diff-hunk"
+            : "";
+      return `<span class="${cls}">${escapeHtml(line)}</span>`;
+    })
+    .join("\n");
+}
+
+function renderFileDialog(model: DesktopViewModel): string {
+  if (!model.fileDialog) return "";
+  const isNew = model.fileDialog.kind === "new";
+  const label = isNew ? "New file" : "Rename file";
+  const hint = isNew
+    ? "Workspace-relative path, e.g. src/notes.md. The parent directory must exist."
+    : `Current path: ${model.fileDialog.path ?? ""}. Enter the new workspace-relative path.`;
+  return `<div class="dialog-backdrop" data-dialog-backdrop="true"><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="file-dialog-title"><div class="dialog-heading"><div><p class="eyebrow">${label}</p><h2 id="file-dialog-title">${label}</h2></div><button class="icon-button" type="button" aria-label="Cancel ${label}" data-action="file-dialog-cancel">×</button></div><p class="dialog-note">${escapeHtml(hint)}</p><input class="rename-input" type="text" aria-label="${label} path" value="${escapeHtml(model.fileDialog.value)}" spellcheck="false"><div class="dialog-actions"><button class="secondary-button" type="button" data-action="file-dialog-cancel">Cancel</button><button class="primary-button" type="button" data-action="file-dialog-commit">${isNew ? "Create" : "Rename"}</button></div></section></div>`;
+}
+
+function renderFileDeleteConfirm(model: DesktopViewModel): string {
+  if (!model.confirmFileDelete) return "";
+  return `<div class="dialog-backdrop" data-dialog-backdrop="true"><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="delete-file-title"><div class="dialog-heading"><div><p class="eyebrow">Destructive action</p><h2 id="delete-file-title">Delete “${escapeHtml(model.confirmFileDelete)}”?</h2></div></div><p class="dialog-note">The file is removed from the workspace on disk. This cannot be undone.</p><div class="dialog-actions"><button class="secondary-button" type="button" data-action="file-delete-cancel">Cancel</button><button class="danger-button" type="button" data-action="file-delete-confirm">Delete file</button></div></section></div>`;
 }
 
 function renderStage(model: DesktopViewModel): string {
@@ -447,17 +775,6 @@ function renderStage(model: DesktopViewModel): string {
   if (model.activeView === "workflow") return renderWorkflow(model);
   if (model.activeView === "changes") return renderEditor(model);
   return renderMessages(model);
-}
-
-function renderFiles(model: DesktopViewModel): string {
-  if (model.files.length === 0)
-    return `<p class="inspector-empty">No editable files found.</p>`;
-  return model.files
-    .map(
-      (file) =>
-        `<button class="file-item ${file.path === model.activeFile?.path ? "active" : ""}" type="button" data-file-path="${escapeHtml(file.path)}"><span>⌁</span>${escapeHtml(file.path)}</button>`,
-    )
-    .join("");
 }
 
 function renderDiagnostics(model: DesktopViewModel): string {
@@ -597,10 +914,13 @@ export function renderDesktopWorkbench(model: DesktopViewModel): string {
       <div class="composer-wrap" data-fixed-composer="true"><form class="composer" aria-label="Message composer">${attachmentTray}<textarea rows="2" aria-label="Message" placeholder="${model.activeSession ? "Ask Qwen to inspect, explain, or change this workspace" : "Create or select a session to start"}" ${canSend ? "" : "disabled"}></textarea><div class="composer-footer"><span class="composer-side"><button class="ghost-button" type="button" data-action="open-attach-picker" aria-label="Attach image" ${canAttach ? "" : "disabled"}>Attach image</button><span class="composer-hint">⌘K focus · Enter send · Shift+Enter newline</span></span><span class="composer-side">${renderRuntimeControls(model)}${retryControl}${cancelControl}<button class="send" type="submit" aria-label="Send message" ${canSend ? "" : "disabled"}>↵</button></span></div></form></div>
       <footer class="statusbar"><span><i class="connection-dot ${model.phase === "ready" ? "is-ready" : ""}"></i>${model.busy ? "Agent turn running" : "Secure bridge ready"}</span><span>${escapeHtml(platform)} · ${escapeHtml(version)}</span></footer>
     </main>
-    <aside class="inspector" aria-label="Context inspector"><div class="inspector-heading"><span>Workspace files</span><strong>${model.files.length}</strong></div><div class="file-list">${renderFiles(model)}</div><div class="inspector-note"><strong>Safe local editor</strong><p>UTF-8 text only · 1 MiB max · path confined</p></div></aside>
+    <aside class="inspector" aria-label="Context inspector"><div class="inspector-heading"><span>Workspace tree</span><strong>${model.files.length}</strong></div><div class="file-list">${renderFiles(model)}</div><div class="inspector-note"><strong>Safe local editor</strong><p>UTF-8 text only · 1 MiB max · path confined</p></div></aside>
     ${renderDiagnostics(model)}
     ${renderDeleteConfirm(model)}
     ${renderAttachPicker(model)}
+    ${renderDiffOverlay(model)}
+    ${renderFileDialog(model)}
+    ${renderFileDeleteConfirm(model)}
   </div>`;
 }
 
@@ -625,6 +945,11 @@ export function renderDesktopShell(model: DesktopViewModel): string {
     .composer-side { display:flex; align-items:center; gap:8px; }.composer-hint { color:#858a96; font-size:9px; }.runtime-chip { padding:3px 7px; border:1px solid #e2e4e9; border-radius:6px; color:#5f6470; background:#f5f6f8; font:9px "SFMono-Regular",Consolas,monospace; }.runtime-chip[data-runtime-chip="degraded"] { color:#9b2727; border-color:#e5b8b8; }.profile-select { max-width:130px; padding:3px 5px; border:1px solid #d8dbe2; border-radius:6px; color:#5f6470; background:white; font-size:9px; }
     .attachment-tray { display:flex; flex-wrap:wrap; gap:6px; padding:0 0 8px; }.attachment-chip { display:inline-flex; align-items:center; gap:6px; max-width:340px; padding:4px 8px; border:1px solid #d5d8df; border-radius:6px; color:#505562; background:#f5f6f8; font-size:9px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.attachment-chip.is-error { color:#9b2727; border-color:#e5b8b8; background:#fff1f1; }.chip-remove { border:0; color:inherit; background:transparent; font-size:10px; padding:0 2px; }
     .attach-list { max-height:260px; overflow:auto; display:flex; flex-direction:column; gap:4px; }.attach-option { padding:8px 10px; border:1px solid #e2e4e9; border-radius:6px; color:#505562; background:white; text-align:left; font:9px "SFMono-Regular",Consolas,monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.attach-option:hover { background:#f1f2f6; }
+    .editor-tabs { display:flex; flex-wrap:wrap; gap:4px; padding:8px 0 0; }.editor-tab { display:inline-flex; align-items:center; gap:2px; border:1px solid #dfe2e8; border-radius:6px 6px 0 0; background:#f5f6f8; font-size:9px; }.editor-tab.active { background:white; border-bottom-color:white; }.editor-tab-name { padding:5px 6px 5px 9px; border:0; background:transparent; color:#505562; font:9px "SFMono-Regular",Consolas,monospace; max-width:170px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.editor-tab.dirty .editor-tab-name { color:#252832; }.editor-tab-close { padding:2px 6px 2px 0; border:0; background:transparent; color:#8a8f9b; font-size:9px; }.editor-tab-close:hover { color:#9b2727; }
+    .file-toolbar { display:flex; justify-content:space-between; gap:8px; padding:8px 0 4px; }.file-toolbar-left,.file-toolbar-right { display:flex; align-items:center; gap:4px; }
+    .editor-error { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:8px 0 0; padding:8px 10px; border:1px solid #e5b8b8; border-radius:6px; color:#9b2727; background:#fff1f1; font-size:10px; }
+    .tree-item { display:block; width:100%; padding:5px 8px; border:0; border-radius:5px; color:#505562; background:transparent; text-align:left; font:9px "SFMono-Regular",Consolas,monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.tree-item:hover { background:#e6e7ec; }.tree-file.open { color:#252832; font-weight:600; }.tree-link { color:#9a9eaa; }.file-search { width:calc(100% - 8px); margin:4px; padding:6px 9px; border:1px solid #dfe2e8; border-radius:6px; color:#252832; background:white; font-size:10px; outline:0; }.file-search:focus-visible { outline:2px solid #6257d9; outline-offset:2px; }
+    .dialog-wide { width:min(920px, 92vw); max-width:none; }.diff-layout { display:grid; grid-template-columns:240px minmax(0,1fr); gap:12px; min-height:280px; }.diff-files { max-height:420px; overflow:auto; display:flex; flex-direction:column; gap:3px; }.diff-file { display:flex; gap:7px; padding:6px 8px; border:1px solid #e2e4e9; border-radius:6px; color:#505562; background:white; text-align:left; font:9px "SFMono-Regular",Consolas,monospace; overflow:hidden; }.diff-file.active { border-color:#6257d9; background:#f4f2ff; }.diff-status { flex:none; min-width:18px; color:#6257d9; font-weight:700; }.diff-detail { min-width:0; }.diff-patch { margin:0; max-height:420px; overflow:auto; padding:10px; border:1px solid #e2e4e9; border-radius:6px; background:#0d1117; color:#c9d1d9; font:9px/1.55 "SFMono-Regular",Consolas,monospace; white-space:pre; }.diff-patch .diff-add { color:#3fb950; display:block; background:#12261e; }.diff-patch .diff-del { color:#f85149; display:block; background:#2d1215; }.diff-patch .diff-hunk { color:#79c0ff; display:block; }
     .rail-footer { position:absolute; right:18px; bottom:18px; left:18px; display:flex; align-items:flex-start; color:#505562; font-size:10px; }.rail-footer strong,.rail-footer small { display:block; }.rail-footer small { margin-top:4px; color:#9297a2; }
     .workbench { display:grid; grid-template-rows:62px auto minmax(0,1fr) auto 30px; min-width:0; background:white; }.workspace-bar { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; padding:0 20px; border-bottom:1px solid #e2e4e9; }.workspace-bar>div:first-child strong,.workspace-bar>div:first-child small { display:block; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.workspace-bar strong { font-size:12px; }.workspace-bar small { margin-top:3px; color:#858a96; font-family:"SFMono-Regular",Consolas,monospace; font-size:9px; }.tabs { display:flex; align-self:stretch; gap:22px; }.tab { position:relative; border:0; color:#858a96; background:transparent; font-size:11px; }.tab[aria-selected="true"] { color:#252832; }.tab[aria-selected="true"]::after { position:absolute; right:0; bottom:0; left:0; height:2px; background:#6257d9; content:""; }.icon-button { justify-self:end; min-width:30px; height:30px; border:0; border-radius:7px; color:#747985; background:transparent; }.icon-button:hover { background:#eceef2; }
     .error-banner { display:flex; align-items:center; justify-content:space-between; padding:8px 16px; color:#9b2727; background:#fff1f1; border-bottom:1px solid #f1caca; font-size:10px; }.error-banner button { border:0; background:transparent; }.stage { min-height:0; overflow:auto; padding:32px clamp(24px,5vw,68px); }.state-card { max-width:620px; margin:9vh auto 0; text-align:center; }.state-card h1,.conversation-empty h1,.workflow-view h1,.editor h1 { margin:9px 0; font-size:23px; font-weight:620; letter-spacing:-.025em; }.state-card>p,.conversation-empty>p:last-child { margin:0 auto; max-width:560px; color:#6f7480; font-size:12px; line-height:1.6; }.eyebrow { margin:0; color:#858a96!important; font-size:9px!important; font-weight:700; letter-spacing:.13em; text-transform:uppercase; }.state-symbol { display:grid; width:38px; height:38px; margin:0 auto 20px; place-items:center; border:1px solid #d9dce3; border-radius:10px; color:#5d626e; background:#f5f6f8; }.spinner { display:block; width:28px; height:28px; margin:0 auto 24px; border:2px solid #e0e2e8; border-top-color:#6257d9; border-radius:50%; animation:spin 900ms linear infinite; } @keyframes spin { to { transform:rotate(360deg); } }
