@@ -436,7 +436,7 @@ program
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
   .option("--export-session <session-id>", "Export a session locally as redacted Markdown + a deterministic JSON manifest and exit")
   .option("--out <dir>", "Output directory for --export-session (default: current directory)")
-  .option("--force", "Overwrite existing --export-session output files")
+  .option("--force", "Overwrite existing output files (--export-session, --summary-out)")
   .option("--rename-session <session-id>", "Set, replace, or clear a user-owned name for an exact session (with --session-name) and exit")
   .option("--session-name <name>", "The name for --rename-session; empty/whitespace clears the override")
   .option("--compact <session-id>", "Compact a session into a bounded summary sidecar (original preserved) and exit")
