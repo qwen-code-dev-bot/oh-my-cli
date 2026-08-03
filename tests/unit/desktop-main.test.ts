@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 const electron = vi.hoisted(() => {
@@ -75,7 +77,7 @@ describe("desktop main process", () => {
     expect(handler?.()).toEqual({
       platform: process.platform,
       version: "0.1.0",
-      workspaceName: "oh-my-cli-loop",
+      workspaceName: path.basename(process.cwd()),
     });
     expect([...electron.handlers.keys()]).toEqual(
       expect.arrayContaining([
