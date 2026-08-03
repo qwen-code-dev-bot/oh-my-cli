@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,8 @@ import { DESKTOP_CHANNELS } from "../dist/desktop/contracts.js";
 import { DesktopService } from "../dist/desktop/service.js";
 import { SessionStore } from "../dist/session.js";
 import { createDesktopWindow } from "../dist/desktop/window.js";
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const fixtureRoot = await mkdtemp(
   path.join(os.tmpdir(), "oh-my-cli-desktop-e2e-"),
@@ -19,12 +22,31 @@ await writeFile(path.join(fixtureRoot, "demo.txt"), "before\n", "utf-8");
 const service = new DesktopService({
   workspaceRoot: fixtureRoot,
   store: new SessionStore(sessionRoot),
+  uiStatePath: path.join(sessionRoot, "desktop-ui.json"),
   resolveConfig: () => ({
     apiKey: "test",
     baseUrl: "https://example.test/v1",
     model: "qwen3.8-max",
   }),
   run: async (prompt, _messages, options) => {
+    if (prompt === "Slow background turn") {
+      options.onMessage({ role: "user", content: prompt });
+      options.sink?.assistantDelta("Background ");
+      await sleep(800);
+      options.sink?.assistantDelta("done");
+      options.onMessage({ role: "assistant", content: "Background done" });
+      return {
+        text: "Background done",
+        ok: true,
+        reason: "completed",
+        rounds: 1,
+        retries: 0,
+        stats: { toolCalls: {}, toolFailures: {} },
+        tokens: null,
+        estimatedCostUsd: null,
+        costKnown: false,
+      };
+    }
     options.onMessage({ role: "user", content: prompt });
     options.sink?.assistantDelta("Desktop ");
     options.sink?.toolStart({ id: "one", name: "read", round: 0 });
@@ -60,10 +82,23 @@ ipcMain.handle(DESKTOP_CHANNELS.createSession, () => service.createSession());
 ipcMain.handle(DESKTOP_CHANNELS.loadSession, (_event, id) =>
   service.loadSession(id),
 );
+ipcMain.handle(DESKTOP_CHANNELS.renameSession, (_event, request) =>
+  service.renameSession(request),
+);
+ipcMain.handle(DESKTOP_CHANNELS.setSessionArchived, (_event, request) =>
+  service.setSessionArchived(request),
+);
+ipcMain.handle(DESKTOP_CHANNELS.deleteSession, (_event, id) =>
+  service.deleteSession(id),
+);
 ipcMain.handle(DESKTOP_CHANNELS.sendMessage, (event, request) =>
   service.sendMessage(request, (payload) =>
     event.sender.send(DESKTOP_CHANNELS.agentEvent, payload),
   ),
+);
+ipcMain.handle(DESKTOP_CHANNELS.getUiState, () => service.getUiState());
+ipcMain.handle(DESKTOP_CHANNELS.saveUiState, (_event, request) =>
+  service.saveUiState(request),
 );
 ipcMain.handle(DESKTOP_CHANNELS.listWorkspaceFiles, () =>
   service.listWorkspaceFiles(),
@@ -121,6 +156,217 @@ async function run() {
     `document.body.textContent.includes('Desktop ready')`,
   );
 
+  // --- Session lifecycle (#488) ---
+  // The first completed turn earns a stable auto-title.
+  await waitFor(
+    window,
+    `[...document.querySelectorAll('[data-session-id]')].some((el) => el.textContent.includes('Prove the Desktop chat works'))`,
+  );
+
+  // A second session starts in the editable draft state.
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="new-session"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelectorAll('[data-session-id]').length === 2 && document.querySelector('[data-status="draft"]')`,
+  );
+  const draftId = await window.webContents.executeJavaScript(
+    `document.querySelector('[data-status="draft"]')?.dataset.sessionId`,
+  );
+  await window.webContents.executeJavaScript(`(() => {
+    const input = document.querySelector('[aria-label="Message"]');
+    input.value = 'remember me';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(600); // let the debounced draft persistence reach disk
+
+  // Switching away and back preserves the per-session draft.
+  const firstId = await window.webContents.executeJavaScript(
+    `[...document.querySelectorAll('[data-session-id]')].find((el) => el.dataset.sessionId !== '${draftId}')?.dataset.sessionId`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-session-id="${firstId}"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('.workspace-bar')?.textContent.includes('Prove the Desktop chat works') && document.querySelector('[aria-label="Message"]')?.value === ''`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-session-id="${draftId}"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[aria-label="Message"]')?.value === 'remember me'`,
+  );
+
+  // Rename the draft session from the workspace bar.
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="rename-session"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[aria-label="Rename session"]')`,
+  );
+  await window.webContents.executeJavaScript(`(() => {
+    const input = document.querySelector('[aria-label="Rename session"]');
+    input.value = 'Renamed draft';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  })()`);
+  await waitFor(
+    window,
+    `[...document.querySelectorAll('[data-session-id]')].some((el) => el.textContent.includes('Renamed draft'))`,
+  );
+
+  // Search filters the rail live.
+  await window.webContents.executeJavaScript(`(() => {
+    const search = document.querySelector('[aria-label="Search sessions"]');
+    search.value = 'Renamed';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await waitFor(
+    window,
+    `!document.querySelector('[data-session-id="${firstId}"]') && document.querySelector('[data-session-id="${draftId}"]')`,
+  );
+  await window.webContents.executeJavaScript(`(() => {
+    const search = document.querySelector('[aria-label="Search sessions"]');
+    search.value = '';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await waitFor(
+    window,
+    `document.querySelector('[data-session-id="${firstId}"]')`,
+  );
+
+  // Archive hides the session; the archived view restores it.
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="archive-session"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `!document.querySelector('[data-session-id="${draftId}"]') && document.querySelector('[data-action="toggle-archived"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="toggle-archived"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-session-id="${draftId}"][data-archived="true"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-session-id="${draftId}"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-action="restore-session"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="restore-session"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `!document.querySelector('[data-session-id="${draftId}"][data-archived="true"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="toggle-archived"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-session-id="${draftId}"]') && !document.querySelector('[data-session-id="${draftId}"][data-archived="true"]')`,
+  );
+
+  // Confirmed deletion removes the session from the rail and from disk.
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="new-session"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelectorAll('[data-session-id]').length === 3`,
+  );
+  const victimId = await window.webContents.executeJavaScript(
+    `document.querySelector('[aria-current="true"]')?.dataset.sessionId`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="request-delete-session"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-action="confirm-delete-session"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="confirm-delete-session"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `!document.querySelector('[data-session-id="${victimId}"]') && document.querySelectorAll('[data-session-id]').length === 2`,
+  );
+  assert.equal(
+    existsSync(path.join(sessionRoot, `${victimId}.jsonl`)),
+    false,
+    "deleted session must be removed from the session store",
+  );
+
+  // Switching away during an in-flight turn keeps focus on the chosen
+  // session: completion becomes background truth, never a forced pull-back.
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-session-id="${firstId}"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('.workspace-bar')?.textContent.includes('Prove the Desktop chat works')`,
+  );
+  await window.webContents.executeJavaScript(`(() => {
+    const input = document.querySelector('[aria-label="Message"]');
+    input.value = 'Slow background turn';
+    input.closest('form').requestSubmit();
+  })()`);
+  await waitFor(
+    window,
+    `document.querySelector('[data-agent-busy="true"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-session-id="${draftId}"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-agent-busy="false"]') && document.querySelector('[data-session-id="${draftId}"][aria-current="true"]')`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-session-id="${firstId}"][data-status="unread"]')`,
+  );
+  const inFlight = await window.webContents.executeJavaScript(`(() => ({
+    title: document.querySelector('.workspace-bar strong')?.textContent,
+    composer: document.querySelector('[aria-label="Message"]')?.value,
+    leaked: document.body.textContent.includes('Background done'),
+  }))()`);
+  assert.deepEqual(inFlight, {
+    title: "Renamed draft",
+    composer: "remember me",
+    leaked: false,
+  });
+
+  // Reload restores sessions, the active selection, and the saved draft.
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-session-id="${draftId}"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[aria-label="Message"]')?.value === 'remember me'`,
+  );
+  window.webContents.reload();
+  await new Promise((resolve) =>
+    window.webContents.once("did-finish-load", resolve),
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-workbench-state="ready"]') && document.querySelector('[data-session-id="${draftId}"][aria-current="true"]')`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[aria-label="Message"]')?.value === 'remember me' && document.querySelector('.workspace-bar')?.textContent.includes('Renamed draft')`,
+  );
+
   await window.webContents.executeJavaScript(
     `document.querySelector('[data-file-path="demo.txt"]')?.click()`,
   );
@@ -134,7 +380,7 @@ async function run() {
     editor.dispatchEvent(new Event('input', { bubbles: true }));
     document.querySelector('[data-action="save-file"]')?.click();
   })()`);
-  await waitFor(window, `document.body.textContent.includes('6 bytes')`);
+  await waitFor(window, `document.body.textContent.includes('Saved demo.txt')`);
 
   const result = await window.webContents.executeJavaScript(`(() => ({
     state: document.querySelector('[data-workbench-state]')?.dataset.workbenchState,
@@ -142,6 +388,10 @@ async function run() {
     workbench: Boolean(document.querySelector('[aria-label="Agent workbench"]')),
     inspector: Boolean(document.querySelector('[aria-label="Context inspector"]')),
     session: Boolean(document.querySelector('[data-session-id]')),
+    sessionCount: document.querySelectorAll('[data-session-id]').length,
+    activeTitle: document.querySelector('.workspace-bar strong')?.textContent,
+    composerDraft: document.querySelector('[aria-label="Message"]')?.value,
+    search: Boolean(document.querySelector('[aria-label="Search sessions"]')),
     editor: document.querySelector('[aria-label="File content"]')?.value,
     protocol: location.protocol,
   }))()`);
@@ -152,6 +402,10 @@ async function run() {
     workbench: true,
     inspector: true,
     session: true,
+    sessionCount: 2,
+    activeTitle: "Renamed draft",
+    composerDraft: "remember me",
+    search: true,
     editor: "after\n",
     protocol: "file:",
   });

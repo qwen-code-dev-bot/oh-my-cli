@@ -25,6 +25,10 @@ export interface DesktopRuntimeState {
   fileDirty: boolean;
   notice?: string;
   error?: string;
+  sessionSearch: string;
+  showArchived: boolean;
+  renaming: boolean;
+  confirmDeleteId?: string;
 }
 
 export type DesktopAction =
@@ -40,6 +44,11 @@ export type DesktopAction =
   | { type: "set-diagnostics"; open: boolean }
   | { type: "set-sessions"; sessions: DesktopSessionSummary[] }
   | { type: "select-session"; session: DesktopSession }
+  | { type: "clear-session" }
+  | { type: "set-session-search"; value: string }
+  | { type: "set-show-archived"; show: boolean }
+  | { type: "set-renaming"; renaming: boolean }
+  | { type: "confirm-delete"; sessionId?: string }
   | { type: "optimistic-user"; content: string }
   | { type: "set-busy"; busy: boolean }
   | { type: "agent-event"; event: DesktopAgentEvent }
@@ -88,6 +97,9 @@ export function createInitialDesktopState(): DesktopRuntimeState {
     activity: [],
     files: [],
     fileDirty: false,
+    sessionSearch: "",
+    showArchived: false,
+    renaming: false,
   };
 }
 
@@ -124,7 +136,29 @@ export function reduceDesktopState(
         activity: [],
         notice: undefined,
         error: undefined,
+        renaming: false,
+        confirmDeleteId: undefined,
       };
+    case "clear-session":
+      return {
+        ...state,
+        activeSession: undefined,
+        streamingText: "",
+        activity: [],
+        notice: undefined,
+        renaming: false,
+        confirmDeleteId: undefined,
+      };
+    case "set-session-search":
+      return { ...state, sessionSearch: action.value };
+    case "set-show-archived":
+      return { ...state, showArchived: action.show };
+    case "set-renaming":
+      return state.activeSession
+        ? { ...state, renaming: action.renaming }
+        : state;
+    case "confirm-delete":
+      return { ...state, confirmDeleteId: action.sessionId };
     case "optimistic-user":
       if (!state.activeSession) return state;
       return {
@@ -246,14 +280,59 @@ function tab(
   return `<button class="tab" role="tab" type="button" data-view="${view}" aria-selected="${selected}" tabindex="${selected ? "0" : "-1"}">${label}</button>`;
 }
 
-function renderSessions(model: DesktopViewModel): string {
-  if (model.sessions.length === 0) {
-    return `<p class="rail-empty">No sessions yet</p>`;
+export function filterSessions(
+  sessions: DesktopSessionSummary[],
+  opts: { search: string; archived: boolean },
+): DesktopSessionSummary[] {
+  const query = opts.search.trim().toLowerCase();
+  return sessions.filter((session) => {
+    if (session.archived !== opts.archived) return false;
+    if (!query) return true;
+    return session.title.toLowerCase().includes(query);
+  });
+}
+
+type DesktopSessionStatus =
+  | "streaming"
+  | "failed"
+  | "draft"
+  | "unread"
+  | "idle";
+
+function sessionStatus(session: DesktopSessionSummary): DesktopSessionStatus {
+  if (session.streaming) return "streaming";
+  if (session.failed) return "failed";
+  if (session.draft) return "draft";
+  if (session.unread) return "unread";
+  return "idle";
+}
+
+const STATUS_BADGE: Record<DesktopSessionStatus, string> = {
+  streaming:
+    '<span class="session-badge badge-streaming" aria-label="Streaming">●</span>',
+  failed:
+    '<span class="session-badge badge-failed" aria-label="Failed">!</span>',
+  draft: '<span class="session-badge badge-draft" aria-label="Draft">✎</span>',
+  unread:
+    '<span class="session-badge badge-unread" aria-label="Unread">•</span>',
+  idle: "",
+};
+
+export function renderSessionRail(model: DesktopViewModel): string {
+  const visible = filterSessions(model.sessions, {
+    search: model.sessionSearch,
+    archived: model.showArchived,
+  });
+  if (visible.length === 0) {
+    if (model.sessions.length === 0)
+      return `<p class="rail-empty">No sessions yet</p>`;
+    return `<p class="rail-empty">${model.showArchived ? "No archived sessions match" : "No sessions match"}</p>`;
   }
-  return model.sessions
+  return visible
     .map((session) => {
       const active = session.id === model.activeSession?.id;
-      return `<button class="rail-item session-item ${active ? "active" : ""}" type="button" data-session-id="${escapeHtml(session.id)}"><span class="rail-icon">›_</span><span>${escapeHtml(session.title)}</span><small>${session.messageCount}</small></button>`;
+      const status = sessionStatus(session);
+      return `<button class="rail-item session-item ${active ? "active" : ""}" type="button" data-session-id="${escapeHtml(session.id)}" data-status="${status}"${session.archived ? ' data-archived="true"' : ""}${active ? ' aria-current="true"' : ""}><span class="rail-icon">›_</span><span>${escapeHtml(session.title)}</span><span class="session-meta">${STATUS_BADGE[status]}<small>${session.messageCount}</small></span></button>`;
     })
     .join("");
 }
@@ -325,11 +404,62 @@ function renderDiagnostics(model: DesktopViewModel): string {
   return `<div class="dialog-backdrop" data-dialog-backdrop="true"><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="diagnostics-title"><div class="dialog-heading"><div><p class="eyebrow">Local runtime</p><h2 id="diagnostics-title">Desktop diagnostics</h2></div><button class="icon-button" type="button" aria-label="Close diagnostics" data-action="close-diagnostics">×</button></div><dl><div><dt>Platform</dt><dd data-diagnostic="platform">${escapeHtml(platformLabel(model.bootstrap?.platform))}</dd></div><div><dt>Application version</dt><dd data-diagnostic="version">${escapeHtml(model.bootstrap?.version ?? "Unavailable")}</dd></div><div><dt>Renderer access</dt><dd>Sandboxed · typed IPC</dd></div><div><dt>Sessions</dt><dd>${model.sessions.length} local</dd></div></dl><p class="dialog-note">Diagnostics exclude credentials, account identifiers, and absolute workspace paths.</p></section></div>`;
 }
 
+function renderDeleteConfirm(model: DesktopViewModel): string {
+  if (!model.confirmDeleteId) return "";
+  const target = model.sessions.find(
+    (session) => session.id === model.confirmDeleteId,
+  );
+  const title = target?.title ?? model.activeSession?.title ?? "this session";
+  return `<div class="dialog-backdrop" data-dialog-backdrop="true"><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="delete-session-title"><div class="dialog-heading"><div><p class="eyebrow">Destructive action</p><h2 id="delete-session-title">Delete “${escapeHtml(title)}”?</h2></div></div><p class="dialog-note">The transcript, draft, and reading position are removed from this device. This cannot be undone.</p><div class="dialog-actions"><button class="secondary-button" type="button" data-action="cancel-delete">Cancel</button><button class="danger-button" type="button" data-action="confirm-delete-session">Delete session</button></div></section></div>`;
+}
+
+function activeSummary(model: DesktopViewModel): DesktopSessionSummary | undefined {
+  return model.sessions.find(
+    (session) => session.id === model.activeSession?.id,
+  );
+}
+
+// A finishing turn may only pull the workbench back to its own session when
+// the user is still there. Otherwise the completion is background truth
+// (summary refresh, unread badge) and must never steal focus from the session
+// the user moved to while the turn was running.
+export function shouldAdoptCompletedSession(
+  state: Pick<DesktopRuntimeState, "activeSession">,
+  completedSessionId: string,
+): boolean {
+  return state.activeSession?.id === completedSessionId;
+}
+
+function sessionStatusLine(model: DesktopViewModel): string {
+  if (model.busy) return "Qwen is working";
+  // Fresh notices (saved file, completed turn) outrank the static lifecycle
+  // state; the lifecycle truth returns once the notice is cleared.
+  if (model.notice) return model.notice;
+  const summary = activeSummary(model);
+  if (summary?.streaming) return "Streaming";
+  if (summary?.failed) return "Last turn failed";
+  if (summary?.draft) return "Draft · send the first message";
+  return "Issue #488 · session lifecycle";
+}
+
 export function renderDesktopWorkbench(model: DesktopViewModel): string {
   const platform = platformLabel(model.bootstrap?.platform);
   const version = model.bootstrap?.version ?? "—";
   const canSend =
     Boolean(model.activeSession) && !model.busy && model.phase === "ready";
+  const summary = activeSummary(model);
+  const archivedCount = model.sessions.filter((s) => s.archived).length;
+  const archivedToggle =
+    archivedCount > 0 || model.showArchived
+      ? `<button class="archived-toggle" type="button" data-action="toggle-archived" aria-pressed="${model.showArchived}">${model.showArchived ? "Hide archived" : `Archived (${archivedCount})`}</button>`
+      : "";
+  const titleBlock =
+    model.renaming && model.activeSession
+      ? `<div class="title-edit"><input class="rename-input" type="text" aria-label="Rename session" value="${escapeHtml(model.activeSession.title)}" data-session-id="${escapeHtml(model.activeSession.id)}" spellcheck="false"><small>Enter saves · Esc cancels</small></div>`
+      : `<div><strong>${escapeHtml(model.activeSession?.title ?? "Local agent workbench")}</strong><small>${escapeHtml(sessionStatusLine(model))}</small></div>`;
+  const sessionActions = model.activeSession
+    ? `<div class="session-actions"><button class="ghost-button" type="button" data-action="rename-session">Rename</button><button class="ghost-button" type="button" data-action="${summary?.archived ? "restore-session" : "archive-session"}">${summary?.archived ? "Restore" : "Archive"}</button><button class="ghost-button is-danger" type="button" aria-label="Delete session" data-action="request-delete-session">Delete</button></div>`
+    : "";
   return `<div class="app" data-workbench-state="${model.phase}" data-agent-busy="${model.busy}">
     <header class="titlebar"><span></span><strong>Oh My CLI</strong><span class="runtime-status ${model.phase === "ready" ? "is-ready" : ""}"><i></i>${escapeHtml(platform)}</span></header>
     <nav class="rail" aria-label="Projects and sessions">
@@ -337,11 +467,13 @@ export function renderDesktopWorkbench(model: DesktopViewModel): string {
       <div class="section-heading"><p class="section-label">Workspace</p></div>
       <button class="rail-item workspace-item" type="button"><span class="rail-icon">□</span><span>${escapeHtml(model.bootstrap?.workspaceName ?? "Local workspace")}</span><small>local</small></button>
       <div class="section-heading"><p class="section-label">Sessions</p><button class="new-session" type="button" aria-label="New session" data-action="new-session">＋</button></div>
-      <div class="session-list">${renderSessions(model)}</div>
+      <input class="session-search" type="search" aria-label="Search sessions" placeholder="Search sessions" value="${escapeHtml(model.sessionSearch)}"${model.sessions.length > 0 ? "" : " disabled"}>
+      <div class="session-list">${renderSessionRail(model)}</div>
+      ${archivedToggle}
       <div class="rail-footer"><span class="connection-dot ${model.phase === "ready" ? "is-ready" : ""}"></span><div><strong>${model.phase === "ready" ? "Desktop connected" : "Desktop starting"}</strong><small>${model.sessions.length} persisted session${model.sessions.length === 1 ? "" : "s"}</small></div></div>
     </nav>
     <main class="workbench" aria-label="Agent workbench">
-      <div class="workspace-bar"><div><strong>${escapeHtml(model.activeSession?.title ?? "Local agent workbench")}</strong><small>${model.busy ? "Qwen is working" : (model.notice ?? "Issue #486 · usable Desktop foundation")}</small></div><div class="tabs" role="tablist" aria-label="Primary workbench views">${tab("chat", "Chat", model.activeView)}${tab("workflow", "Activity", model.activeView)}${tab("changes", "Files", model.activeView)}</div><button class="icon-button" type="button" aria-label="Open diagnostics" data-action="open-diagnostics">•••</button></div>
+      <div class="workspace-bar">${titleBlock}<div class="tabs" role="tablist" aria-label="Primary workbench views">${tab("chat", "Chat", model.activeView)}${tab("workflow", "Activity", model.activeView)}${tab("changes", "Files", model.activeView)}</div><div class="workspace-bar-actions">${sessionActions}<button class="icon-button" type="button" aria-label="Open diagnostics" data-action="open-diagnostics">•••</button></div></div>
       ${model.error ? `<div class="error-banner" role="alert">${escapeHtml(model.error)}<button type="button" data-action="dismiss-error">×</button></div>` : ""}
       <section class="stage" role="tabpanel" aria-live="polite">${renderStage(model)}</section>
       <div class="composer-wrap" data-fixed-composer="true"><form class="composer" aria-label="Message composer"><textarea rows="2" aria-label="Message" placeholder="${model.activeSession ? "Ask Qwen to inspect, explain, or change this workspace" : "Create or select a session to start"}" ${canSend ? "" : "disabled"}></textarea><div class="composer-footer"><span>⌘K focus · Enter send · Shift+Enter newline</span><button class="send" type="submit" aria-label="Send message" ${canSend ? "" : "disabled"}>↵</button></div></form></div>
@@ -349,6 +481,7 @@ export function renderDesktopWorkbench(model: DesktopViewModel): string {
     </main>
     <aside class="inspector" aria-label="Context inspector"><div class="inspector-heading"><span>Workspace files</span><strong>${model.files.length}</strong></div><div class="file-list">${renderFiles(model)}</div><div class="inspector-note"><strong>Safe local editor</strong><p>UTF-8 text only · 1 MiB max · path confined</p></div></aside>
     ${renderDiagnostics(model)}
+    ${renderDeleteConfirm(model)}
   </div>`;
 }
 
@@ -363,7 +496,13 @@ export function renderDesktopShell(model: DesktopViewModel): string {
     .runtime-status { justify-self:end; color:#747985; }.runtime-status i,.connection-dot { display:inline-block; width:8px; height:8px; margin-right:7px; border-radius:50%; background:#a7abb4; }.runtime-status.is-ready i,.connection-dot.is-ready { background:#0d9f5b; box-shadow:0 0 0 3px #0d9f5b18; }
     .rail,.inspector { min-width:0; background:#f4f5f8; }.rail { position:relative; padding:18px 12px 82px; border-right:1px solid #dfe2e8; overflow:hidden; }.brand { display:flex; align-items:center; gap:10px; margin:0 8px 24px; font-size:13px; font-weight:650; }.mark { display:grid; width:28px; height:28px; place-items:center; border-radius:8px; color:white; background:linear-gradient(135deg,#5d54ef,#c269cf); font-size:10px; }
     .section-heading { display:flex; align-items:center; justify-content:space-between; }.section-label { margin:16px 8px 8px; color:#8a8f9b; font-size:9px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; }.new-session { width:25px; height:25px; margin:10px 4px 0 0; border:0; border-radius:6px; color:#5f6470; background:transparent; }.new-session:hover { background:#e6e7ec; }
-    .rail-item { display:grid; grid-template-columns:18px minmax(0,1fr) auto; align-items:center; width:100%; gap:8px; padding:10px 9px; border:0; border-radius:7px; color:#505562; background:transparent; text-align:left; font-size:11px; }.rail-item span:nth-child(2) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.rail-item.active { color:#252832; background:#e8e8ef; box-shadow:inset 3px 0 #6257d9; }.rail-item small { color:#9297a2; font-size:9px; }.workspace-item { background:#eef0f5; }.rail-icon { color:#747985; font-family:"SFMono-Regular",Consolas,monospace; }.session-list { max-height:calc(100vh - 280px); overflow:auto; }.rail-empty { margin:8px; color:#9a9eaa; font-size:10px; }
+    .rail-item { display:grid; grid-template-columns:18px minmax(0,1fr) auto; align-items:center; width:100%; gap:8px; padding:10px 9px; border:0; border-radius:7px; color:#505562; background:transparent; text-align:left; font-size:11px; }.rail-item span:nth-child(2) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.rail-item.active { color:#252832; background:#e8e8ef; box-shadow:inset 3px 0 #6257d9; }.rail-item small { color:#9297a2; font-size:9px; }.workspace-item { background:#eef0f5; }.rail-icon { color:#747985; font-family:"SFMono-Regular",Consolas,monospace; }.session-list { max-height:calc(100vh - 320px); overflow:auto; }.rail-empty { margin:8px; color:#9a9eaa; font-size:10px; }
+    .session-search { width:calc(100% - 8px); margin:4px 4px 6px; padding:6px 9px; border:1px solid #dfe2e8; border-radius:6px; color:#252832; background:white; font-size:10px; outline:0; }.session-search:focus-visible { outline:2px solid #6257d9; outline-offset:2px; }
+    .session-meta { display:inline-flex; align-items:center; gap:4px; }.session-badge { font-size:9px; line-height:1; }.badge-streaming { color:#0d9f5b; }.badge-failed { color:#c0392b; font-weight:700; }.badge-draft { color:#8a8f9b; }.badge-unread { color:#6257d9; font-weight:700; }.session-item[data-archived="true"] { opacity:.72; }
+    .archived-toggle { width:calc(100% - 8px); margin:6px 4px; padding:6px 9px; border:0; border-radius:6px; color:#747985; background:transparent; text-align:left; font-size:9px; letter-spacing:.08em; text-transform:uppercase; }.archived-toggle:hover { background:#e6e7ec; }
+    .workspace-bar-actions { display:flex; align-items:center; gap:6px; justify-self:end; }.session-actions { display:flex; gap:4px; }.ghost-button { padding:5px 8px; border:1px solid #d5d8df; border-radius:6px; color:#5f6470; background:white; font-size:9px; }.ghost-button:hover { background:#f1f2f6; }.ghost-button.is-danger { color:#9b2727; border-color:#e5b8b8; }.ghost-button.is-danger:hover { background:#fff1f1; }
+    .title-edit { min-width:0; }.rename-input { width:240px; padding:5px 8px; border:1px solid #6257d9; border-radius:6px; font-size:12px; outline:0; }.title-edit small { display:block; margin-top:3px; color:#858a96; font-family:"SFMono-Regular",Consolas,monospace; font-size:9px; }
+    .dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }.danger-button { padding:8px 13px; border:1px solid #c0392b; border-radius:7px; color:white; background:#c0392b; font-size:10px; }.danger-button:hover { background:#a93226; }
     .rail-footer { position:absolute; right:18px; bottom:18px; left:18px; display:flex; align-items:flex-start; color:#505562; font-size:10px; }.rail-footer strong,.rail-footer small { display:block; }.rail-footer small { margin-top:4px; color:#9297a2; }
     .workbench { display:grid; grid-template-rows:62px auto minmax(0,1fr) auto 30px; min-width:0; background:white; }.workspace-bar { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; padding:0 20px; border-bottom:1px solid #e2e4e9; }.workspace-bar>div:first-child strong,.workspace-bar>div:first-child small { display:block; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.workspace-bar strong { font-size:12px; }.workspace-bar small { margin-top:3px; color:#858a96; font-family:"SFMono-Regular",Consolas,monospace; font-size:9px; }.tabs { display:flex; align-self:stretch; gap:22px; }.tab { position:relative; border:0; color:#858a96; background:transparent; font-size:11px; }.tab[aria-selected="true"] { color:#252832; }.tab[aria-selected="true"]::after { position:absolute; right:0; bottom:0; left:0; height:2px; background:#6257d9; content:""; }.icon-button { justify-self:end; min-width:30px; height:30px; border:0; border-radius:7px; color:#747985; background:transparent; }.icon-button:hover { background:#eceef2; }
     .error-banner { display:flex; align-items:center; justify-content:space-between; padding:8px 16px; color:#9b2727; background:#fff1f1; border-bottom:1px solid #f1caca; font-size:10px; }.error-banner button { border:0; background:transparent; }.stage { min-height:0; overflow:auto; padding:32px clamp(24px,5vw,68px); }.state-card { max-width:620px; margin:9vh auto 0; text-align:center; }.state-card h1,.conversation-empty h1,.workflow-view h1,.editor h1 { margin:9px 0; font-size:23px; font-weight:620; letter-spacing:-.025em; }.state-card>p,.conversation-empty>p:last-child { margin:0 auto; max-width:560px; color:#6f7480; font-size:12px; line-height:1.6; }.eyebrow { margin:0; color:#858a96!important; font-size:9px!important; font-weight:700; letter-spacing:.13em; text-transform:uppercase; }.state-symbol { display:grid; width:38px; height:38px; margin:0 auto 20px; place-items:center; border:1px solid #d9dce3; border-radius:10px; color:#5d626e; background:#f5f6f8; }.spinner { display:block; width:28px; height:28px; margin:0 auto 24px; border:2px solid #e0e2e8; border-top-color:#6257d9; border-radius:50%; animation:spin 900ms linear infinite; } @keyframes spin { to { transform:rotate(360deg); } }
