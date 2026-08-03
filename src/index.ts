@@ -47,7 +47,7 @@ import type { PaletteCommand } from "./palette.js";
 import { runPreflight, formatPreflight } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
-import { collectSessionSummaries, formatSessionList } from "./session-summary.js";
+import { collectSessionSummaries, formatSessionList, pickContinueSession } from "./session-summary.js";
 import {
   runSessionPicker,
   resolveResumeTarget,
@@ -383,6 +383,10 @@ program
   .option(
     "--resume <session-id>",
     "Resume a persisted session (fails closed when the id is empty or the session is missing, corrupt, or unreadable)",
+  )
+  .option(
+    "--continue",
+    "Continue the most recent healthy session declared for this workspace (fails closed when none matches)",
   )
   .option(
     "--approval-mode <mode>",
@@ -2342,6 +2346,41 @@ program
         compactThreshold = Math.floor(parsed);
       }
 
+      // --continue (Issue #513): one-step return to work. Resolves the most
+      // recent healthy session declared for this workspace and hands it to the
+      // existing resume path exactly as `--resume <id>` would. Selection is
+      // read-only and fail-closed: no match never silently starts a fresh
+      // session, and another workspace's session is never resumed. Matching
+      // uses the canonical workspace identity (the same one folder trust uses),
+      // so symlink aliases and linked worktrees match the parent workspace's
+      // sessions.
+      let continueResumeId: string | undefined;
+      if (opts.continue) {
+        if (opts.resume !== undefined || opts.browseSessions) {
+          process.stderr.write(
+            "Error: --continue cannot be combined with --resume or --browse-sessions\n",
+          );
+          process.exit(1);
+        }
+        const picked = pickContinueSession(
+          collectSessionSummaries(store),
+          workspaceTrustKey(opts.workspace),
+        );
+        if (!picked.ok) {
+          const reason =
+            picked.reason === "only-corrupt"
+              ? "the most recent sessions for this workspace are corrupt and cannot be resumed safely; see --list-sessions"
+              : "no resumable session found for this workspace; list sessions with --list-sessions or start a new one";
+          process.stderr.write(`Cannot continue: ${reason}\n`);
+          process.exit(1);
+        }
+        const modelNote = picked.model ? ` (model: ${redactSecrets(picked.model).text})` : "";
+        process.stderr.write(
+          `Continuing session ${shortSessionId(picked.sessionId)}${modelNote} — most recent for this workspace\n`,
+        );
+        continueResumeId = picked.sessionId;
+      }
+
       let sessionId: string;
       let existingMessages: SessionMessage[] = [];
 
@@ -2358,7 +2397,7 @@ program
           process.exit(1);
         }
       }
-      const resumeId = browseResume?.sessionId ?? opts.resume;
+      const resumeId = browseResume?.sessionId ?? opts.resume ?? continueResumeId;
       if (resumeId) {
         sessionId = resumeId;
         // Heal an interrupted checkpoint before loading (promotes a complete temp

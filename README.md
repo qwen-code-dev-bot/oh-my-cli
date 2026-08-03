@@ -198,6 +198,13 @@ file server.
 oh-my-cli --resume <session-id>
 ```
 
+Prefer one step? `oh-my-cli --continue` resumes the most recent healthy
+session declared for the current workspace — no id needed (workspace aliases
+and linked worktrees match the same sessions). With no matching session it
+fails closed instead of silently starting fresh, and it never resumes another
+workspace's session; combine it with `-p` for a headless follow-up turn.
+`--continue` cannot be combined with `--resume` or `--browse-sessions`.
+
 Prefer to browse instead of copying an id? Run `oh-my-cli --browse-sessions` in
 a terminal to search and arrow through your sessions, then resume the selected
 one. It resumes the exact session and restores its declared workspace, and it
