@@ -26,6 +26,7 @@ import {
   type ModelSettings,
   type ResolvedConfig,
 } from "./settings.js";
+import type { WorkspaceEnvLoad } from "./workspace-env.js";
 import { redactHomePath, redactEndpointHost } from "./permission-impact.js";
 
 // Raw secret field names that must never appear in a profile. Rejected (not
@@ -282,13 +283,15 @@ export function formatProfileList(report: ProfileListReport): string {
 // single `model` section (resolveModelConfig). The selected profile reuses the
 // secure resolver, so all precedence, credential, and redaction rules are
 // identical to the `model` section — and the chosen profile name is recorded as
-// non-secret provenance on the result. Every failure raises a redacted error
-// before any request.
+// non-secret provenance on the result. A loaded trusted workspace `.env`
+// (Issue #509) participates in the same resolver as the layer under the real
+// environment. Every failure raises a redacted error before any request.
 export function resolveModelProfileConfig(
   opts: {
     settingsPath?: string;
     env?: Record<string, string | undefined>;
     profile?: string;
+    workspaceEnv?: WorkspaceEnvLoad;
   } = {},
 ): ResolvedConfig {
   const env = opts.env ?? process.env;
@@ -300,7 +303,11 @@ export function resolveModelProfileConfig(
 
   if (wanted === undefined) {
     // No profile selected: fall back to the legacy single `model` section.
-    return resolveModelConfig({ settingsPath, env });
+    return resolveModelConfig({
+      settingsPath,
+      env,
+      ...(opts.workspaceEnv ? { workspaceEnv: opts.workspaceEnv } : {}),
+    });
   }
 
   if (rawProfiles === undefined) {
@@ -322,5 +329,6 @@ export function resolveModelProfileConfig(
     settingsPath,
     settingsFound: found,
     profile: profile.profile,
+    ...(opts.workspaceEnv ? { workspaceEnv: opts.workspaceEnv } : {}),
   });
 }
