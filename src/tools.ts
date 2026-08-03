@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Workspace } from "./workspace.js";
 import type { ApprovalMode } from "./approval.js";
+import { atomicWriteFile } from "./atomic-write.js";
 import {
   listDirectory,
   globPaths,
@@ -175,11 +176,10 @@ export function createTools(): ToolDef[] {
       category: "mutate-file",
       execute: async (args, workspace) => {
         const { path: relPath, content } = WriteParams.parse(args);
-        const fs = await import("node:fs");
-        const pathMod = await import("node:path");
         const absPath = workspace.resolveSafe(relPath);
-        fs.mkdirSync(pathMod.dirname(absPath), { recursive: true });
-        fs.writeFileSync(absPath, content, "utf-8");
+        // Atomic temp+rename: a crash or ENOSPC mid-write leaves the previous
+        // content intact instead of a truncated file (#506).
+        atomicWriteFile(absPath, content);
         return { content: `Wrote ${content.length} bytes to ${relPath}` };
       },
     },
@@ -216,7 +216,9 @@ export function createTools(): ToolDef[] {
         const index = content.indexOf(oldText);
         const updated =
           content.slice(0, index) + newText + content.slice(index + oldText.length);
-        fs.writeFileSync(absPath, updated, "utf-8");
+        // Atomic temp+rename with mode preservation: an interrupted write can
+        // never truncate the user's file, and executable bits survive (#506).
+        atomicWriteFile(absPath, updated);
         return { content: `Edited ${relPath}: replaced 1 occurrence` };
       },
     },
