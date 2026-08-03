@@ -15,6 +15,12 @@ describe("desktop preload contract", () => {
       setSessionArchived: "desktop:set-session-archived",
       deleteSession: "desktop:delete-session",
       sendMessage: "desktop:send-message",
+      cancelTurn: "desktop:cancel-turn",
+      retryTurn: "desktop:retry-turn",
+      attachImages: "desktop:attach-images",
+      attachImageFiles: "desktop:attach-image-files",
+      getRuntimeInfo: "desktop:get-runtime-info",
+      setSelectedProfile: "desktop:set-selected-profile",
       getUiState: "desktop:get-ui-state",
       saveUiState: "desktop:save-ui-state",
       listWorkspaceFiles: "desktop:list-workspace-files",
@@ -29,7 +35,8 @@ describe("desktop preload contract", () => {
     const invoke = vi.fn().mockResolvedValue({ ok: true });
     const unsubscribe = vi.fn();
     const subscribe = vi.fn(() => unsubscribe);
-    const bridge = createDesktopBridge(invoke, subscribe);
+    const pathForFile = vi.fn((file: File) => `/workspace/${file.name}`);
+    const bridge = createDesktopBridge(invoke, subscribe, pathForFile);
 
     await bridge.getBootstrapState();
     await bridge.listSessions();
@@ -39,11 +46,19 @@ describe("desktop preload contract", () => {
     await bridge.setSessionArchived({ sessionId: "session-id", archived: true });
     await bridge.deleteSession("session-id");
     await bridge.sendMessage({ sessionId: "session-id", prompt: "hello" });
+    await bridge.cancelTurn("session-id");
+    await bridge.retryTurn("session-id");
+    await bridge.attachImages(["img.png"]);
+    await bridge.attachImageFiles(["/abs/img.png"]);
+    await bridge.getRuntimeInfo();
+    await bridge.setSelectedProfile("qwen");
     await bridge.getUiState();
     await bridge.saveUiState({ activeSessionId: "session-id" });
     await bridge.listWorkspaceFiles();
     await bridge.readWorkspaceFile("src/index.ts");
     await bridge.writeWorkspaceFile({ path: "src/index.ts", content: "next" });
+    const dropped = { name: "pic.png" } as File;
+    expect(bridge.getPathForFile(dropped)).toBe("/workspace/pic.png");
     const listener = vi.fn();
     expect(bridge.onAgentEvent(listener)).toBe(unsubscribe);
 
@@ -65,6 +80,12 @@ describe("desktop preload contract", () => {
         DESKTOP_CHANNELS.sendMessage,
         { sessionId: "session-id", prompt: "hello" },
       ],
+      [DESKTOP_CHANNELS.cancelTurn, "session-id"],
+      [DESKTOP_CHANNELS.retryTurn, "session-id"],
+      [DESKTOP_CHANNELS.attachImages, ["img.png"]],
+      [DESKTOP_CHANNELS.attachImageFiles, ["/abs/img.png"]],
+      [DESKTOP_CHANNELS.getRuntimeInfo],
+      [DESKTOP_CHANNELS.setSelectedProfile, "qwen"],
       [DESKTOP_CHANNELS.getUiState],
       [DESKTOP_CHANNELS.saveUiState, { activeSessionId: "session-id" }],
       [DESKTOP_CHANNELS.listWorkspaceFiles],
@@ -74,10 +95,18 @@ describe("desktop preload contract", () => {
         { path: "src/index.ts", content: "next" },
       ],
     ]);
+    expect(pathForFile).toHaveBeenCalledWith(dropped);
     expect(subscribe).toHaveBeenCalledWith(
       DESKTOP_CHANNELS.agentEvent,
       listener,
     );
     expect(Object.isFrozen(bridge)).toBe(true);
+  });
+
+  it("fails closed when file path resolution is unavailable", () => {
+    const bridge = createDesktopBridge(vi.fn(), vi.fn());
+    expect(() => bridge.getPathForFile({ name: "x" } as File)).toThrow(
+      "File path resolution is unavailable",
+    );
   });
 });

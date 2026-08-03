@@ -18,19 +18,48 @@ const sessionRoot = await mkdtemp(
   path.join(os.tmpdir(), "oh-my-cli-desktop-e2e-sessions-"),
 );
 await writeFile(path.join(fixtureRoot, "demo.txt"), "before\n", "utf-8");
+await writeFile(path.join(fixtureRoot, "notes.txt"), "not an image\n", "utf-8");
+// A real 1x1 PNG so attachment validation runs against honest magic bytes.
+await writeFile(
+  path.join(fixtureRoot, "demo.png"),
+  Buffer.from(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
+    "hex",
+  ),
+);
+const settingsPath = path.join(fixtureRoot, "e2e-settings.json");
+await writeFile(
+  settingsPath,
+  JSON.stringify({
+    model: {
+      name: "qwen3.8-max",
+      baseUrl: "https://example.test/v1",
+      apiKeyEnv: "OMC_E2E_API_KEY",
+    },
+  }),
+  "utf-8",
+);
+process.env.OMC_E2E_API_KEY = "e2e-key";
+
+let retryCalls = 0;
 
 const service = new DesktopService({
   workspaceRoot: fixtureRoot,
   store: new SessionStore(sessionRoot),
   uiStatePath: path.join(sessionRoot, "desktop-ui.json"),
+  settingsPath,
   resolveConfig: () => ({
     apiKey: "test",
     baseUrl: "https://example.test/v1",
     model: "qwen3.8-max",
   }),
   run: async (prompt, _messages, options) => {
+    const appendUser = () => {
+      if (options.appendUserMessage !== false)
+        options.onMessage({ role: "user", content: prompt });
+    };
     if (prompt === "Slow background turn") {
-      options.onMessage({ role: "user", content: prompt });
+      appendUser();
       options.sink?.assistantDelta("Background ");
       await sleep(800);
       options.sink?.assistantDelta("done");
@@ -47,7 +76,74 @@ const service = new DesktopService({
         costKnown: false,
       };
     }
-    options.onMessage({ role: "user", content: prompt });
+    if (prompt === "Slow cancel turn") {
+      appendUser();
+      options.sink?.assistantDelta("Partial answer");
+      for (let i = 0; i < 60; i++) {
+        await sleep(50);
+        if (options.cancelRequested?.()) {
+          options.onMessage({
+            role: "assistant",
+            content: "Partial answer",
+            interrupted: true,
+          });
+          return {
+            text: "Partial answer",
+            ok: false,
+            reason: "cancelled",
+            rounds: 0,
+            retries: 0,
+            stats: { toolCalls: {}, toolFailures: {} },
+            tokens: null,
+            estimatedCostUsd: null,
+            costKnown: false,
+          };
+        }
+      }
+      options.onMessage({ role: "assistant", content: "Partial answer" });
+      return {
+        text: "Partial answer",
+        ok: true,
+        reason: "completed",
+        rounds: 1,
+        retries: 0,
+        stats: { toolCalls: {}, toolFailures: {} },
+        tokens: null,
+        estimatedCostUsd: null,
+        costKnown: false,
+      };
+    }
+    if (prompt === "Retry me") {
+      retryCalls++;
+      appendUser();
+      if (retryCalls === 1) {
+        return {
+          text: "",
+          ok: false,
+          reason: "provider_error",
+          rounds: 0,
+          retries: 0,
+          stats: { toolCalls: {}, toolFailures: {} },
+          tokens: null,
+          estimatedCostUsd: null,
+          costKnown: false,
+        };
+      }
+      options.sink?.assistantDelta("Recovered answer");
+      options.onMessage({ role: "assistant", content: "Recovered answer" });
+      return {
+        text: "Recovered answer",
+        ok: true,
+        reason: "completed",
+        rounds: 1,
+        retries: 0,
+        stats: { toolCalls: {}, toolFailures: {} },
+        tokens: null,
+        estimatedCostUsd: null,
+        costKnown: false,
+      };
+    }
+    appendUser();
     options.sink?.assistantDelta("Desktop ");
     options.sink?.toolStart({ id: "one", name: "read", round: 0 });
     options.sink?.toolResult({
@@ -95,6 +191,24 @@ ipcMain.handle(DESKTOP_CHANNELS.sendMessage, (event, request) =>
   service.sendMessage(request, (payload) =>
     event.sender.send(DESKTOP_CHANNELS.agentEvent, payload),
   ),
+);
+ipcMain.handle(DESKTOP_CHANNELS.cancelTurn, (_event, id) =>
+  service.cancelTurn(id),
+);
+ipcMain.handle(DESKTOP_CHANNELS.retryTurn, (event, id) =>
+  service.retryTurn(id, (payload) =>
+    event.sender.send(DESKTOP_CHANNELS.agentEvent, payload),
+  ),
+);
+ipcMain.handle(DESKTOP_CHANNELS.attachImages, (_event, paths) =>
+  service.attachImages(paths),
+);
+ipcMain.handle(DESKTOP_CHANNELS.attachImageFiles, (_event, paths) =>
+  service.attachImageFiles(paths),
+);
+ipcMain.handle(DESKTOP_CHANNELS.getRuntimeInfo, () => service.getRuntimeInfo());
+ipcMain.handle(DESKTOP_CHANNELS.setSelectedProfile, (_event, profile) =>
+  service.setSelectedProfile(profile),
 );
 ipcMain.handle(DESKTOP_CHANNELS.getUiState, () => service.getUiState());
 ipcMain.handle(DESKTOP_CHANNELS.saveUiState, (_event, request) =>
@@ -306,8 +420,8 @@ async function run() {
     "deleted session must be removed from the session store",
   );
 
-  // Switching away during an in-flight turn keeps focus on the chosen
-  // session: completion becomes background truth, never a forced pull-back.
+  // --- Composer controls (#489) — all exercised on the first session ---
+  // The effective model and approval mode are visible in the composer.
   await window.webContents.executeJavaScript(
     `document.querySelector('[data-session-id="${firstId}"]')?.click()`,
   );
@@ -315,6 +429,104 @@ async function run() {
     window,
     `document.querySelector('.workspace-bar')?.textContent.includes('Prove the Desktop chat works')`,
   );
+  await waitFor(
+    window,
+    `document.querySelector('[data-runtime-chip="ready"]')?.textContent.includes('qwen3.8-max') && document.body.textContent.includes('auto-edit')`,
+  );
+
+  // Attachment picker lists workspace images; staging shows name/type/size,
+  // removal works, and a send consumes the staged attachment.
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="open-attach-picker"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-attach-file-path="demo.png"]') && !document.querySelector('[data-attach-file-path="notes.txt"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-attach-file-path="demo.png"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-attachment-path="demo.png"]')?.textContent.includes('demo.png · image/png')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="remove-attachment"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `!document.querySelector('[data-attachment-path="demo.png"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="open-attach-picker"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-attach-file-path="demo.png"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-attach-file-path="demo.png"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-attachment-path="demo.png"]')`,
+  );
+  await window.webContents.executeJavaScript(`(() => {
+    const input = document.querySelector('[aria-label="Message"]');
+    input.value = 'Attach turn';
+    input.closest('form').requestSubmit();
+  })()`);
+  await waitFor(
+    window,
+    `document.querySelector('[data-agent-busy="false"]') && !document.querySelector('[data-attachment-path="demo.png"]')`,
+  );
+
+  // Cancel preserves the partial transcript as an interrupted turn.
+  await window.webContents.executeJavaScript(`(() => {
+    const input = document.querySelector('[aria-label="Message"]');
+    input.value = 'Slow cancel turn';
+    input.closest('form').requestSubmit();
+  })()`);
+  await waitFor(
+    window,
+    `document.querySelector('[data-agent-busy="true"]') && document.querySelector('[data-action="cancel-turn"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="cancel-turn"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-agent-busy="false"]') && document.body.textContent.includes('Turn cancelled') && document.body.textContent.includes('Partial answer') && document.body.textContent.includes('Interrupted')`,
+  );
+
+  // Retry reuses one request identity: the user turn is never duplicated.
+  await window.webContents.executeJavaScript(`(() => {
+    const input = document.querySelector('[aria-label="Message"]');
+    input.value = 'Retry me';
+    input.closest('form').requestSubmit();
+  })()`);
+  await waitFor(
+    window,
+    `document.querySelector('[data-agent-busy="false"]') && document.querySelector('[data-action="retry-turn"]')`,
+  );
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-action="retry-turn"]')?.click()`,
+  );
+  await waitFor(
+    window,
+    `document.querySelector('[data-agent-busy="false"]') && document.body.textContent.includes('Recovered answer') && !document.querySelector('[data-action="retry-turn"]')`,
+  );
+  const retryUsers = service
+    .loadSession(firstId)
+    .messages.filter((m) => m.role === "user" && m.content === "Retry me");
+  assert.equal(
+    retryUsers.length,
+    1,
+    "retry must reuse the single persisted user turn",
+  );
+
+  // Switching away during an in-flight turn keeps focus on the chosen
+  // session: completion becomes background truth, never a forced pull-back.
   await window.webContents.executeJavaScript(`(() => {
     const input = document.querySelector('[aria-label="Message"]');
     input.value = 'Slow background turn';

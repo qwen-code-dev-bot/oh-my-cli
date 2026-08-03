@@ -29,6 +29,24 @@ ipcMain.handle(DESKTOP_CHANNELS.sendMessage, (event, request) =>
     event.sender.send(DESKTOP_CHANNELS.agentEvent, payload);
   }),
 );
+ipcMain.handle(DESKTOP_CHANNELS.cancelTurn, (_event, sessionId: string) =>
+  service.cancelTurn(sessionId),
+);
+ipcMain.handle(DESKTOP_CHANNELS.retryTurn, (event, sessionId: string) =>
+  service.retryTurn(sessionId, (payload) => {
+    event.sender.send(DESKTOP_CHANNELS.agentEvent, payload);
+  }),
+);
+ipcMain.handle(DESKTOP_CHANNELS.attachImages, (_event, paths: string[]) =>
+  service.attachImages(paths),
+);
+ipcMain.handle(DESKTOP_CHANNELS.attachImageFiles, (_event, paths: string[]) =>
+  service.attachImageFiles(paths),
+);
+ipcMain.handle(DESKTOP_CHANNELS.getRuntimeInfo, () => service.getRuntimeInfo());
+ipcMain.handle(DESKTOP_CHANNELS.setSelectedProfile, (_event, profile) =>
+  service.setSelectedProfile(profile),
+);
 ipcMain.handle(DESKTOP_CHANNELS.getUiState, () => service.getUiState());
 ipcMain.handle(DESKTOP_CHANNELS.saveUiState, (_event, request) =>
   service.saveUiState(request),

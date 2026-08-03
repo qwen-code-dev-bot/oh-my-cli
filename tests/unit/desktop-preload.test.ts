@@ -5,6 +5,7 @@ const electron = vi.hoisted(() => ({
   invoke: vi.fn(),
   on: vi.fn(),
   removeListener: vi.fn(),
+  getPathForFile: vi.fn((file: { name?: string }) => `/tmp/${file?.name}`),
 }));
 
 vi.mock("electron", () => ({
@@ -14,6 +15,7 @@ vi.mock("electron", () => ({
     on: electron.on,
     removeListener: electron.removeListener,
   },
+  webUtils: { getPathForFile: electron.getPathForFile },
 }));
 
 describe("desktop preload", () => {
@@ -41,11 +43,18 @@ describe("desktop preload", () => {
       "setSessionArchived",
       "deleteSession",
       "sendMessage",
+      "cancelTurn",
+      "retryTurn",
+      "attachImages",
+      "attachImageFiles",
+      "getRuntimeInfo",
+      "setSelectedProfile",
       "getUiState",
       "saveUiState",
       "listWorkspaceFiles",
       "readWorkspaceFile",
       "writeWorkspaceFile",
+      "getPathForFile",
       "onAgentEvent",
     ]);
 
@@ -54,6 +63,10 @@ describe("desktop preload", () => {
       sessionId: "one",
       prompt: "hello",
     });
+
+    const dropped = { name: "pic.png" };
+    expect(bridge.getPathForFile(dropped)).toBe("/tmp/pic.png");
+    expect(electron.getPathForFile).toHaveBeenCalledWith(dropped);
 
     const listener = vi.fn();
     const unsubscribe = bridge.onAgentEvent(listener) as () => void;

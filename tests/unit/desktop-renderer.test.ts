@@ -242,6 +242,154 @@ describe("desktop workbench renderer", () => {
     expect(shouldAdoptCompletedSession(cleared, "one")).toBe(false);
   });
 
+  it("tracks queued/streaming/cancelling/failed turn states", () => {
+    let state = reduceDesktopState(readyWith({}), {
+      type: "select-session",
+      session: { id: "one", title: "Build desktop", messages: [] },
+    });
+    state = reduceDesktopState(state, {
+      type: "optimistic-user",
+      content: "do work",
+    });
+    state = reduceDesktopState(state, { type: "set-busy", busy: true });
+    expect(state.busy).toBe(true);
+    expect(state.turnOutcome).toBe("idle");
+
+    state = reduceDesktopState(state, {
+      type: "set-cancelling",
+      cancelling: true,
+    });
+    state = reduceDesktopState(state, {
+      type: "agent-event",
+      event: { type: "cancelled", sessionId: "one" },
+    });
+    expect(state.cancelling).toBe(false);
+    expect(state.busy).toBe(false);
+    expect(state.turnOutcome).toBe("cancelled");
+    expect(state.notice).toBe("Turn cancelled");
+
+    // The trailing complete(ok:false) must not rewrite the cancellation.
+    state = reduceDesktopState(state, {
+      type: "agent-event",
+      event: { type: "complete", sessionId: "one", ok: false },
+    });
+    expect(state.turnOutcome).toBe("cancelled");
+    expect(state.notice).toBe("Turn cancelled");
+
+    // A genuinely failed turn surfaces as failed.
+    let failed = reduceDesktopState(readyWith({}), {
+      type: "select-session",
+      session: { id: "one", title: "Build desktop", messages: [] },
+    });
+    failed = reduceDesktopState(failed, { type: "set-busy", busy: true });
+    failed = reduceDesktopState(failed, {
+      type: "agent-event",
+      event: { type: "complete", sessionId: "one", ok: false },
+    });
+    expect(failed.turnOutcome).toBe("failed");
+    expect(failed.notice).toBe("Turn failed");
+
+    // A turn-adoption reload preserves the outcome notice and the retry
+    // affordance; a user-initiated switch clears both.
+    const adopted = reduceDesktopState(failed, {
+      type: "select-session",
+      session: { id: "one", title: "Build desktop", messages: [] },
+      preserveNotice: true,
+    });
+    expect(adopted.notice).toBe("Turn failed");
+    expect(adopted.turnOutcome).toBe("failed");
+    const switched = reduceDesktopState(failed, {
+      type: "select-session",
+      session: { id: "two", title: "Other", messages: [] },
+    });
+    expect(switched.notice).toBeUndefined();
+    expect(switched.turnOutcome).toBe("idle");
+  });
+
+  it("renders cancel, retry, attachment tray, and runtime controls", () => {
+    let state = reduceDesktopState(readyWith({}), {
+      type: "select-session",
+      session: { id: "one", title: "Build desktop", messages: [] },
+    });
+    state = reduceDesktopState(state, { type: "set-busy", busy: true });
+    state = reduceDesktopState(state, {
+      type: "set-runtime",
+      runtime: {
+        model: "qwen3.8-max",
+        profile: null,
+        approvalMode: "auto-edit",
+        endpointHost: "https://ex…e/v1",
+        profiles: [],
+      },
+    });
+    const busyHtml = renderDesktopWorkbench(createDesktopViewModel(state));
+    expect(busyHtml).toContain('data-action="cancel-turn"');
+    expect(busyHtml).toContain("qwen3.8-max");
+    expect(busyHtml).toContain("auto-edit");
+    expect(busyHtml).not.toContain('data-action="retry-turn"');
+
+    const cancelling = reduceDesktopState(state, {
+      type: "set-cancelling",
+      cancelling: true,
+    });
+    expect(
+      renderDesktopWorkbench(createDesktopViewModel(cancelling)),
+    ).toContain("Cancelling…");
+
+    let done = reduceDesktopState(state, { type: "set-busy", busy: false });
+    done = reduceDesktopState(done, {
+      type: "agent-event",
+      event: { type: "complete", sessionId: "one", ok: false },
+    });
+    const failedHtml = renderDesktopWorkbench(createDesktopViewModel(done));
+    expect(failedHtml).toContain('data-action="retry-turn"');
+    expect(failedHtml).toContain('data-action="open-attach-picker"');
+
+    const withAttachments = reduceDesktopState(done, {
+      type: "set-attachments",
+      attachments: [
+        { path: "shot.png", ok: true, name: "shot.png", mediaType: "image/png", bytes: 32 },
+        { path: "notes.txt", ok: false, error: "Unsupported image type" },
+      ],
+    });
+    const trayHtml = renderDesktopWorkbench(
+      createDesktopViewModel(withAttachments),
+    );
+    expect(trayHtml).toContain('aria-label="Staged attachments"');
+    expect(trayHtml).toContain("shot.png · image/png · 32 B · workspace");
+    expect(trayHtml).toContain("Unsupported image type");
+    expect(trayHtml).toContain('data-action="remove-attachment"');
+
+    const picker = reduceDesktopState(withAttachments, {
+      type: "attach-picker",
+      open: true,
+    });
+    const pickerHtml = renderDesktopWorkbench(createDesktopViewModel(picker));
+    expect(pickerHtml).toContain('aria-labelledby="attach-picker-title"');
+    expect(pickerHtml).toContain("magic bytes");
+  });
+
+  it("renders the profile selector only when profiles exist", () => {
+    let state = reduceDesktopState(readyWith({}), {
+      type: "select-session",
+      session: { id: "one", title: "Build desktop", messages: [] },
+    });
+    state = reduceDesktopState(state, {
+      type: "set-runtime",
+      runtime: {
+        model: "qwen3.8-max",
+        profile: "qwen",
+        approvalMode: "auto-edit",
+        endpointHost: "https://ex…e/v1",
+        profiles: ["local", "qwen"],
+      },
+    });
+    const html = renderDesktopWorkbench(createDesktopViewModel(state));
+    expect(html).toContain('aria-label="Model profile"');
+    expect(html).toContain('value="qwen" selected');
+    expect(html).toContain("Default profile");
+  });
+
   it("reports the session status line from lifecycle truth", () => {
     const drafty = reduceDesktopState(
       readyWith({ sessions: [summary({ id: "one", draft: true, messageCount: 0 })] }),

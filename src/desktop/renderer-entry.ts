@@ -150,6 +150,7 @@ function markActiveRead(): void {
 
 async function selectSession(sessionId: string): Promise<void> {
   captureActiveContext();
+  historyIndex = -1;
   try {
     const session = await window.ohMyCliDesktop.loadSession(sessionId);
     const entry = uiState.sessions[sessionId] ?? {};
@@ -247,6 +248,97 @@ async function deleteConfirmed(): Promise<void> {
   }
 }
 
+async function cancelTurn(): Promise<void> {
+  const sessionId = state.activeSession?.id;
+  if (!sessionId || !state.busy) return;
+  try {
+    await window.ohMyCliDesktop.cancelTurn(sessionId);
+    dispatch({ type: "set-cancelling", cancelling: true });
+  } catch (error) {
+    dispatch({
+      type: "set-error",
+      message:
+        error instanceof Error ? error.message : "Unable to cancel turn",
+    });
+  }
+}
+
+// Retry reuses the session's single persisted user turn: the service re-runs
+// the turn without appending another user message, so no duplicate lands in
+// the transcript.
+function retryTurn(): void {
+  const sessionId = state.activeSession?.id;
+  if (!sessionId || state.busy) return;
+  dispatch({ type: "set-busy", busy: true });
+  void window.ohMyCliDesktop
+    .retryTurn(sessionId)
+    .then(async () => {
+      if (shouldAdoptCompletedSession(state, sessionId)) {
+        const session = await window.ohMyCliDesktop.loadSession(sessionId);
+        if (shouldAdoptCompletedSession(state, sessionId)) {
+          dispatch({ type: "select-session", session, preserveNotice: true });
+        }
+      }
+      dispatch({ type: "set-busy", busy: false });
+      await refreshSessions();
+      markActiveRead();
+    })
+    .catch((error: unknown) => {
+      dispatch({ type: "set-busy", busy: false });
+      dispatch({
+        type: "set-error",
+        message: error instanceof Error ? error.message : "Retry failed",
+      });
+      void refreshSessions();
+    });
+}
+
+const MAX_STAGED_ATTACHMENTS = 8;
+
+async function stageAttachments(paths: string[], viaFiles: boolean): Promise<void> {
+  try {
+    const reports = viaFiles
+      ? await window.ohMyCliDesktop.attachImageFiles(paths)
+      : await window.ohMyCliDesktop.attachImages(paths);
+    const merged = [...state.attachments];
+    for (const report of reports) {
+      const index = merged.findIndex((item) => item.path === report.path);
+      if (index >= 0) merged[index] = report;
+      else if (merged.length < MAX_STAGED_ATTACHMENTS) merged.push(report);
+    }
+    dispatch({ type: "set-attachments", attachments: merged });
+  } catch (error) {
+    dispatch({
+      type: "set-error",
+      message:
+        error instanceof Error ? error.message : "Unable to attach files",
+    });
+  }
+}
+
+function removeAttachment(path: string): void {
+  dispatch({
+    type: "set-attachments",
+    attachments: state.attachments.filter((item) => item.path !== path),
+  });
+}
+
+// Prompt history is derived from the persisted transcript of the active
+// session, so nothing extra is stored and it survives reloads.
+let historyIndex = -1;
+let historyDraft = "";
+
+function sessionPrompts(): string[] {
+  return (state.activeSession?.messages ?? [])
+    .filter(
+      (message): message is { role: "user"; content: string } =>
+        message.role === "user" &&
+        typeof message.content === "string" &&
+        message.content.length > 0,
+    )
+    .map((message) => message.content);
+}
+
 async function bootstrap(): Promise<void> {
   dispatch({ type: "bootstrap-started" });
   try {
@@ -258,6 +350,10 @@ async function bootstrap(): Promise<void> {
     ]);
     uiState = ui;
     dispatch({ type: "bootstrap-resolved", payload, sessions, files });
+    window.ohMyCliDesktop
+      .getRuntimeInfo()
+      .then((runtime) => dispatch({ type: "set-runtime", runtime }))
+      .catch(() => dispatch({ type: "set-runtime", runtime: null }));
     if (ui.activeSessionId) {
       await selectSession(ui.activeSessionId);
     }
@@ -311,6 +407,21 @@ document.addEventListener("click", (event) => {
       );
     return;
   }
+  const attachFilePath =
+    target.closest<HTMLElement>("[data-attach-file-path]")?.dataset
+      .attachFilePath;
+  if (attachFilePath) {
+    dispatch({ type: "attach-picker", open: false });
+    void stageAttachments([attachFilePath], false);
+    return;
+  }
+  if (target.closest<HTMLElement>('[data-action="remove-attachment"]')) {
+    const path =
+      target.closest<HTMLElement>("[data-attachment-path]")?.dataset
+        .attachmentPath;
+    if (path) removeAttachment(path);
+    return;
+  }
   const action = target.closest<HTMLElement>("[data-action]")?.dataset.action;
   if (action === "new-session") {
     void createSession();
@@ -328,6 +439,14 @@ document.addEventListener("click", (event) => {
     dispatch({ type: "confirm-delete" });
   } else if (action === "toggle-archived") {
     dispatch({ type: "set-show-archived", show: !state.showArchived });
+  } else if (action === "open-attach-picker" && state.activeSession) {
+    dispatch({ type: "attach-picker", open: true });
+  } else if (action === "close-attach-picker") {
+    dispatch({ type: "attach-picker", open: false });
+  } else if (action === "cancel-turn") {
+    void cancelTurn();
+  } else if (action === "retry-turn") {
+    retryTurn();
   } else if (action === "save-file" && state.activeFile) {
     const editor = document.querySelector<HTMLTextAreaElement>(
       '[aria-label="File content"]',
@@ -357,6 +476,7 @@ document.addEventListener("click", (event) => {
   ) {
     dispatch({ type: "set-diagnostics", open: false });
     dispatch({ type: "confirm-delete" });
+    dispatch({ type: "attach-picker", open: false });
   }
 });
 
@@ -376,6 +496,16 @@ document.addEventListener("input", (event) => {
     target instanceof HTMLTextAreaElement &&
     target.getAttribute("aria-label") === "Message"
   ) {
+    // Bounded draft: oversized pastes are truncated deterministically instead
+    // of being silently lost at send time.
+    if (target.value.length > 10_000) {
+      target.value = target.value.slice(0, 10_000);
+      dispatch({
+        type: "set-error",
+        message: "Draft truncated to 10,000 characters",
+      });
+    }
+    historyIndex = -1;
     queueDraftPersist();
     return;
   }
@@ -412,6 +542,19 @@ document.addEventListener("submit", (event) => {
   const prompt = input?.value.trim() ?? "";
   const sessionId = state.activeSession?.id;
   if (!prompt || !sessionId || state.busy) return;
+  // A staged attachment that failed validation blocks the turn: the composer
+  // shows the reason and the user removes it explicitly.
+  const invalid = state.attachments.find((item) => !item.ok);
+  if (invalid) {
+    dispatch({
+      type: "set-error",
+      message: "Remove rejected attachments before sending",
+    });
+    return;
+  }
+  const attachments = state.attachments
+    .filter((item) => item.ok)
+    .map((item) => item.path);
   if (input) input.value = "";
   // Cancel any pending draft debounce so the just-sent text cannot be written
   // back as a phantom draft after the composer is cleared.
@@ -421,10 +564,16 @@ document.addEventListener("submit", (event) => {
   }
   mergeMirrorEntry(sessionId, { draft: "" });
   persistUi({ sessions: { [sessionId]: { draft: "" } } });
+  dispatch({ type: "set-attachments", attachments: [] });
+  historyIndex = -1;
   dispatch({ type: "optimistic-user", content: prompt });
   dispatch({ type: "set-busy", busy: true });
   void window.ohMyCliDesktop
-    .sendMessage({ sessionId, prompt })
+    .sendMessage({
+      sessionId,
+      prompt,
+      ...(attachments.length > 0 ? { attachments } : {}),
+    })
     .then(async () => {
       dispatch({ type: "set-busy", busy: false });
       // A finishing turn only reloads its own session when the user is still
@@ -434,7 +583,7 @@ document.addEventListener("submit", (event) => {
       if (shouldAdoptCompletedSession(state, sessionId)) {
         const session = await window.ohMyCliDesktop.loadSession(sessionId);
         if (shouldAdoptCompletedSession(state, sessionId)) {
-          dispatch({ type: "select-session", session });
+          dispatch({ type: "select-session", session, preserveNotice: true });
         }
       }
       await refreshSessions();
@@ -467,13 +616,47 @@ document.addEventListener("keydown", (event) => {
   }
   if (
     target instanceof HTMLTextAreaElement &&
-    target.getAttribute("aria-label") === "Message" &&
-    event.key === "Enter" &&
-    !event.shiftKey
+    target.getAttribute("aria-label") === "Message"
   ) {
-    event.preventDefault();
-    target.closest("form")?.requestSubmit();
-    return;
+    // Never intercept an IME composition: Enter confirms the composition, it
+    // does not send the message.
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      target.closest("form")?.requestSubmit();
+      return;
+    }
+    // Prompt history (derived from the persisted transcript): ArrowUp recalls
+    // older prompts, ArrowDown returns toward the draft.
+    const prompts = sessionPrompts();
+    if (event.key === "ArrowUp" && prompts.length > 0) {
+      const caretAtStart =
+        target.selectionStart === 0 && target.selectionEnd === 0;
+      if (historyIndex === -1 && (target.value === "" || caretAtStart)) {
+        historyDraft = target.value;
+        historyIndex = prompts.length - 1;
+      } else if (historyIndex > 0) {
+        historyIndex--;
+      } else {
+        return;
+      }
+      event.preventDefault();
+      target.value = prompts[historyIndex];
+      queueDraftPersist();
+      return;
+    }
+    if (event.key === "ArrowDown" && historyIndex >= 0) {
+      event.preventDefault();
+      historyIndex++;
+      if (historyIndex >= prompts.length) {
+        historyIndex = -1;
+        target.value = historyDraft;
+      } else {
+        target.value = prompts[historyIndex];
+      }
+      queueDraftPersist();
+      return;
+    }
   }
   if (
     target instanceof HTMLElement &&
@@ -514,12 +697,62 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     void createSession();
   } else if (event.key === "Escape") {
-    if (state.confirmDeleteId) {
+    if (state.attachPickerOpen) {
+      dispatch({ type: "attach-picker", open: false });
+    } else if (state.confirmDeleteId) {
       dispatch({ type: "confirm-delete" });
     } else if (state.diagnosticsOpen) {
       dispatch({ type: "set-diagnostics", open: false });
     }
   }
+});
+
+document.addEventListener("change", (event) => {
+  const target = event.target;
+  if (
+    target instanceof HTMLSelectElement &&
+    target.getAttribute("aria-label") === "Model profile"
+  ) {
+    const profile = target.value === "" ? null : target.value;
+    window.ohMyCliDesktop
+      .setSelectedProfile(profile)
+      .then((runtime) => dispatch({ type: "set-runtime", runtime }))
+      .catch((error: unknown) =>
+        dispatch({
+          type: "set-error",
+          message:
+            error instanceof Error ? error.message : "Unable to change profile",
+        }),
+      );
+  }
+});
+
+// Drag-and-drop attachments resolve through the preload (File -> path) and are
+// confined + validated by the main process; only the composer accepts drops.
+document.addEventListener("dragover", (event) => {
+  const target = event.target;
+  if (target instanceof Element && target.closest(".composer-wrap")) {
+    event.preventDefault();
+  }
+});
+
+document.addEventListener("drop", (event) => {
+  const target = event.target;
+  if (!(target instanceof Element) || !target.closest(".composer-wrap")) return;
+  event.preventDefault();
+  const files = Array.from(event.dataTransfer?.files ?? []);
+  if (files.length === 0 || state.busy || !state.activeSession) return;
+  let paths: string[];
+  try {
+    paths = files.map((file) => window.ohMyCliDesktop.getPathForFile(file));
+  } catch {
+    dispatch({
+      type: "set-error",
+      message: "Dropped files could not be resolved",
+    });
+    return;
+  }
+  void stageAttachments(paths, true);
 });
 
 window.addEventListener("beforeunload", () => {
