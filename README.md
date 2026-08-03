@@ -35,9 +35,9 @@ and troubleshooting.
 
 ## Configuration
 
-Model configuration is resolved from environment variables and an optional user
-settings file. Environment variables always take precedence, so existing
-export-based setups work unchanged.
+Model configuration is resolved from environment variables, an optional trusted
+workspace `.env` file, and an optional user settings file. Environment variables
+always take precedence, so existing export-based setups work unchanged.
 
 ### Environment variables
 
@@ -72,11 +72,11 @@ the file — only the *name* of the environment variable that holds it:
 This is the same file that backs the `--health` MCP/extension inventory. Each
 field is resolved with the following precedence (highest first):
 
-| Field | 1 (highest) | 2 | 3 (lowest) |
-|---|---|---|---|
-| Base URL | `OPENAI_BASE_URL` | `model.baseUrl` | built-in default |
-| Model name | `OPENAI_MODEL` | `model.name` | *(required)* |
-| Credential | `OPENAI_API_KEY` | env var named by `model.apiKeyEnv` | *(required)* |
+| Field | 1 (highest) | 2 | 3 | 4 (lowest) |
+|---|---|---|---|---|
+| Base URL | `OPENAI_BASE_URL` | workspace `.env` `OPENAI_BASE_URL` | `model.baseUrl` | built-in default |
+| Model name | `OPENAI_MODEL` | workspace `.env` `OPENAI_MODEL` | `model.name` | *(required)* |
+| Credential | `OPENAI_API_KEY` | workspace `.env` `OPENAI_API_KEY` | env var named by `model.apiKeyEnv` | *(required)* |
 
 Security: the settings file is only ever the user-owned default or a path you
 pass explicitly — a settings file inside a project is never auto-discovered, so
@@ -84,7 +84,29 @@ an untrusted repository cannot redirect your endpoint or credential. Raw
 credential fields such as `model.apiKey` are rejected; reference an environment
 variable through `apiKeyEnv` instead. `oh-my-cli --preflight` prints a redacted
 summary of the resolved model, endpoint host, settings source, and credential
-variable name (never the credential value).
+variable name (never the credential value), marking which layer supplied each
+value — `env`, `workspace-env`, `settings`, or `default`.
+
+### Workspace .env file
+
+To keep model credentials in a project-local file instead of exporting them in
+every shell, place them in `.env` at the workspace root:
+
+```bash
+OPENAI_API_KEY=your-api-key-here
+OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+OPENAI_MODEL=qwen-latest-series-invite-beta-v77
+```
+
+Loading is gated by folder trust: only a workspace trusted via the user-owned
+trust store (`--trust-workspace`) or `--trust` for the current run has its
+`.env` read; an untrusted workspace's `.env` is never opened, and a missing
+file is a silent no-op. Variables already exported in your shell always win
+over `.env` values, and `.env` values sit above the settings file. The file is
+parsed for model-config resolution only — `process.env` is never mutated, so
+`.env` values are not inherited by spawned tools or child processes, and
+diagnostics report only the file path and variable names, never values.
+`.env.local`/`.env.production` variants and nested `.env` files are not read.
 
 ### Model profiles
 
