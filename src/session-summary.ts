@@ -23,6 +23,9 @@ export interface SessionSummary {
   approxTokens: number;
   model?: string;
   workspace?: string;
+  // The user-owned session name (#249) when one is set; raw — renderers must
+  // redact before display (the static list and the picker both do).
+  name?: string;
   createdAt: number | null;
   lastModified: number;
   ageMs: number;
@@ -52,6 +55,9 @@ export function collectSessionSummaries(
 
 function summarize(store: SessionStore, id: string, now: number): SessionSummary {
   const diag = store.loadWithDiagnostics(id);
+  // The name sidecar is independent of transcript health, so corrupt sessions
+  // still carry their user-owned name when one is set (Issue #530).
+  const name = store.readName(id);
 
   let lastModified = now;
   try {
@@ -81,6 +87,7 @@ function summarize(store: SessionStore, id: string, now: number): SessionSummary
     approxTokens: Math.ceil(totalChars / CHARS_PER_TOKEN),
     model: diag.meta?.model,
     workspace: diag.meta?.workspace,
+    ...(name ? { name } : {}),
     createdAt: diag.meta?.createdAt ?? null,
     lastModified,
     ageMs: Math.max(0, now - lastModified),
@@ -163,7 +170,11 @@ export function formatSessionList(summaries: SessionSummary[]): string {
 function formatSessionLines(s: SessionSummary): string[] {
   const symbol = s.corrupt ? "✗" : "✓";
   const flag = s.corrupt ? "  (corrupt — partial recovery)" : "";
-  const head = `  ${symbol} ${s.id}${flag}`;
+  // The user-owned name (#249) renders next to the id (Issue #530), redacted
+  // exactly like the picker renders it — so the discovery surface and the
+  // resume surfaces agree.
+  const namePart = s.name ? `  "${redact(s.name)}"` : "";
+  const head = `  ${symbol} ${s.id}${namePart}${flag}`;
   const provenance = `model ${redact(s.model)}  ·  repo ${redactPath(s.workspace)}`;
   const usage =
     `${s.messageCount} msgs, ${s.userTurns + s.assistantTurns} turns, ` +
