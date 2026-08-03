@@ -1,7 +1,9 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu } from "electron";
 import { DESKTOP_CHANNELS } from "./contracts.js";
 import { DesktopService } from "./service.js";
 import { createDesktopWindow } from "./window.js";
+import { buildDesktopMenuTemplate } from "./menu.js";
+import { stepZoomLevel, type ZoomDecision } from "./zoom.js";
 
 // The active service is swapped atomically when the user opens or switches a
 // workspace (#491). Every handler closes over this binding, so all IPC after
@@ -143,7 +145,18 @@ ipcMain.handle(DESKTOP_CHANNELS.writeWorkspaceFile, (_event, request) =>
   service.writeWorkspaceFile(request),
 );
 
+// Apply one zoom step (or the reset) to the focused window through the bounded
+// ladder (Issue #523). Menu zoom entries route here; keyboard zoom flows
+// through the window's before-input-event path so a key press never zooms
+// twice.
+function applyZoom(decision: ZoomDecision): void {
+  const window = BrowserWindow.getFocusedWindow();
+  if (!window) return;
+  window.webContents.setZoomLevel(stepZoomLevel(window.webContents.getZoomLevel(), decision));
+}
+
 void app.whenReady().then(() => {
+  Menu.setApplicationMenu(Menu.buildFromTemplate(buildDesktopMenuTemplate(applyZoom)));
   void createDesktopWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

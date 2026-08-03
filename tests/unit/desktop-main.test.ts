@@ -39,6 +39,8 @@ const electron = vi.hoisted(() => {
       setWindowOpenHandler: vi.fn((handler: () => { action: "deny" }) => {
         this.webContents.openHandler = handler;
       }),
+      getZoomLevel: vi.fn(() => 0),
+      setZoomLevel: vi.fn(),
     };
 
     constructor(options: unknown) {
@@ -52,7 +54,9 @@ const electron = vi.hoisted(() => {
   }
 
   return {
-    BrowserWindow,
+    BrowserWindow: Object.assign(BrowserWindow, {
+      getFocusedWindow: () => undefined,
+    }),
     handlers,
     windows,
     app: {
@@ -69,6 +73,10 @@ const electron = vi.hoisted(() => {
         handlers.set(channel, handler);
       }),
     },
+    Menu: {
+      setApplicationMenu: vi.fn(),
+      buildFromTemplate: vi.fn((template: unknown) => template),
+    },
   };
 });
 
@@ -77,6 +85,7 @@ vi.mock("electron", () => ({
   BrowserWindow: electron.BrowserWindow,
   dialog: electron.dialog,
   ipcMain: electron.ipcMain,
+  Menu: electron.Menu,
 }));
 
 // The module under test constructs its service at import time and persists the
@@ -139,6 +148,32 @@ describe("desktop main process", () => {
       },
     });
     expect(window.loadedFile).toMatch(/dist\/desktop\/index\.html$/);
+
+    // The application menu is installed explicitly (Issue #523): the View
+    // submenu carries zoom entries without accelerators, so keyboard zoom
+    // flows only through the layout-independent before-input-event path and a
+    // key press can never zoom twice.
+    const installed = electron.Menu.setApplicationMenu.mock.calls[0]?.[0] as
+      | Array<Record<string, unknown>>
+      | undefined;
+    expect(installed).toBeDefined();
+    const view = installed?.find((item) => item.label === "View") as
+      | { submenu: Array<Record<string, unknown>> }
+      | undefined;
+    expect(view).toBeDefined();
+    const zoomEntries = (view?.submenu ?? []).filter(
+      (item) => typeof item.label === "string",
+    );
+    expect(zoomEntries.map((item) => item.label)).toEqual([
+      "Actual Size",
+      "Zoom In",
+      "Zoom Out",
+    ]);
+    for (const entry of zoomEntries) {
+      expect(entry.accelerator).toBeUndefined();
+      expect(typeof entry.click).toBe("function");
+    }
+
     const preventDefault = vi.fn();
     window.webContents.navigationHandler?.({ preventDefault });
     expect(preventDefault).toHaveBeenCalledOnce();
