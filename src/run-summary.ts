@@ -5,6 +5,8 @@
 // and carries only metadata: never prompts, file contents, secrets, or raw tool
 // payloads. The schema is stable and deterministic so CI can retain and diff it.
 
+import fs from "node:fs";
+import path from "node:path";
 import { formatCostUsd } from "./cost.js";
 
 export const RUN_SUMMARY_SCHEMA = "oh-my-cli.summary";
@@ -141,6 +143,36 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummary {
       bytes: Math.max(0, Math.floor(a.bytes)),
     })),
   };
+}
+
+// Atomically persist a run summary as JSON (Issue #519): the exact
+// schema-versioned object the headless `summary` event carries, written to a
+// sibling temp file and renamed over the target so a crash leaves either the
+// previous file or the new complete one — never a partial summary. Follows
+// the export-session overwrite convention: an existing target fails closed
+// unless `force` is set, and the parent directory must already exist. The
+// summary is the existing privacy-safe surface (metadata only), so persisting
+// it opens no new channel for secrets or content.
+export function writeRunSummaryFile(summary: RunSummary, filePath: string, force = false): void {
+  const resolved = path.resolve(filePath);
+  const dir = path.dirname(resolved);
+  let dirOk = false;
+  try {
+    dirOk = fs.statSync(dir).isDirectory();
+  } catch {
+    dirOk = false;
+  }
+  if (!dirOk) {
+    throw new Error(`Cannot write run summary: directory "${dir}" does not exist`);
+  }
+  if (!force && fs.existsSync(resolved)) {
+    throw new Error(
+      `Refusing to overwrite existing run summary "${resolved}" (pass --force to replace)`,
+    );
+  }
+  const temp = `${resolved}.tmp`;
+  fs.writeFileSync(temp, `${JSON.stringify(summary, null, 2)}\n`, "utf-8");
+  fs.renameSync(temp, resolved);
 }
 
 function formatElapsed(ms: number): string {

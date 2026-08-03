@@ -510,6 +510,7 @@ focused tests and the end-to-end receipt.
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
+| `--summary-out <file>` | Persist the run's privacy-safe summary JSON (`oh-my-cli.summary` v1) to `<file>` — atomic write; refuses to overwrite an existing file without `--force` |
 | `--budget <usd>` | Spend budget in USD; stop before further provider calls once the estimated cost reaches it (also honors `OMC_SPEND_BUDGET_USD`) |
 | `--max-turns <n>` | Stop the run before the (n+1)th round at a round boundary; positive integer (also honors `OMC_MAX_TURNS`) |
 | `--max-wall-time <duration>` | Wall-time budget for the run, e.g. `90`, `30s`, `5m`, `1h`, `1.5h`; the run stops at the first round boundary after it elapses (also honors `OMC_MAX_WALL_TIME`) |
@@ -714,6 +715,21 @@ oh-my-cli -p "Run the build" --output json --summary \
 
 ```json
 {"protocol":"oh-my-cli.headless","v":1,"seq":3,"ts":"…","type":"summary","summary":{"schema":"oh-my-cli.summary","v":1,"outcome":"success","exitCode":0,"reason":"completed","elapsedMs":2000,"rounds":1,"retries":0,"toolCalls":{"total":1,"byName":{"shell":1}},"toolFailures":{"total":0,"byName":{}},"tokens":{"prompt":5,"completion":5,"total":10},"estimatedCostUsd":0.00009,"evidence":{"sessionId":"01J…","sessionPath":"~/.oh-my-cli/sessions/01J….jsonl"}}}
+```
+
+To keep the summary as a durable artifact instead of parsing the stream, pass
+`--summary-out <file>`: the exact schema-versioned JSON above is written
+atomically (a sibling temp file renamed over the target), in text and headless
+runs, for successful and failed runs alike — and independently of `--summary`
+printing. The file is exactly what the scorecard (`--baseline`/`--candidate`)
+and `--export-evidence --summary-file` consume, so two runs can be captured
+and compared directly. An existing target fails closed unless `--force` is
+passed, and the parent directory must exist.
+
+```bash
+oh-my-cli -p "Run the build" --summary-out baseline.summary.json
+oh-my-cli -p "Run the build" --summary-out candidate.summary.json --force
+oh-my-cli --baseline baseline.summary.json --candidate candidate.summary.json
 ```
 
 The `outcome` is `success` or `failure`; on failure the `reason` classifies the
@@ -2042,7 +2058,7 @@ supported platforms, artifact verification, and rollback evidence.
 - `src/lsp-runtime.ts` — deterministic, secret-safe language-server runtime engine: trust-gated discovery (no implicit install) plus workspace/version/instance-bound diagnostics with stale-event rejection, shared by the `/lsp` overlay and the headless `--lsp-status` form
 - `src/task-runtime.ts` — deterministic, secret-safe background-task engine: an eight-state lifecycle with authoritative concurrency/leases/approvals, idempotent scoped cancellation with durable receipts, and restart reconciliation against real process state (never complete from UI alone), shared by the `/tasks` overlay and the headless `--tasks` form
 - `src/headless-protocol.ts` — versioned NDJSON event stream (`--output json`)
-- `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`)
+- `src/run-summary.ts` — privacy-safe execution summary builder/formatter (`--summary`) and atomic file persistence (`--summary-out`)
 - `src/run-scorecard.ts` — deterministic, privacy-safe comparison of two summaries (`--baseline`/`--candidate`)
 - `src/run-recovery.ts` — bounded run recovery from a durable checkpoint (`--recover`)
 - `src/evidence-archive.ts` — portable, deterministic, signed evidence bundle export/verify (`--export-evidence`/`--verify-evidence`)

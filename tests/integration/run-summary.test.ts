@@ -227,3 +227,99 @@ describe("Integration: run summary on provider failure", () => {
     if (complete?.type === "complete") expect(complete.exitCode).toBe(r.code);
   });
 });
+
+describe("Integration: persist run summaries (--summary-out, Issue #519)", () => {
+  let server: FakeServer;
+  let tmpDir: string;
+  let sessionDir: string;
+  let baseEnv: Record<string, string>;
+
+  beforeAll(async () => {
+    server = await createFakeServer();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "oh-my-cli-summaryout-"));
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "oh-my-cli-summaryout-sess-"));
+    baseEnv = {
+      OPENAI_API_KEY: "fake-key",
+      OPENAI_BASE_URL: server.url,
+      OPENAI_MODEL: "fake-model",
+      HOME: sessionDir,
+    };
+  });
+
+  afterAll(async () => {
+    await server.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+  });
+
+  it("persists a scorecard-readable summary file without touching stdout", async () => {
+    const { readRunSummaryFile } = await import("../../src/run-scorecard.js");
+    server.setResponses([{ type: "text", content: "Done" }]);
+    const file = path.join(tmpDir, "run-a.summary.json");
+    const r = await runCli(
+      ["-p", "hello", "--summary-out", file, "--workspace", tmpDir],
+      baseEnv,
+    );
+    expect(r.code).toBe(0);
+    // Independent of --summary: nothing is printed without it.
+    expect(r.stdout).not.toContain("Run summary (oh-my-cli.summary v1)");
+
+    const parsed = readRunSummaryFile(file, "integration");
+    expect(parsed.schema).toBe("oh-my-cli.summary");
+    expect(parsed.v).toBe(1);
+    expect(parsed.outcome).toBe("success");
+    expect(parsed.reason).toBe("completed");
+    expect(parsed.rounds).toBe(1);
+    expect(parsed.evidence.sessionId).toBeTruthy();
+    expect(fs.existsSync(`${file}.tmp`)).toBe(false);
+  });
+
+  it("refuses to overwrite without --force, replaces with it", async () => {
+    const { readRunSummaryFile } = await import("../../src/run-scorecard.js");
+    const file = path.join(tmpDir, "run-b.summary.json");
+
+    server.setResponses([{ type: "text", content: "Done" }]);
+    const first = await runCli(["-p", "hello", "--summary-out", file, "--workspace", tmpDir], baseEnv);
+    expect(first.code).toBe(0);
+    const firstSession = readRunSummaryFile(file, "first").evidence.sessionId;
+
+    server.setResponses([{ type: "text", content: "Done" }]);
+    const refused = await runCli(["-p", "hello", "--summary-out", file, "--workspace", tmpDir], baseEnv);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain("Refusing to overwrite existing run summary");
+    expect(refused.stderr).toContain("--force");
+    // The first artifact survived untouched.
+    expect(readRunSummaryFile(file, "survived").evidence.sessionId).toBe(firstSession);
+
+    server.setResponses([{ type: "text", content: "Done" }]);
+    const forced = await runCli(
+      ["-p", "hello", "--summary-out", file, "--force", "--workspace", tmpDir],
+      baseEnv,
+    );
+    expect(forced.code).toBe(0);
+    const replaced = readRunSummaryFile(file, "replaced");
+    expect(replaced.reason).toBe("completed");
+    expect(replaced.evidence.sessionId).not.toBe(firstSession);
+  });
+
+  it("fails closed when the parent directory does not exist", async () => {
+    const file = path.join(tmpDir, "no-such-dir", "run.summary.json");
+    server.setResponses([{ type: "text", content: "Done" }]);
+    const r = await runCli(["-p", "hello", "--summary-out", file, "--workspace", tmpDir], baseEnv);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("Cannot write run summary");
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it("persists the summary of a failing run too", async () => {
+    const { readRunSummaryFile } = await import("../../src/run-scorecard.js");
+    const file = path.join(tmpDir, "run-fail.summary.json");
+    server.setResponse({ type: "text", content: "unused", failWith: { status: 400 } });
+    const r = await runCli(["-p", "boom", "--summary-out", file, "--workspace", tmpDir], baseEnv);
+    expect(r.code).toBe(1);
+    const parsed = readRunSummaryFile(file, "failed-run");
+    expect(parsed.outcome).toBe("failure");
+    expect(parsed.exitCode).toBe(1);
+    expect(parsed.reason).toBe("provider_error");
+  });
+});
