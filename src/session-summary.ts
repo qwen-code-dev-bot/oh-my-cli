@@ -178,6 +178,22 @@ export interface SessionListRecord {
   sessions: SessionListEntry[];
 }
 
+// Case-insensitive substring filter over session summaries (Issue #548):
+// matches id, user-owned name, model, and workspace path. Sessions are local
+// user data, so matching runs on the raw values; rendering still redacts.
+// An empty/blank query passes everything through; order is preserved.
+export function filterSessionSummaries(
+  summaries: SessionSummary[],
+  query: string,
+): SessionSummary[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return summaries;
+  return summaries.filter((s) => {
+    const haystacks = [s.id, s.name ?? "", s.model ?? "", s.workspace ?? ""];
+    return haystacks.some((h) => h.toLowerCase().includes(needle));
+  });
+}
+
 export function sessionListRecord(summaries: SessionSummary[]): SessionListRecord {
   const corrupt = summaries.filter((s) => s.corrupt).length;
   return {
