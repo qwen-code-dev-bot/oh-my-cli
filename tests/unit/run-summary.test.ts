@@ -384,12 +384,27 @@ describe("writeRunSummaryFile (Issue #519)", () => {
     expect(fs.existsSync(`${file}.tmp`)).toBe(false);
   });
 
-  it("fails closed when the parent directory does not exist", () => {
+  it("creates missing parent directories and round-trips (Issue #544)", () => {
     const dir = tmpDir();
-    const file = path.join(dir, "missing", "run.summary.json");
+    const file = path.join(dir, "runs", "2026-08-04", "run.summary.json");
+    expect(fs.existsSync(path.dirname(file))).toBe(false);
+    writeRunSummaryFile(sampleSummary(), file);
+    const parsed = readRunSummaryFile(file, "nested");
+    expect(parsed.schema).toBe(RUN_SUMMARY_SCHEMA);
+    expect(parsed.evidence.sessionId).toBe(sampleSummary().evidence.sessionId);
+    expect(fs.existsSync(`${file}.tmp`)).toBe(false);
+  });
+
+  it("fails closed when a path component is a file (Issue #544)", () => {
+    const dir = tmpDir();
+    const blocker = path.join(dir, "somefile");
+    fs.writeFileSync(blocker, "not a directory");
+    const file = path.join(blocker, "run.summary.json");
     expect(() => writeRunSummaryFile(sampleSummary(), file)).toThrow(
-      /directory .* does not exist/,
+      /Cannot write run summary: cannot create directory/,
     );
     expect(fs.existsSync(file)).toBe(false);
+    // The colliding file is untouched.
+    expect(fs.readFileSync(blocker, "utf-8")).toBe("not a directory");
   });
 });

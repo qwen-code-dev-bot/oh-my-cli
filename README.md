@@ -578,7 +578,7 @@ focused tests and the end-to-end receipt.
 | `--output <format>` | `-p` output format: `text` (default) or `json` (headless event stream) |
 | `--no-color` | Disable ANSI color output (also honors a non-empty `NO_COLOR` env var) |
 | `--summary` | Print a privacy-safe execution summary for the run (unattended use) |
-| `--summary-out <file>` | Persist the run's privacy-safe summary JSON (`oh-my-cli.summary` v1) to `<file>` — atomic write; refuses to overwrite an existing file without `--force` |
+| `--summary-out <file>` | Persist the run's privacy-safe summary JSON (`oh-my-cli.summary` v1) to `<file>` — atomic write, parent directories created as needed; refuses to overwrite an existing file without `--force` |
 | `--budget <usd>` | Spend budget in USD; stop before further provider calls once the estimated cost reaches it (also honors `OMC_SPEND_BUDGET_USD`) |
 | `--max-turns <n>` | Stop the run before the (n+1)th round at a round boundary; positive integer (also honors `OMC_MAX_TURNS`) |
 | `--max-wall-time <duration>` | Wall-time budget for the run, e.g. `90`, `30s`, `5m`, `1h`, `1.5h`; the run stops at the first round boundary after it elapses (also honors `OMC_MAX_WALL_TIME`) |
@@ -805,7 +805,8 @@ runs, for successful and failed runs alike — and independently of `--summary`
 printing. The file is exactly what the scorecard (`--baseline`/`--candidate`)
 and `--export-evidence --summary-file` consume, so two runs can be captured
 and compared directly. An existing target fails closed unless `--force` is
-passed, and the parent directory must exist.
+passed; parent directories are created as needed (a path component that is a
+file still fails closed with an actionable error).
 
 ```bash
 oh-my-cli -p "Run the build" --summary-out baseline.summary.json
