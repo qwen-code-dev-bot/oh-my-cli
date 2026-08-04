@@ -30,6 +30,8 @@ export interface SessionSummary {
   lastModified: number;
   ageMs: number;
   corrupt: boolean;
+  // Archived out of discovery (Issue #598); resumable by exact id/name.
+  archived: boolean;
 }
 
 export interface SessionSummaryOptions {
@@ -92,6 +94,9 @@ function summarize(store: SessionStore, id: string, now: number): SessionSummary
     lastModified,
     ageMs: Math.max(0, now - lastModified),
     corrupt: diag.corrupt,
+    // The archive marker is integrity-agnostic metadata (Issue #598), exactly
+    // like the name sidecar read above.
+    archived: store.readArchived(id) !== null,
   };
 }
 
@@ -167,6 +172,8 @@ export interface SessionListEntry {
   lastModified: number;
   ageMs: number;
   corrupt: boolean;
+  /** True when the entry is archived and shown via --include-archived (#598). */
+  archived?: boolean;
 }
 
 export interface SessionListRecord {
@@ -181,6 +188,9 @@ export interface SessionListRecord {
   // because their workspace could not be verified.
   scopedWorkspace?: string;
   excludedUnverifiable?: number;
+  // Archived retirement (Issue #598): present only when archived sessions
+  // exist and --include-archived is not set (they are hidden from the list).
+  archivedHidden?: number;
 }
 
 // The active workspace scope as reported by the listing/search surfaces
@@ -251,6 +261,7 @@ export function scopeSessionSummariesByWorkspace(
 export function sessionListRecord(
   summaries: SessionSummary[],
   scope?: SessionScopeInfo,
+  archivedHidden = 0,
 ): SessionListRecord {
   const corrupt = summaries.filter((s) => s.corrupt).length;
   return {
@@ -273,6 +284,7 @@ export function sessionListRecord(
       lastModified: s.lastModified,
       ageMs: s.ageMs,
       corrupt: s.corrupt,
+      ...(s.archived ? { archived: true } : {}),
     })),
     ...(scope !== undefined
       ? {
@@ -280,12 +292,14 @@ export function sessionListRecord(
           excludedUnverifiable: scope.excludedUnverifiable,
         }
       : {}),
+    ...(archivedHidden > 0 ? { archivedHidden } : {}),
   };
 }
 
 export function formatSessionList(
   summaries: SessionSummary[],
   scope?: SessionScopeInfo,
+  archivedHidden = 0,
 ): string {
   const lines: string[] = [];
   lines.push("Sessions");
@@ -302,6 +316,11 @@ export function formatSessionList(
         `(${scope.excludedUnverifiable} session(s) excluded: workspace unverifiable)`,
       );
     }
+    if (archivedHidden > 0) {
+      lines.push(
+        `(${archivedHidden} archived session(s) hidden — use --include-archived to see them)`,
+      );
+    }
     return lines.join("\n");
   }
 
@@ -313,10 +332,14 @@ export function formatSessionList(
     scope !== undefined
       ? `, ${scope.excludedUnverifiable} excluded (workspace unverifiable)`
       : "";
+  const hidden =
+    archivedHidden > 0
+      ? `\n${archivedHidden} archived session(s) hidden — use --include-archived to see them`
+      : "";
   lines.push("");
   lines.push(
     `Summary: ${summaries.length - corrupt} resumable, ${corrupt} corrupt ` +
-      `(${summaries.length} total${excluded})`,
+      `(${summaries.length} total${excluded})${hidden}`,
   );
   lines.push("");
   lines.push(`Resume one with: oh-my-cli --resume <session-id> -p "<prompt>"`);
@@ -329,11 +352,14 @@ function formatSessionLines(s: SessionSummary): string[] {
   // Corrupt sessions point at the salvage path that delivers the partial
   // recovery this list advertises (Issue #546).
   const flag = s.corrupt ? "  (corrupt — salvage with --salvage-session)" : "";
+  // Archived sessions are shown only via --include-archived (Issue #598);
+  // flag them so the inclusion is never mistaken for active discovery.
+  const archivedFlag = s.archived ? "  (archived)" : "";
   // The user-owned name (#249) renders next to the id (Issue #530), redacted
   // exactly like the picker renders it — so the discovery surface and the
   // resume surfaces agree.
   const namePart = s.name ? `  "${redact(s.name)}"` : "";
-  const head = `  ${symbol} ${s.id}${namePart}${flag}`;
+  const head = `  ${symbol} ${s.id}${namePart}${flag}${archivedFlag}`;
   const provenance = `model ${redact(s.model)}  ·  repo ${redactPath(s.workspace)}`;
   const usage =
     `${s.messageCount} msgs, ${s.userTurns + s.assistantTurns} turns, ` +

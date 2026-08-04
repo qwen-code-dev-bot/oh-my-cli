@@ -137,6 +137,9 @@ export function searchSessions(
 
   if (needle !== "") {
     for (const id of [...store.listIds()].sort()) {
+      // Archived sessions are retired from discovery (Issue #598): the scan
+      // never surfaces them, though they remain resumable by exact id/name.
+      if (store.readArchived(id) !== null) continue;
       const diag = store.loadWithDiagnostics(id);
       // Workspace scoping runs before integrity accounting: an unverifiable
       // workspace is excluded whether or not the checkpoint is healthy.
