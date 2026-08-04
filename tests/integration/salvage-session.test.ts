@@ -70,8 +70,12 @@ describe("Integration: salvage corrupt sessions (--salvage-session, Issue #546)"
     server.setResponses([{ type: "text", content: "seed answer" }]);
     const seed = await runCli(["-p", "seed question", "--workspace", tmpDir], baseEnv);
     expect(seed.code).toBe(0);
-    const ids = sessionIds(sessionsDir());
-    const id = ids[ids.length - 1];
+    const dir = sessionsDir();
+    const id = sessionIds(dir).sort(
+      (a, b) =>
+        fs.statSync(path.join(dir, `${b}.jsonl`)).mtimeMs -
+        fs.statSync(path.join(dir, `${a}.jsonl`)).mtimeMs,
+    )[0];
 
     // Corrupt it mid-file (a torn line between parseable messages; a merely
     // trailing torn line would be "partial" and resumable without salvage).
@@ -110,8 +114,14 @@ describe("Integration: salvage corrupt sessions (--salvage-session, Issue #546)"
     server.setResponses([{ type: "text", content: "healthy answer" }]);
     const seed = await runCli(["-p", "healthy seed", "--workspace", tmpDir], baseEnv);
     expect(seed.code).toBe(0);
-    const ids = sessionIds(sessionsDir());
-    const id = ids[ids.length - 1];
+    // Newest session by mtime is the one just seeded (readdir order is
+    // filesystem-dependent and does not track recency).
+    const dir = sessionsDir();
+    const id = sessionIds(dir).sort(
+      (a, b) =>
+        fs.statSync(path.join(dir, `${b}.jsonl`)).mtimeMs -
+        fs.statSync(path.join(dir, `${a}.jsonl`)).mtimeMs,
+    )[0];
     const r = await runCli(["--salvage-session", id], baseEnv);
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("nothing to salvage");
