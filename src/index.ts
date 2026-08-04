@@ -58,6 +58,7 @@ import {
 import type { SessionScopeInfo } from "./session-summary.js";
 import { salvageSession, resolveSalvageTarget } from "./session-salvage.js";
 import { archiveSession, unarchiveSession, resolveArchiveTarget } from "./session-archive.js";
+import { buildSessionInspectRecord, formatSessionInspect } from "./session-inspect.js";
 import { searchSessions, formatSessionSearch } from "./session-search.js";
 import type { SessionSearchScope } from "./session-search.js";
 import { forkSession, resolveForkTarget, SESSION_FORK_SCHEMA, SESSION_FORK_VERSION } from "./session-fork.js";
@@ -516,6 +517,10 @@ program
   )
   .option("--attention", "Show a read-only, workspace-scoped attention summary of what needs action and exit (add --output json for a versioned record)")
   .option("--session-stats <id-or-name>", "Show a read-only, deterministic activity/efficiency stats view for a session by exact id or user-owned name (add --output json for automation) and exit")
+  .option(
+    "--inspect-session <id-or-name>",
+    "Show a read-only health card for a session (integrity verdict, sidecar inventory, meta provenance, next-step hints), by exact id or user-owned name (add --output json for automation) and exit",
+  )
   .option("--turn-history <id-or-name>", "Show a read-only, per-turn change provenance view for a session from its durable turn checkpoints, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--memory-add <text>", "Record a durable workspace memory (manual; secrets redacted before persistence) and exit")
   .option("--memory-list", "List this workspace's active memories with provenance (read-only; add --output json for automation) and exit")
@@ -1054,6 +1059,33 @@ program
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
           process.stdout.write(formatFailures(record).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Session-inspect mode (Issue #600): one read-only health card per
+      // session — integrity verdict, sidecar presence/counts, redacted meta
+      // provenance, and bounded verdict-only next-step hints. Strictly
+      // read-only: resolution uses the heal-free id-or-name resolver so
+      // inspecting a corrupt session never quarantines it. Exits 0 on a
+      // successful inspection, 2 on resolution failure or a bad format.
+      if (opts.inspectSession !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const resolved = resolveArchiveTarget(String(opts.inspectSession), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Cannot inspect: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const record = buildSessionInspectRecord(store, resolved.sessionId);
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(formatSessionInspect(record).join("\n") + "\n");
         }
         process.exit(0);
       }
