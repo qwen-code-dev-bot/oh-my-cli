@@ -46,15 +46,19 @@ export interface SessionGoal {
   status: "active" | "paused" | "achieved";
   createdAt: number;
   updatedAt: number;
+  // Optional concise label for compact surfaces (Issue #586). The objective
+  // remains the authoritative execution instruction.
+  title?: string;
 }
 
 /**
  * One immutable Goal lifecycle transition (Issue #580). `kind` names the
  * runGoalCommand transition that produced the entry; `legacy` appears only in
  * entries synthesized for display from pre-history sidecars and is never
- * written by a transition.
+ * written by a transition. `title` (Issue #586) is an annotation: it records
+ * a title set or cleared without bumping the revision or changing the status.
  */
-export type GoalHistoryKind = "set" | "pause" | "resume" | "achieve" | "clear" | "legacy";
+export type GoalHistoryKind = "set" | "pause" | "resume" | "achieve" | "clear" | "title" | "legacy";
 
 export interface GoalHistoryEntry {
   revision: number;
@@ -119,7 +123,8 @@ function isSessionGoal(value: unknown): value is SessionGoal {
     typeof goal.objective === "string" &&
     (goal.status === "active" || goal.status === "paused" || goal.status === "achieved") &&
     typeof goal.createdAt === "number" &&
-    typeof goal.updatedAt === "number"
+    typeof goal.updatedAt === "number" &&
+    (goal.title === undefined || typeof goal.title === "string")
   );
 }
 
@@ -129,6 +134,7 @@ const GOAL_HISTORY_KINDS: readonly GoalHistoryKind[] = [
   "resume",
   "achieve",
   "clear",
+  "title",
   "legacy",
 ];
 

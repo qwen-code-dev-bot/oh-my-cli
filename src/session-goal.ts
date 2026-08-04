@@ -14,6 +14,9 @@ const GOAL_CONTROL_COMMANDS = new Set([
 /** Rendering bound for the compact revision history (Issue #580). */
 export const GOAL_HISTORY_RENDER_LIMIT = 10;
 
+/** Bound for the optional concise goal title (Issue #586). */
+export const GOAL_TITLE_MAX_CHARS = 80;
+
 function safeObjective(value: string): string {
   const terminalSafe = value
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
@@ -22,6 +25,23 @@ function safeObjective(value: string): string {
     .trim();
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= 500 ? redacted : `${redacted.slice(0, 499)}…`;
+}
+
+/**
+ * Sanitize a concise goal title (Issue #586): the same terminal-safety and
+ * redaction pipeline as objectives, bounded to GOAL_TITLE_MAX_CHARS. Returns
+ * "" for input that sanitizes to nothing.
+ */
+function safeTitle(value: string): string {
+  const terminalSafe = value
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const redacted = redactSecrets(terminalSafe).text;
+  return redacted.length <= GOAL_TITLE_MAX_CHARS
+    ? redacted
+    : `${redacted.slice(0, GOAL_TITLE_MAX_CHARS - 1)}…`;
 }
 
 /**
@@ -56,24 +76,26 @@ function appendTransition(
 /**
  * Render compact newest-first history lines (Issue #580), bounded to
  * GOAL_HISTORY_RENDER_LIMIT with an elision count. Shared by `/goal status`
- * and the headless `--goal-status` surface. `currentRevision` marks the
- * active revision (a synthesized `legacy` entry is never marked current).
+ * and the headless `--goal-status` surface. The newest entry is marked
+ * current (a synthesized `legacy` entry never is); since #586 title entries
+ * share their revision with the surrounding state, recency — not revision
+ * equality — identifies the latest state.
  */
 export function formatGoalHistoryLines(
   history: readonly GoalHistoryEntry[],
   currentRevision: number,
 ): string[] {
   if (history.length === 0) return [];
+  void currentRevision;
   const lines = ["  history (newest first):"];
   const shown = [...history].reverse().slice(0, GOAL_HISTORY_RENDER_LIMIT);
-  for (const entry of shown) {
+  shown.forEach((entry, index) => {
     const objective = entry.objective === null ? "(cleared)" : entry.objective;
-    const current =
-      entry.revision === currentRevision && entry.kind !== "legacy" ? " (current)" : "";
+    const current = index === 0 && entry.kind !== "legacy" ? " (current)" : "";
     lines.push(
       `    rev ${entry.revision} · ${entry.kind} · ${objective} · ${new Date(entry.at).toISOString()}${current}`,
     );
-  }
+  });
   const elided = history.length - shown.length;
   if (elided > 0) {
     lines.push(`    +${elided} earlier transition(s) not shown`);
@@ -88,6 +110,7 @@ function formatGoal(checkpoint: SessionGoalCheckpoint): string {
   }
   return [
     `Goal: ${checkpoint.goal.status}`,
+    ...(checkpoint.goal.title !== undefined ? [`  title: ${checkpoint.goal.title}`] : []),
     `  objective: ${checkpoint.goal.objective}`,
     `  set: ${new Date(checkpoint.goal.createdAt).toISOString()}`,
     `  revision: ${checkpoint.revision}`,
@@ -104,6 +127,44 @@ export function runGoalCommand(
   const input = args.trim();
   const current = store.readGoal(sessionId);
   if (!input || input === "status") return formatGoal(current);
+
+  // Title management (Issue #586): an annotation, not a redefinition — the
+  // revision is NOT bumped and the status is unchanged, so an in-flight
+  // execution's auto-achieve revision check stays valid. `title` alone (or
+  // empty text) clears the title.
+  if (input === "title" || input.startsWith("title ")) {
+    if (!current.goal) return "Goal: nothing to title";
+    const title = safeTitle(input === "title" ? "" : input.slice("title ".length));
+    if (title === "") {
+      if (current.goal.title === undefined) return formatGoal(current);
+      const next: SessionGoalCheckpoint = {
+        revision: current.revision,
+        goal: { ...current.goal, title: undefined, updatedAt: now },
+        history: appendTransition(current, {
+          revision: current.revision,
+          kind: "title",
+          objective: null,
+          status: current.goal.status,
+          at: now,
+        }),
+      };
+      store.writeGoal(sessionId, next);
+      return `Goal title cleared (revision ${next.revision})`;
+    }
+    const next: SessionGoalCheckpoint = {
+      revision: current.revision,
+      goal: { ...current.goal, title, updatedAt: now },
+      history: appendTransition(current, {
+        revision: current.revision,
+        kind: "title",
+        objective: title,
+        status: current.goal.status,
+        at: now,
+      }),
+    };
+    store.writeGoal(sessionId, next);
+    return `Goal titled (revision ${next.revision}): ${title}`;
+  }
 
   if (input === "pause") {
     if (!current.goal) return "Goal: nothing to pause";
@@ -209,7 +270,12 @@ export function goalExecutionRequest(
   args: string,
   checkpoint: SessionGoalCheckpoint,
 ): { prompt: string; revision: number } | null {
-  if (GOAL_CONTROL_COMMANDS.has(args.trim())) return null;
+  const input = args.trim();
+  if (GOAL_CONTROL_COMMANDS.has(input)) return null;
+  // Title management is a control action, never an objective to execute
+  // (Issue #586). Note this reserves the literal prefix "title", like the
+  // other control words.
+  if (input === "title" || input.startsWith("title ")) return null;
   if (checkpoint.goal?.status !== "active") return null;
   return {
     prompt: checkpoint.goal.objective,

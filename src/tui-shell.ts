@@ -453,6 +453,8 @@ export interface GoalRailState {
   createdAt: number;
   updatedAt: number;
   revision: number;
+  // Optional concise title (Issue #586), rendered before the objective.
+  title?: string;
 }
 
 export type GoalVisualState =
@@ -473,6 +475,7 @@ export function goalRailFromCheckpoint(
     createdAt: checkpoint.goal.createdAt,
     updatedAt: checkpoint.goal.updatedAt,
     revision: checkpoint.revision,
+    ...(checkpoint.goal.title !== undefined ? { title: checkpoint.goal.title } : {}),
   };
 }
 
@@ -2238,6 +2241,10 @@ export function renderGoalRail(
       ? `${Math.floor(elapsedSeconds / 60)}m`
       : `${elapsedSeconds}s`;
   const label = `${marker} GOAL ${visual} · ${elapsed} · rev ${goal.revision}`;
+  // Title-first when present (Issue #586): the concise title leads and the
+  // full objective follows; clipping keeps both layouts bounded.
+  const railObjective =
+    goal.title !== undefined ? `${goal.title} · ${goal.objective}` : goal.objective;
   const setStage = `${style.success}●${style.reset} SET`;
   const executeMarker = visual === "achieved" ? "●" : visual === "failed" ? "✕" : marker;
   const executeStyle = visual === "achieved"
@@ -2251,7 +2258,7 @@ export function renderGoalRail(
     : `${style.dim}○ ACHIEVE${style.reset}`;
   if (cols < 72) {
     return [
-      clipVisible(`${style.bold}${label}${style.reset} · ${goal.objective}`, cols),
+      clipVisible(`${style.bold}${label}${style.reset} · ${railObjective}`, cols),
       clipVisible(`${setStage} ━ ${executeStage} ━ ${achieveStage}`, cols),
     ];
   }
@@ -2270,7 +2277,7 @@ export function renderGoalRail(
       `${titlePrefix}${style.dim}${"─".repeat(titleFill)}${style.reset}  ${titleSuffix}`,
       cols,
     ),
-    clipVisible(`${style.accent}│${style.reset}  ${style.bold}${goal.objective}${style.reset}`, cols),
+    clipVisible(`${style.accent}│${style.reset}  ${style.bold}${railObjective}${style.reset}`, cols),
     clipVisible(
       `${style.accent}│${style.reset}  ${setStage} ${connector} ${executeStage} ${connector} ${achieveStage}  ${style.dim}· ${elapsed} · revision ${goal.revision}${style.reset}`,
       cols,
