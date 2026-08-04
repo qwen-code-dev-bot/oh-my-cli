@@ -86,6 +86,17 @@ export type HeadlessEvent =
       reasonClass: string;
       delayMs: number;
     }
+  // The run degraded from the primary model to the configured one-shot
+  // fallback after a retryable provider failure produced no output (Issue
+  // #590). Metadata only: model identifiers and the transient reason class —
+  // never error text, request bodies, or secrets.
+  | {
+      type: "fallback";
+      round: number;
+      fromModel: string;
+      toModel: string;
+      reasonClass: string;
+    }
   // The in-memory transcript was compacted to relieve context pressure. Metadata
   // only: how many messages were summarized and how many completed-action
   // receipts were retained, plus the prompt-token pressure that triggered it.
@@ -262,6 +273,15 @@ export function createHeadlessSink(
         maxAttempts: info.maxAttempts,
         reasonClass: info.reasonClass,
         delayMs: info.delayMs,
+      });
+    },
+    fallback: (info) => {
+      writer.emit({
+        type: "fallback",
+        round: info.round,
+        fromModel: safeName(info.fromModel),
+        toModel: safeName(info.toModel),
+        reasonClass: info.reasonClass,
       });
     },
     compaction: (info) => {

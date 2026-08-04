@@ -793,6 +793,12 @@ export class DesktopService {
           sessionId,
           message: `Retrying provider ${attempt}/${maxAttempts}`,
         }),
+      fallback: ({ fromModel, toModel }) =>
+        emit({
+          type: "status",
+          sessionId,
+          message: `Provider fallback: ${fromModel} → ${toModel}`,
+        }),
       compaction: ({ summarizedMessages }) =>
         emit({
           type: "status",

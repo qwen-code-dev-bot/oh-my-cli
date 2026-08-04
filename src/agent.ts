@@ -2,7 +2,14 @@ import type { Config } from "./config.js";
 import type { SessionMessage } from "./session.js";
 import type { ToolDef, ToolResult, ShellFailureDetail } from "./tools.js";
 import { createTools, toolSchemasForOpenAI } from "./tools.js";
-import { streamChat, backoffDelayMs, RETRY_MAX_ATTEMPTS, isQuotaExhausted, quotaExhaustedGuidance } from "./provider.js";
+import {
+  streamChat,
+  backoffDelayMs,
+  RETRY_MAX_ATTEMPTS,
+  isQuotaExhausted,
+  quotaExhaustedGuidance,
+  classifyTransient,
+} from "./provider.js";
 import type { StreamProvider } from "./provider.js";
 import { redactEndpointHost } from "./permission-impact.js";
 import type { Workspace } from "./workspace.js";
@@ -113,6 +120,14 @@ export interface AgentOptions {
   // never shifts TTFT clock sequences. Defaults to Date.now. Undefined ⇒
   // Date.now.
   runClock?: () => number;
+  // One-shot fallback model (Issue #590). When set and the primary model's
+  // request fails with a retryable (transient) provider error BEFORE producing
+  // any output, the run degrades at most once to this model for the remainder
+  // of the run; a subsequent failure never re-degrades. Null/undefined
+  // disables fallback entirely and keeps existing behavior. Callers driving a
+  // scripted provider (task-fixture replay) must never set this — a scripted
+  // run cannot degrade truthfully.
+  fallbackModel?: string | null;
   // Cooperative cancellation (#489). Polled before the first provider call, at
   // every round boundary, and between streamed events. When it returns true the
   // loop stops as soon as the current event is handled: any streamed assistant
@@ -168,6 +183,17 @@ export interface AgentCompaction {
   promptTokens: number;
 }
 
+// The run degraded from the primary model to the configured one-shot fallback
+// after a retryable provider failure produced no output (Issue #590). Metadata
+// only — model identifiers and the transient reason class — never error text,
+// request bodies, or secrets.
+export interface AgentFallback {
+  round: number;
+  fromModel: string;
+  toModel: string;
+  reasonClass: string;
+}
+
 // Output sink for the agent loop. The default console sink reproduces the
 // existing terminal behaviour; the headless sink (see headless-protocol.ts)
 // renders the same lifecycle as a versioned JSON event stream.
@@ -187,6 +213,9 @@ export interface AgentSink {
   usage(info: AgentUsage): void;
   // A transient provider failure is being retried (bounded backoff).
   retry(info: AgentRetry): void;
+  // The run degraded to the one-shot fallback model (Issue #590). Optional so
+  // existing sinks are unaffected.
+  fallback?(info: AgentFallback): void;
   // The in-memory transcript was compacted to relieve context pressure.
   compaction?(info: AgentCompaction): void;
   // A tool requires approval before executing. Optional: when present the sink
@@ -252,6 +281,14 @@ export function createConsoleSink(opts?: { messageUsage?: boolean }): AgentSink 
           `(waiting ${info.delayMs}ms).\n`,
       );
     },
+    fallback: (info) => {
+      // The degrade is a material change of model for the rest of the run; it
+      // goes to stderr like the other run-level notes, never into stdout.
+      process.stderr.write(
+        `\nProvider fallback: model "${info.fromModel}" failed transiently (${info.reasonClass}); ` +
+          `degrading this run to fallback model "${info.toModel}".\n`,
+      );
+    },
     compaction: (info) => {
       // Surface the compaction so the context reduction is observable.
       process.stderr.write(
@@ -305,6 +342,11 @@ export interface AgentResult {
   // Whether the model price was found in the bundled table (false ⇒ the
   // conservative fallback rate was used).
   costKnown: boolean;
+  // One-shot fallback degrade (Issue #590): true when the run degraded from
+  // the primary model to the configured fallback; `fallbackModel` is the model
+  // the run degraded to (null when no degrade happened).
+  fellBack: boolean;
+  fallbackModel: string | null;
 }
 
 export async function runAgent(
@@ -375,7 +417,21 @@ export async function runAgent(
   // Running cost estimate (USD) across the run. Recomputed from cumulative
   // tokens each round; null in snapshots until the provider reports usage.
   let costUsd = 0;
-  const costKnown = lookupModelPrice(opts.config.model).known;
+  // One-shot fallback degrade (Issue #590). `activeConfig` is the provider
+  // config the current round runs under; the degrade swaps its model once for
+  // the remainder of the run. Cost accounting splits at the degrade so tokens
+  // streamed under the primary keep the primary's price — with no degrade the
+  // baselines stay 0 and the math reduces to whole-run pricing.
+  const fallbackModel =
+    typeof opts.fallbackModel === "string" && opts.fallbackModel.trim() !== ""
+      ? opts.fallbackModel.trim()
+      : null;
+  let activeConfig = opts.config;
+  let fellBack = false;
+  let costBaselineUsd = 0;
+  let baselinePromptTokens = 0;
+  let baselineCompletionTokens = 0;
+  let costKnown = lookupModelPrice(opts.config.model).known;
   const budgetUsd = opts.budgetUsd ?? null;
   // Operator run caps (Issue #515): same round-boundary semantics as the spend
   // budget. The wall-time cap measures real elapsed time through a dedicated
@@ -434,6 +490,8 @@ export async function runAgent(
         tokens: tokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
+        fellBack,
+        fallbackModel: fellBack ? fallbackModel : null,
       };
     }
 
@@ -450,6 +508,8 @@ export async function runAgent(
         tokens: tokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
+        fellBack,
+        fallbackModel: fellBack ? fallbackModel : null,
       };
     }
 
@@ -467,6 +527,8 @@ export async function runAgent(
         tokens: tokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
+        fellBack,
+        fallbackModel: fellBack ? fallbackModel : null,
       };
     }
     if (maxWallTimeMs !== null && runClock() - runStartedAt >= maxWallTimeMs) {
@@ -480,6 +542,8 @@ export async function runAgent(
         tokens: tokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
+        fellBack,
+        fallbackModel: fellBack ? fallbackModel : null,
       };
     }
     // Tool-call cap gate (Issue #517): stop at the first round boundary after
@@ -497,6 +561,8 @@ export async function runAgent(
         tokens: tokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
+        fellBack,
+        fallbackModel: fellBack ? fallbackModel : null,
       };
     }
 
@@ -549,7 +615,7 @@ export async function runAgent(
       roundCompletionTokens = null;
 
       try {
-        for await (const event of stream(opts.config, messages, { tools: schemas })) {
+        for await (const event of stream(activeConfig, messages, { tools: schemas })) {
           if (event.type === "text") {
             if (firstTokenAt === null) firstTokenAt = now();
             assistantText += event.delta;
@@ -598,18 +664,56 @@ export async function runAgent(
               tokens: tokensSnapshot(),
               estimatedCostUsd: costSnapshot(),
               costKnown,
+              fellBack,
+              fallbackModel: fellBack ? fallbackModel : null,
             };
           }
         }
       } catch (err: unknown) {
+        // One-shot fallback degrade (Issue #590): when the active model's
+        // request fails transiently BEFORE producing any output (no text, no
+        // tool calls) and a fallback is configured and not yet used, swap to
+        // the fallback for the rest of the run and re-invoke the provider for
+        // this round. The provider's own bounded retries already ran inside
+        // streamChat; this is a degrade, not another retry of the same model.
+        // A failure after any output, a non-retryable failure, or any failure
+        // once already degraded falls through to the terminal path below.
+        const transient = classifyTransient(err);
+        if (
+          fallbackModel !== null &&
+          !fellBack &&
+          transient !== null &&
+          assistantText.length === 0 &&
+          assistantToolCalls.length === 0
+        ) {
+          if (hasUsage) {
+            costBaselineUsd = estimateCostUsd(activeConfig.model, {
+              prompt: tokens.prompt,
+              completion: tokens.completion,
+            }).usd;
+          }
+          baselinePromptTokens = tokens.prompt;
+          baselineCompletionTokens = tokens.completion;
+          const fromModel = activeConfig.model;
+          activeConfig = { ...activeConfig, model: fallbackModel };
+          costKnown = costKnown && lookupModelPrice(fallbackModel).known;
+          fellBack = true;
+          sink.fallback?.({
+            round,
+            fromModel,
+            toModel: fallbackModel,
+            reasonClass: transient.reasonClass,
+          });
+          continue;
+        }
         const rawMsg = err instanceof Error ? err.message : String(err);
         // Surface a stable, secret-safe quota-exhausted guidance instead of raw
         // provider prose when the failure is an exhausted quota (#247); other
         // failures keep their existing message.
         const msg = isQuotaExhausted(err)
           ? quotaExhaustedGuidance({
-              model: opts.config.model,
-              redactedHost: redactEndpointHost(opts.config.baseUrl),
+              model: activeConfig.model,
+              redactedHost: redactEndpointHost(activeConfig.baseUrl),
             })
           : rawMsg;
         // Preserve a partial answer (#243): when the stream fails after emitting
@@ -641,16 +745,23 @@ export async function runAgent(
           tokens: tokensSnapshot(),
           estimatedCostUsd: costSnapshot(),
           costKnown,
+          fellBack,
+          fallbackModel: fellBack ? fallbackModel : null,
         };
       }
 
       // Charge this attempt's usage to the running cost estimate so every empty
-      // attempt is accounted before any retry.
+      // attempt is accounted before any retry. Tokens streamed before a
+      // fallback degrade (Issue #590) keep the earlier model's price via the
+      // baseline; with no degrade the baseline is 0 and this is whole-run
+      // pricing under the primary model.
       if (hasUsage) {
-        costUsd = estimateCostUsd(opts.config.model, {
-          prompt: tokens.prompt,
-          completion: tokens.completion,
-        }).usd;
+        costUsd =
+          costBaselineUsd +
+          estimateCostUsd(activeConfig.model, {
+            prompt: tokens.prompt - baselinePromptTokens,
+            completion: tokens.completion - baselineCompletionTokens,
+          }).usd;
       }
 
       // A valid completion has at least one non-empty text delta or at least one
@@ -670,6 +781,8 @@ export async function runAgent(
           tokens: tokensSnapshot(),
           estimatedCostUsd: costSnapshot(),
           costKnown,
+          fellBack,
+          fallbackModel: fellBack ? fallbackModel : null,
         };
       }
       if (emptyAttempts >= RETRY_MAX_ATTEMPTS) {
@@ -704,6 +817,8 @@ export async function runAgent(
         tokens: tokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
+        fellBack,
+        fallbackModel: fellBack ? fallbackModel : null,
       };
     }
 
@@ -745,6 +860,8 @@ export async function runAgent(
         tokens: tokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
+        fellBack,
+        fallbackModel: fellBack ? fallbackModel : null,
       };
     }
 
@@ -798,6 +915,8 @@ export async function runAgent(
           tokens: tokensSnapshot(),
           estimatedCostUsd: costSnapshot(),
           costKnown,
+          fellBack,
+          fallbackModel: fellBack ? fallbackModel : null,
         };
       }
       // Parse the arguments once so the sink can render structured detail (e.g. a
@@ -848,6 +967,8 @@ export async function runAgent(
     tokens: tokensSnapshot(),
     estimatedCostUsd: costSnapshot(),
     costKnown,
+    fellBack,
+    fallbackModel: fellBack ? fallbackModel : null,
   };
 }
 

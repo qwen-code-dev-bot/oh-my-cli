@@ -44,7 +44,7 @@ import type { ApprovalMode } from "./approval.js";
 import type { SessionMessage } from "./session.js";
 import { runPalette, defaultCommands } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
-import { runPreflight, formatPreflight } from "./preflight.js";
+import { runPreflight, formatPreflight, validateFallbackModel } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
 import {
@@ -277,6 +277,31 @@ function defaultSigintHandler(): void {
 }
 process.on("SIGINT", defaultSigintHandler);
 
+// Resolve the one-shot fallback model override (Issue #590): the CLI flag
+// wins over OMC_FALLBACK_MODEL; a flag given but blank is a usage error
+// rather than a silent disable, while a blank env var stays unset. The value
+// must differ from the primary model. Throws with an actionable message on an
+// invalid configuration.
+function resolveFallbackModelOverride(
+  flag: string | undefined,
+  env: string | undefined,
+  primaryModel: string,
+): string | undefined {
+  if (flag !== undefined && flag.trim() === "") {
+    throw new Error("Error: --fallback-model requires a non-empty model name");
+  }
+  const raw = flag ?? env;
+  if (raw === undefined) return undefined;
+  const fallback = raw.trim();
+  if (fallback === "") return undefined;
+  if (fallback === primaryModel) {
+    throw new Error(
+      `Error: fallback model "${fallback}" must differ from the primary model`,
+    );
+  }
+  return fallback;
+}
+
 // One bounded top-level fatal-failure boundary (#246) for uncaught exceptions and
 // unhandled rejections during an active run. It restores a usable terminal when
 // attached to a TTY, emits exactly one headless terminal record when the protocol
@@ -483,6 +508,10 @@ program
   .option("--perf-report", "Show a read-only, redacted performance diagnostics report with declared budgets for the workspace (add --output json for automation) and exit")
   .option("--failures <id-or-name>", "Show a session's read-only bounded, redacted shell failure receipts, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--offline", "Offline mode: block provider routes to non-loopback endpoints fail-closed before any network I/O (also env OMC_OFFLINE=1)")
+  .option(
+    "--fallback-model <model>",
+    "Degrade at most once to this model for the rest of the run when the primary model fails with a retryable provider error; validated fail-closed before any work starts (env: OMC_FALLBACK_MODEL)",
+  )
   .option("--goal-status <id-or-name>", "Show a session's read-only durable Goal checkpoint (status, objective, timestamps, revision), by exact id or user-owned name (add --output json for automation) and exit")
   .option("--goal <args>", "Control a session's durable Goal headlessly against --session: an objective sets it; pause / resume / achieve / clear / status behave like the TUI /goal command (add --output json for automation) and exit")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
@@ -2625,6 +2654,20 @@ program
         process.stderr.write(describeResolvedConfig(resolved) + "\n");
         // Offline posture is reported without any network probe (Issue #576).
         if (offlineRequested) resolved.config.offline = true;
+        // One-shot fallback model (Issue #590): resolved and validated
+        // alongside the primary; an invalid override fails closed.
+        try {
+          const fallback = resolveFallbackModelOverride(
+            opts.fallbackModel,
+            process.env.OMC_FALLBACK_MODEL,
+            resolved.config.model,
+          );
+          if (fallback !== undefined) resolved.config.fallbackModel = fallback;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(1);
+        }
         const result = await runPreflight(resolved.config);
         process.stdout.write(formatPreflight(result) + "\n");
         process.exit(result.ok ? 0 : 1);
@@ -2652,6 +2695,20 @@ program
         process.stderr.write(
           "Offline mode: provider routes are restricted to loopback endpoints.\n",
         );
+      }
+      // One-shot fallback model (Issue #590): --fallback-model wins over
+      // OMC_FALLBACK_MODEL; an invalid override fails closed before any work.
+      try {
+        const fallback = resolveFallbackModelOverride(
+          opts.fallbackModel,
+          process.env.OMC_FALLBACK_MODEL,
+          config.model,
+        );
+        if (fallback !== undefined) config.fallbackModel = fallback;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`${msg}\n`);
+        process.exit(1);
       }
       const store = new SessionStore();
 
@@ -2876,6 +2933,21 @@ program
           `Continuing session ${shortSessionId(picked.sessionId)}${modelNote} — most recent for this workspace\n`,
         );
         continueResumeId = picked.sessionId;
+      }
+
+      // One-shot fallback model (Issue #590): an unusable fallback fails
+      // closed here — before any session or provider work — instead of
+      // surfacing mid-run as a failed degrade. Task-fixture replays drive a
+      // scripted provider and never touch the network, so they skip the probe
+      // and never receive a fallback.
+      if (config.fallbackModel !== undefined && opts.replayFixture === undefined) {
+        const fallbackProbe = await validateFallbackModel(config);
+        if (!fallbackProbe.ok) {
+          process.stderr.write(
+            `✗ Fallback model preflight failed [${fallbackProbe.category}]: ${fallbackProbe.message}\n`,
+          );
+          process.exit(1);
+        }
       }
 
       let sessionId: string;
@@ -3107,6 +3179,9 @@ program
               maxWallTimeMs,
               maxToolCalls,
               compactThreshold,
+              // One-shot fallback degrade (Issue #590); never for fixture
+              // replays — a scripted provider cannot degrade truthfully.
+              fallbackModel: replayFixture ? null : (config.fallbackModel ?? null),
               mutatingAllowed,
               images,
               turnImages,
@@ -3177,6 +3252,8 @@ program
               toolFailures: result.stats.toolFailures,
               tokens: result.tokens,
               estimatedCostUsd: result.estimatedCostUsd,
+              fellBack: result.fellBack,
+              fallbackModel: result.fallbackModel,
               sessionId,
               sessionPath: evidencePath(),
               attachments: attachmentRefs,
@@ -3232,6 +3309,8 @@ program
           maxWallTimeMs,
           maxToolCalls,
           compactThreshold,
+          // One-shot fallback degrade (Issue #590); never for fixture replays.
+          fallbackModel: replayFixture ? null : (config.fallbackModel ?? null),
           mutatingAllowed,
           images,
           turnImages,
@@ -3266,6 +3345,8 @@ program
             toolFailures: result.stats.toolFailures,
             tokens: result.tokens,
             estimatedCostUsd: result.estimatedCostUsd,
+            fellBack: result.fellBack,
+            fallbackModel: result.fallbackModel,
             sessionId,
             sessionPath: evidencePath(),
             attachments: attachmentRefs,
@@ -3631,6 +3712,8 @@ program
                 maxWallTimeMs,
                 maxToolCalls,
                 compactThreshold,
+                // One-shot fallback degrade (Issue #590), carried on config.
+                fallbackModel: config.fallbackModel ?? null,
                 mutatingAllowed,
                 images,
                 preToolUseHooks,
