@@ -48,6 +48,7 @@ import { runPreflight, formatPreflight } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
 import { collectSessionSummaries, formatSessionList, pickContinueSession, sessionListRecord } from "./session-summary.js";
+import { salvageSession, resolveSalvageTarget } from "./session-salvage.js";
 import {
   runSessionPicker,
   resolveResumeTarget,
@@ -438,6 +439,10 @@ program
   .option("--out <dir>", "Output directory for --export-session (default: current directory)")
   .option("--force", "Overwrite existing output files (--export-session, --summary-out)")
   .option("--rename-session <id-or-name>", "Set, replace, or clear a user-owned name for an exact session, targeted by exact id or its current user-owned name (with --session-name), and exit")
+  .option(
+    "--salvage-session <id-or-name>",
+    "Salvage the recoverable prefix of a corrupt session into a new resumable session (original untouched) and exit",
+  )
   .option("--session-name <name>", "The name for --rename-session; empty/whitespace clears the override")
   .option("--compact <id-or-name>", "Compact a session into a bounded summary sidecar (original preserved), targeted by exact id or user-owned name, and exit")
   .option("--compact-threshold <tokens>", "Auto-compact the in-memory transcript when the latest prompt size reaches this (env: OMC_COMPACT_THRESHOLD)")
@@ -869,6 +874,35 @@ program
         } else {
           process.stdout.write(`Named session ${shortSessionId(id)}: ${redactSecrets(normalized.name).text}\n`);
         }
+        process.exit(0);
+      }
+
+      // Session-salvage mode (Issue #546): copy the recoverable prefix of a
+      // corrupt session into a fresh resumable session (recorded provenance),
+      // leaving the source checkpoint byte-identical. Healthy sessions refuse
+      // (nothing to salvage); zero-parseable corrupt sessions fail closed with
+      // an actionable reason. Exits 0 on success, 2 on refusal/usage errors.
+      if (opts.salvageSession !== undefined) {
+        const store = new SessionStore();
+        // Id-or-name targeting (#536) via the salvage-specific resolver: it
+        // skips the heal step resume resolution performs, because healing
+        // quarantines the corrupt checkpoint salvage must read.
+        const resolved = resolveSalvageTarget(String(opts.salvageSession), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Cannot salvage: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const result = salvageSession(store, resolved.sessionId);
+        if (!result.ok) {
+          process.stderr.write(`Cannot salvage: ${result.reason}\n`);
+          process.exit(2);
+        }
+        process.stdout.write(
+          `Salvaged ${result.salvagedMessages} message(s) ` +
+            `(skipped ${result.skippedLines} corrupt line(s)) from ` +
+            `${shortSessionId(resolved.sessionId)} into new session ${result.newSessionId}\n` +
+            `Resume it with: oh-my-cli --resume ${result.newSessionId} -p "<prompt>"\n`,
+        );
         process.exit(0);
       }
 

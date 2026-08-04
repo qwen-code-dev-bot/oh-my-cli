@@ -189,7 +189,7 @@ describe("session summary: formatSessionList", () => {
     ]);
     expect(out).toContain("✓ abc");
     expect(out).toContain("✗ def");
-    expect(out).toContain("corrupt — partial recovery");
+    expect(out).toContain("corrupt — salvage with --salvage-session");
     expect(out).toContain("model fake-model");
     expect(out).toContain("repo /srv/proj");
     expect(out).toContain("model unknown");
@@ -218,7 +218,7 @@ describe("session summary: formatSessionList", () => {
 
   it("shows a corrupt session's name alongside the corrupt flag (Issue #530)", () => {
     const out = formatSessionList([mk({ id: "def", name: "old run", corrupt: true })]);
-    expect(out).toContain('✗ def  "old run"  (corrupt — partial recovery)');
+    expect(out).toContain('✗ def  "old run"  (corrupt — salvage with --salvage-session)');
   });
 
   it("redacts secret-like values in model and workspace", () => {

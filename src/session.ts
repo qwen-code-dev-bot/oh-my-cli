@@ -36,6 +36,9 @@ export interface SessionMeta {
   profile?: string;
   workspace?: string;
   createdAt: number;
+  // Set on sessions created by `--salvage-session` (Issue #546): the id of
+  // the corrupt session whose recoverable prefix this session carries.
+  salvagedFrom?: string;
 }
 
 export interface SessionGoal {
