@@ -60,6 +60,10 @@ import {
   isExpandableEntry,
   expandableBlockIndices,
   moveBlockSelection,
+  blockCopyGate,
+  blockCopyPayload,
+  sideAnswerClipboardEscape,
+  MAX_COPY_CHARS,
   COMPOSER_MAX_ROWS,
   SLASH_PREVIEW_MAX_ITEMS,
   decodeTerminalEscape,
@@ -983,7 +987,9 @@ describe("tui-shell: keyboard-shortcut help panel (Issue #169)", () => {
     expect(text).toContain("PROMPT & DISCOVERY");
     expect(text).toContain("VIEW & SESSION");
     expect(lines.some((line) => line.includes("Enter") && line.includes("Tab"))).toBe(true);
-    expect(lines.length).toBeLessThanOrEqual(9);
+    // Dense two-column dashboard: header rows plus one row per entry of the
+    // larger column (the view section grows as bindings ship — #560, #562).
+    expect(lines.length).toBeLessThanOrEqual(10);
     for (const entry of SHORTCUT_HELP) {
       expect(text).toContain(entry.keys.trim());
       expect(text).toContain(entry.action);
@@ -1950,5 +1956,86 @@ describe("tui-shell: keyboard-selectable transcript blocks (Issue #560)", () => 
     expect(lines.some((l) => l.includes("▸"))).toBe(true);
     const cleared = renderShell(baseState({ transcript: [toolEntry("shell", "a")] }));
     expect(cleared.some((l) => l.includes("▸"))).toBe(false);
+  });
+});
+
+describe("tui-shell: copy the selected transcript block (Issue #562)", () => {
+  const toolEntry = (name: string, output: string): TranscriptEntry => ({
+    kind: "tool",
+    text: "",
+    tool: makeToolOperation({ name, state: "succeeded", turnId: 1, output }),
+  });
+
+  it("gates the copy key on a selection and an empty composer", () => {
+    expect(blockCopyGate({ selectedBlock: 3, composerText: "" })).toBe(true);
+    // Any composer text: the keystroke must stay a normal character.
+    expect(blockCopyGate({ selectedBlock: 3, composerText: "draft" })).toBe(false);
+    // No selection: nothing to copy.
+    expect(blockCopyGate({ selectedBlock: undefined, composerText: "" })).toBe(false);
+    // Block 0 is a valid explicit selection.
+    expect(blockCopyGate({ selectedBlock: 0, composerText: "" })).toBe(true);
+  });
+
+  it("copies a text block redacted and control-neutralized", () => {
+    const secret = ["ghp", "_", "a".repeat(24)].join("");
+    const entry: TranscriptEntry = {
+      kind: "assistant",
+      text: `line one ${secret}\x1b[31mRED\x07\x7f\ttabbed\nline two`,
+    };
+    const payload = blockCopyPayload(entry);
+    expect(payload).not.toBeNull();
+    expect(payload!.truncated).toBe(false);
+    // Secret never reaches the clipboard.
+    expect(payload!.text).not.toContain(secret);
+    expect(payload!.text).toContain("[REDACTED]");
+    // Control sequences are stripped; newline and tab survive.
+    expect(payload!.text).not.toContain("\x1b");
+    expect(payload!.text).not.toContain("\x07");
+    expect(payload!.text).not.toContain("\x7f");
+    expect(payload!.text).toContain("\n");
+    expect(payload!.text).toContain("\t");
+    expect(payload!.text).toContain("line two");
+  });
+
+  it("copies a tool block as the expanded-view content", () => {
+    const payload = blockCopyPayload(toolEntry("shell", "hello world\nsecond line"));
+    expect(payload).not.toBeNull();
+    expect(payload!.text).toContain("shell");
+    expect(payload!.text).toContain("succeeded");
+    expect(payload!.text).toContain("output: hello world");
+    expect(payload!.text).toContain("second line");
+  });
+
+  it("returns null for the live streaming block and empty content", () => {
+    expect(blockCopyPayload({ kind: "streaming", text: "live text" })).toBeNull();
+    expect(blockCopyPayload({ kind: "assistant", text: "   \n  " })).toBeNull();
+  });
+
+  it("truncates oversized payloads at the cap and flags the truncation", () => {
+    const entry: TranscriptEntry = {
+      kind: "assistant",
+      text: "z".repeat(MAX_COPY_CHARS + 1_000),
+    };
+    const payload = blockCopyPayload(entry);
+    expect(payload).not.toBeNull();
+    expect(payload!.truncated).toBe(true);
+    expect(payload!.text.length).toBe(MAX_COPY_CHARS);
+  });
+
+  it("encodes the payload as an OSC 52 write terminated by BEL", () => {
+    const esc = sideAnswerClipboardEscape("copy me");
+    expect(esc.startsWith("\x1b]52;c;")).toBe(true);
+    expect(esc.endsWith("\x07")).toBe(true);
+    const b64 = esc.slice("\x1b]52;c;".length, esc.length - 1);
+    expect(Buffer.from(b64, "base64").toString("utf8")).toBe("copy me");
+  });
+
+  it("documents the y copy binding in the footer hints and shortcut panel", () => {
+    expect(footerHints(false)).toContain("y copy");
+    expect(footerHints(true)).toContain("y copy");
+    const entry = SHORTCUT_HELP.find((s) => s.keys === "y");
+    expect(entry).toBeDefined();
+    expect(entry?.section).toBe("view");
+    expect(entry?.action).toContain("Copy");
   });
 });
