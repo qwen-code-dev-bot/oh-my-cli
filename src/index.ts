@@ -59,6 +59,12 @@ import type { SessionScopeInfo } from "./session-summary.js";
 import { salvageSession, resolveSalvageTarget } from "./session-salvage.js";
 import { archiveSession, unarchiveSession, resolveArchiveTarget } from "./session-archive.js";
 import { buildSessionInspectRecord, formatSessionInspect } from "./session-inspect.js";
+import {
+  appendSessionNote,
+  buildSessionNotesRecord,
+  formatSessionNotes,
+  SESSION_NOTES_MAX,
+} from "./session-notes.js";
 import { searchSessions, formatSessionSearch } from "./session-search.js";
 import type { SessionSearchScope } from "./session-search.js";
 import { forkSession, resolveForkTarget, SESSION_FORK_SCHEMA, SESSION_FORK_VERSION } from "./session-fork.js";
@@ -521,6 +527,15 @@ program
     "--inspect-session <id-or-name>",
     "Show a read-only health card for a session (integrity verdict, sidecar inventory, meta provenance, next-step hints), by exact id or user-owned name (add --output json for automation) and exit",
   )
+  .option(
+    "--annotate-session <id-or-name>",
+    "Append a durable note (requires --note <text>; secrets redacted before persistence) to a session's bounded notes sidecar, by exact id or user-owned name, and exit",
+  )
+  .option("--note <text>", "The note text for --annotate-session")
+  .option(
+    "--session-notes <id-or-name>",
+    "Show a session's read-only durable notes (newest first; add --output json for automation), by exact id or user-owned name, and exit",
+  )
   .option("--turn-history <id-or-name>", "Show a read-only, per-turn change provenance view for a session from its durable turn checkpoints, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--memory-add <text>", "Record a durable workspace memory (manual; secrets redacted before persistence) and exit")
   .option("--memory-list", "List this workspace's active memories with provenance (read-only; add --output json for automation) and exit")
@@ -697,6 +712,13 @@ program
   )
   .action(async (opts) => {
     try {
+      // A --note without --annotate-session is a usage error, checked before
+      // every surface so no mode silently ignores a stray note (Issue #602).
+      if (opts.note !== undefined && opts.annotateSession === undefined) {
+        process.stderr.write("Error: --note requires --annotate-session <id-or-name>\n");
+        process.exit(2);
+      }
+
       if (opts.deliveryWeb) {
         const port = parseDeliveryWebPort(opts.webPort);
         const deliveryWeb = await startDeliveryWebServer({ port });
@@ -1086,6 +1108,67 @@ program
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
           process.stdout.write(formatSessionInspect(record).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Session-annotate mode (Issue #602): append one durable note to a
+      // session's bounded notes sidecar. Metadata-only and integrity-agnostic
+      // (corrupt sessions are annotatable, like the name/archive sidecars);
+      // resolution uses the heal-free resolver so nothing is ever
+      // quarantined; secrets are redacted before persistence. Exits 0 with a
+      // bounded receipt on success, 2 on usage/refusal before any write.
+      if (opts.annotateSession !== undefined) {
+        if (opts.note === undefined) {
+          process.stderr.write("Error: --annotate-session requires --note <text>\n");
+          process.exit(2);
+        }
+        if (String(opts.note).trim() === "") {
+          process.stderr.write("Error: --note requires non-empty text\n");
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const resolved = resolveArchiveTarget(String(opts.annotateSession), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Cannot annotate: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const result = appendSessionNote(store, resolved.sessionId, String(opts.note));
+        if (!result.ok) {
+          process.stderr.write(`Cannot annotate: ${result.reason}\n`);
+          process.exit(2);
+        }
+        const dropped =
+          (result.droppedNow ?? 0) > 0
+            ? ` (oldest note dropped; bound is ${SESSION_NOTES_MAX})`
+            : "";
+        process.stdout.write(
+          `Added a note to session ${shortSessionId(resolved.sessionId)} — ${result.recorded} recorded${dropped}.\n`,
+        );
+        process.exit(0);
+      }
+
+      // Session-notes mode (Issue #602): render a session's durable notes
+      // (newest first). Strictly read-only: nothing is written; an unreadable
+      // sidecar is preserved and reported honestly. Exits 0 (absence of notes
+      // is not an error), 2 on resolution failure or a bad format.
+      if (opts.sessionNotes !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const resolved = resolveArchiveTarget(String(opts.sessionNotes), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Cannot read notes: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const record = buildSessionNotesRecord(store, resolved.sessionId);
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(formatSessionNotes(record).join("\n") + "\n");
         }
         process.exit(0);
       }
