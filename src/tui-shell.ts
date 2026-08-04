@@ -18,6 +18,7 @@ import type { SessionGoalCheckpoint, SessionMessage } from "./session.js";
 import { goalExecutionRequest } from "./session-goal.js";
 import type { AgentSink, AgentUsage, AgentRetry, AgentResult } from "./agent.js";
 import { runAgent } from "./agent.js";
+import type { ShellFailureDetail } from "./tools.js";
 import { loadImageAttachments } from "./image-input.js";
 import type { LoadedImage } from "./image-input.js";
 import { filterCommands, runPalette, slashPreviewQuery, commandDisabledReason } from "./palette.js";
@@ -2783,6 +2784,9 @@ export interface ConversationShellOptions {
   loadActivity?: () => PresentedEvent[];
   settingsPath: string;
   tools: readonly string[];
+  // Shell failure receipt sink (Issue #574): the caller owns persistence
+  // (session-bound sidecar); the shell only forwards failed shell executions.
+  onShellFailure?: (detail: ShellFailureDetail) => void;
   // Durable workspace-scoped composer draft (Issue #556): restored at startup,
   // saved as the composer text changes, cleared on send/clear-draft. Optional
   // so a shell without a draft store behaves exactly as before.
@@ -4132,6 +4136,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         // stop at the next cancel boundary with a truthful persisted outcome
         // (Issue #550) instead of running the whole turn to completion.
         cancelRequested: () => generation !== runGeneration,
+        // Forward failed shell executions to the caller-owned receipt sink
+        // (Issue #574); persistence lives with the session, not the shell.
+        onShellFailure: opts.onShellFailure,
       });
       if (generation !== runGeneration) {
         // Interrupted mid-run: its remaining output is discarded. Settle the
