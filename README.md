@@ -534,7 +534,7 @@ focused tests and the end-to-end receipt.
 | `--include-partial-messages` | With `--output json`, emit per-chunk `assistant_delta` records for real-time monitoring (the default stays turn-aggregated) |
 | `--approval-mode <mode>` | `default`, `auto-edit`, or `yolo` |
 | `--workspace <dir>` | Workspace directory (default: cwd) |
-| `--doctor` | Run read-only installation/platform readiness checks and exit |
+| `--doctor` | Run read-only installation/platform readiness checks and exit (add `--output json` for a versioned record) |
 | `--readiness` | Inspect repository readiness for a blocked task (read-only) and exit |
 | `--expected-branch <name>` | Expected branch for the `--readiness` branch check |
 | `--remote <name>` | Git remote to probe for `--readiness` (default `origin`) |
@@ -1147,6 +1147,15 @@ state directory is writable (or creatable), and that the platform is supported.
 Each check is categorized `✓` pass, `⚠` warning, or `✗` failure with actionable
 remediation. The command never installs, creates, or edits anything, redacts
 host paths and secrets, and exits `0` when there are no failures (`1` otherwise).
+
+Add `--output json` for a versioned record (`schema` `oh-my-cli.doctor`)
+carrying the structured checks (`id`, `label`, `status`, `detail`,
+`remediation`) and the overall `ok` — with the same exit semantics, so setup
+automation can parse readiness instead of scraping symbols:
+
+```bash
+oh-my-cli --doctor --output json
+```
 
 ### Repository readiness
 
