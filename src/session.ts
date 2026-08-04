@@ -294,6 +294,42 @@ export class SessionStore {
     fs.rmSync(this.archivedPath(id), { force: true });
   }
 
+  // Sidecar holding a session's pin marker (Issue #610): the user/agent
+  // elevation that keeps an important session listed first regardless of
+  // recency. Same conventions as the archive marker: distinct extension
+  // outside listIds(), integrity-agnostic metadata, atomic writes.
+  pinnedPath(id: string): string {
+    return path.join(this.dir, `${id}.pinned.json`);
+  }
+
+  // Read a session's pin marker, or null when the session is not pinned (or
+  // the sidecar is missing/unreadable). Reading never mutates.
+  readPinned(id: string): { pinned: true; at: number } | null {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.pinnedPath(id), "utf-8")) as {
+        pinned?: unknown;
+        at?: unknown;
+      };
+      if (parsed.pinned !== true) return null;
+      return { pinned: true, at: typeof parsed.at === "number" ? parsed.at : 0 };
+    } catch {
+      return null;
+    }
+  }
+
+  // Atomically persist the pin marker with its timestamp (temp + rename).
+  writePinned(id: string, at: number): void {
+    const target = this.pinnedPath(id);
+    const temp = `${target}.tmp`;
+    fs.writeFileSync(temp, `${JSON.stringify({ pinned: true, at })}\n`, "utf-8");
+    fs.renameSync(temp, target);
+  }
+
+  // Remove the pin marker (unpin). Absent markers are a no-op.
+  clearPinned(id: string): void {
+    fs.rmSync(this.pinnedPath(id), { force: true });
+  }
+
   // Sidecar holding a session's durable background-task receipts. A distinct
   // extension keeps it out of listIds() (which matches *.jsonl). The persisted
   // form carries only redacted fields and opaque evidence digests — never task

@@ -54,10 +54,12 @@ import {
   pickContinueSession,
   sessionListRecord,
   scopeSessionSummariesByWorkspace,
+  orderSummariesPinnedFirst,
 } from "./session-summary.js";
 import type { SessionScopeInfo } from "./session-summary.js";
 import { salvageSession, resolveSalvageTarget } from "./session-salvage.js";
 import { archiveSession, unarchiveSession, resolveArchiveTarget } from "./session-archive.js";
+import { pinSession, unpinSession } from "./session-pin.js";
 import { buildSessionInspectRecord, formatSessionInspect } from "./session-inspect.js";
 import {
   appendSessionNote,
@@ -579,6 +581,14 @@ program
     "Restore an archived session to normal discovery, by exact id or user-owned name, and exit",
   )
   .option(
+    "--pin-session <id-or-name>",
+    "Pin a session to the top of session listing regardless of recency (durable marker; original untouched), by exact id or user-owned name, and exit",
+  )
+  .option(
+    "--unpin-session <id-or-name>",
+    "Remove a session's pin marker (recency order restored), by exact id or user-owned name, and exit",
+  )
+  .option(
     "--include-archived",
     "With --list-sessions: include archived sessions (flagged) instead of hiding them with a count",
   )
@@ -820,6 +830,11 @@ program
         // name, model, and workspace; totals reflect the filtered set in
         // both modes.
         summaries = filterSessionSummaries(summaries, String(opts.filter ?? ""));
+        // Pin-first ordering (Issue #610): pinned visible sessions lead,
+        // recency order preserved within each block. Archive visibility was
+        // already applied above, so pinned archived sessions follow archive
+        // semantics (hidden unless --include-archived).
+        summaries = orderSummariesPinnedFirst(summaries);
         if (format === "json") {
           process.stdout.write(
             JSON.stringify(sessionListRecord(summaries, scopeInfo, archivedHidden)) + "\n",
@@ -1579,6 +1594,60 @@ program
         } else {
           process.stdout.write(
             `Unarchived session ${shortSessionId(id)} — it is visible in discovery again.\n`,
+          );
+        }
+        process.exit(0);
+      }
+
+      // Session-pin mode (Issue #610): elevate an important session to the
+      // top of the listing regardless of recency. Metadata-only and
+      // integrity-agnostic (corrupt sessions are pinnable, like the archive
+      // marker); resolution uses the heal-free resolver so nothing is ever
+      // quarantined; re-pinning preserves the original timestamp. Exits 0
+      // with a bounded receipt on success (including idempotent no-ops), 2 on
+      // resolution failure.
+      if (opts.pinSession !== undefined || opts.unpinSession !== undefined) {
+        if (opts.pinSession !== undefined && opts.unpinSession !== undefined) {
+          process.stderr.write(
+            "Error: --pin-session and --unpin-session cannot be combined\n",
+          );
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const pinning = opts.pinSession !== undefined;
+        const target = String(pinning ? opts.pinSession : opts.unpinSession);
+        const resolved = resolveArchiveTarget(target, store);
+        if (!resolved.ok) {
+          process.stderr.write(`Cannot ${pinning ? "pin" : "unpin"}: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const id = resolved.sessionId;
+        if (store.integrity(id).status === "missing") {
+          process.stderr.write(
+            `Cannot ${pinning ? "pin" : "unpin"}: session ${shortSessionId(id)} was not found\n`,
+          );
+          process.exit(2);
+        }
+        const result = pinning ? pinSession(store, id) : unpinSession(store, id);
+        if (!result.ok) {
+          process.stderr.write(`Cannot ${pinning ? "pin" : "unpin"}: ${result.reason}\n`);
+          process.exit(2);
+        }
+        if (pinning) {
+          if (result.alreadyPinned) {
+            process.stdout.write(
+              `Session ${shortSessionId(id)} is already pinned (since ${new Date(result.pinnedAt ?? 0).toISOString()}).\n`,
+            );
+          } else {
+            process.stdout.write(
+              `Pinned session ${shortSessionId(id)} — it now lists first among visible sessions.\n`,
+            );
+          }
+        } else if (result.alreadyUnpinned) {
+          process.stdout.write(`Session ${shortSessionId(id)} is not pinned.\n`);
+        } else {
+          process.stdout.write(
+            `Unpinned session ${shortSessionId(id)} — recency order restored.\n`,
           );
         }
         process.exit(0);

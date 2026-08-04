@@ -35,6 +35,8 @@ export interface SessionsOverviewMetadata {
   named: number;
   withGoal: number;
   withNotes: number;
+  /** Sessions pinned to the top of discovery (Issue #610). */
+  pinned: number;
 }
 
 export interface SessionsOverviewWorkspace {
@@ -65,7 +67,7 @@ export function buildSessionsOverviewRecord(
   const summaries = collectSessionSummaries(store, { now: () => now });
 
   const totals: SessionsOverviewTotals = { sessions: summaries.length, ok: 0, partial: 0, corrupt: 0 };
-  const metadata: SessionsOverviewMetadata = { archived: 0, named: 0, withGoal: 0, withNotes: 0 };
+  const metadata: SessionsOverviewMetadata = { archived: 0, named: 0, withGoal: 0, withNotes: 0, pinned: 0 };
   const byWorkspace = new Map<string, number>();
   let legacyNoWorkspace = 0;
 
@@ -79,6 +81,7 @@ export function buildSessionsOverviewRecord(
     if (store.readName(s.id) !== null) metadata.named++;
     if (store.readGoal(s.id).goal !== null) metadata.withGoal++;
     if (fs.existsSync(notesPath(store, s.id))) metadata.withNotes++;
+    if (s.pinned) metadata.pinned++;
 
     if (s.workspace === undefined || s.workspace === "") {
       legacyNoWorkspace++;
@@ -131,7 +134,7 @@ export function formatSessionsOverview(record: SessionsOverviewRecord): string[]
   lines.push(`integrity:  ${t.ok} ok · ${t.partial} partial · ${t.corrupt} corrupt`);
   const m = record.metadata;
   lines.push(
-    `metadata:   ${m.archived} archived · ${m.named} named · ${m.withGoal} with goal · ${m.withNotes} with notes`,
+    `metadata:   ${m.archived} archived · ${m.named} named · ${m.withGoal} with goal · ${m.withNotes} with notes · ${m.pinned} pinned`,
   );
   const groupTotal = record.workspaces.length + record.workspacesElided;
   lines.push(`workspaces: ${groupTotal} group(s)` + (record.workspacesElided > 0 ? ` (top ${OVERVIEW_WORKSPACE_MAX})` : ""));
