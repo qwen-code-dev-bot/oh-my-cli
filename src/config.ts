@@ -13,6 +13,11 @@ const ConfigSchema = z.object({
   // Never sourced from the base env schema itself — the caller sets it from
   // --offline / OMC_OFFLINE.
   offline: z.boolean().optional(),
+  // One-shot fallback model (Issue #590): when set, a run degrades at most
+  // once to this model after a retryable provider failure of the primary
+  // model. Never sourced from the base env schema itself — the caller sets it
+  // from --fallback-model / OMC_FALLBACK_MODEL.
+  fallbackModel: z.string().min(1).optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

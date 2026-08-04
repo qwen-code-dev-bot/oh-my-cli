@@ -51,6 +51,13 @@ export interface RunSummary {
   // Estimated provider cost (USD) across the run, or null when usage was not
   // reported. An estimate from a bundled price table, not authoritative billing.
   estimatedCostUsd: number | null;
+  // One-shot fallback degrade (Issue #590): true when the run degraded from
+  // the primary model to the configured fallback after a retryable provider
+  // failure; `fallbackModel` names the model the run degraded to (null when no
+  // degrade happened). Truthful-by-construction: set only by the agent loop at
+  // the moment of the degrade.
+  fellBack: boolean;
+  fallbackModel: string | null;
   evidence: {
     sessionId: string;
     // Host paths are redacted (home directory collapsed to ~) before they reach
@@ -75,6 +82,9 @@ export interface BuildRunSummaryInput {
   tokens: RunSummaryTokens | null;
   // Optional estimated provider cost (USD); defaults to null when omitted.
   estimatedCostUsd?: number | null;
+  // One-shot fallback degrade (Issue #590); defaults to no-degrade when omitted.
+  fellBack?: boolean;
+  fallbackModel?: string | null;
   sessionId: string;
   sessionPath: string | null;
   // Non-secret references to images attached to the prompt; defaults to none.
@@ -132,6 +142,13 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummary {
       Number.isFinite(input.estimatedCostUsd) &&
       input.estimatedCostUsd >= 0
         ? input.estimatedCostUsd
+        : null,
+    fellBack: input.fellBack === true,
+    fallbackModel:
+      input.fellBack === true &&
+      typeof input.fallbackModel === "string" &&
+      input.fallbackModel.trim() !== ""
+        ? input.fallbackModel
         : null,
     evidence: {
       sessionId: input.sessionId,
@@ -207,6 +224,9 @@ export function formatRunSummary(summary: RunSummary): string {
       ? `  est. cost: ${formatCostUsd(summary.estimatedCostUsd)} (estimate, not billing)`
       : `  est. cost: n/a`,
   );
+  if (summary.fellBack && summary.fallbackModel !== null) {
+    lines.push(`  fallback:  degraded to "${summary.fallbackModel}" after a retryable provider failure`);
+  }
   const where = summary.evidence.sessionPath
     ? `session ${summary.evidence.sessionId} (${summary.evidence.sessionPath})`
     : `session ${summary.evidence.sessionId}`;

@@ -44,6 +44,10 @@ const RUN_SUMMARY_Z = z.object({
     .nullable(),
   // Added after v1; older summaries omit it, so default to null on read.
   estimatedCostUsd: z.number().nonnegative().nullable().default(null),
+  // Added after v1 (Issue #590); older summaries omit them, so default to
+  // no-degrade on read.
+  fellBack: z.boolean().default(false),
+  fallbackModel: z.string().nullable().default(null),
   evidence: z.object({
     sessionId: z.string(),
     sessionPath: z.string().nullable(),

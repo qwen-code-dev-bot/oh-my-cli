@@ -5,7 +5,16 @@ import { isQuotaExhausted, quotaExhaustedGuidance } from "./provider.js";
 import { offlineDispatchDecision, offlineRefusalMessage } from "./offline-guard.js";
 
 export type PreflightResult =
-  | { ok: true; model: string; latencyMs: number; offline?: boolean }
+  | {
+      ok: true;
+      model: string;
+      latencyMs: number;
+      offline?: boolean;
+      // Present when a one-shot fallback model (Issue #590) was configured and
+      // validated alongside the primary.
+      fallbackModel?: string;
+      fallbackLatencyMs?: number;
+    }
   | { ok: false; category: PreflightFailure; message: string };
 
 export type PreflightFailure =
@@ -17,6 +26,35 @@ export type PreflightFailure =
   | "unknown_error";
 
 export async function runPreflight(config: Config): Promise<PreflightResult> {
+  const primary = await preflightModel(config, config.model);
+  if (!primary.ok) return primary;
+  if (config.fallbackModel === undefined) return primary;
+  // A configured one-shot fallback (Issue #590) is validated up front,
+  // fail-closed: a fallback that cannot even be probed would only surface
+  // mid-run as a failed degrade.
+  const fallback = await validateFallbackModel(config);
+  if (!fallback.ok) {
+    return { ...fallback, message: `Fallback model "${config.fallbackModel}": ${fallback.message}` };
+  }
+  return {
+    ...primary,
+    fallbackModel: config.fallbackModel,
+    ...(primary.offline ? {} : { fallbackLatencyMs: fallback.latencyMs }),
+  };
+}
+
+// Validate the configured one-shot fallback model (Issue #590) with the same
+// probe and classification vocabulary as the primary preflight. Returns an ok
+// result without probing when no fallback is configured; offline posture
+// mirrors the primary (loopback route allowed, connectivity not probed).
+export async function validateFallbackModel(config: Config): Promise<PreflightResult> {
+  if (config.fallbackModel === undefined) {
+    return { ok: true, model: config.model, latencyMs: 0 };
+  }
+  return preflightModel(config, config.fallbackModel);
+}
+
+async function preflightModel(config: Config, model: string): Promise<PreflightResult> {
   // Offline posture (Issue #576): report the routing decision WITHOUT any
   // network probe. A non-loopback route is refused exactly as dispatch would;
   // a loopback route is allowed without claiming verified connectivity.
@@ -29,7 +67,7 @@ export async function runPreflight(config: Config): Promise<PreflightResult> {
         message: offlineRefusalMessage(decision.redactedHost),
       };
     }
-    return { ok: true, model: config.model, latencyMs: 0, offline: true };
+    return { ok: true, model, latencyMs: 0, offline: true };
   }
 
   const client = new OpenAI({
@@ -41,19 +79,19 @@ export async function runPreflight(config: Config): Promise<PreflightResult> {
 
   try {
     await client.chat.completions.create({
-      model: config.model,
+      model,
       messages: [{ role: "user", content: "ping" }],
       max_tokens: 1,
       stream: false,
     });
 
-    return { ok: true, model: config.model, latencyMs: Date.now() - start };
+    return { ok: true, model, latencyMs: Date.now() - start };
   } catch (err: unknown) {
-    return classifyError(err, config);
+    return classifyError(err, config, model);
   }
 }
 
-function classifyError(err: unknown, config: Config): PreflightResult {
+function classifyError(err: unknown, config: Config, model: string): PreflightResult {
   const e = err as {
     status?: number;
     code?: string;
@@ -74,7 +112,7 @@ function classifyError(err: unknown, config: Config): PreflightResult {
       ok: false,
       category: "quota_exhausted",
       message: quotaExhaustedGuidance({
-        model: config.model,
+        model,
         redactedHost: redactEndpointHost(config.baseUrl),
       }),
     };
@@ -89,10 +127,11 @@ function classifyError(err: unknown, config: Config): PreflightResult {
   }
 
   if (status === 404 && (msg.toLowerCase().includes("model") || errMsg?.message?.toLowerCase().includes("model"))) {
+    const hint = model === config.model ? "Check OPENAI_MODEL." : "Check --fallback-model / OMC_FALLBACK_MODEL.";
     return {
       ok: false,
       category: "unsupported_model",
-      message: `Model "${config.model}" is not available at ${redactEndpointHost(config.baseUrl)}. Check OPENAI_MODEL.`,
+      message: `Model "${model}" is not available at ${redactEndpointHost(config.baseUrl)}. ${hint}`,
     };
   }
 
@@ -138,9 +177,17 @@ function classifyError(err: unknown, config: Config): PreflightResult {
 export function formatPreflight(result: PreflightResult): string {
   if (result.ok) {
     if (result.offline) {
-      return `✓ Offline mode: loopback endpoint allowed for model "${result.model}" (connectivity not probed)`;
+      const fallback =
+        result.fallbackModel !== undefined
+          ? `; fallback model "${result.fallbackModel}" declared (connectivity not probed)`
+          : "";
+      return `✓ Offline mode: loopback endpoint allowed for model "${result.model}" (connectivity not probed)${fallback}`;
     }
-    return `✓ Provider connected: model "${result.model}" (${result.latencyMs}ms)`;
+    const fallback =
+      result.fallbackModel !== undefined && typeof result.fallbackLatencyMs === "number"
+        ? `; fallback model "${result.fallbackModel}" ready (${result.fallbackLatencyMs}ms)`
+        : "";
+    return `✓ Provider connected: model "${result.model}" (${result.latencyMs}ms)${fallback}`;
   }
   return `✗ Preflight failed [${result.category}]: ${result.message}`;
 }

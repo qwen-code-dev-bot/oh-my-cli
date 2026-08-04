@@ -16,7 +16,7 @@ import type { ApprovalMode } from "./approval.js";
 import { promptApproval } from "./approval.js";
 import type { SessionGoalCheckpoint, SessionMessage } from "./session.js";
 import { goalExecutionRequest } from "./session-goal.js";
-import type { AgentSink, AgentUsage, AgentRetry, AgentResult } from "./agent.js";
+import type { AgentSink, AgentUsage, AgentRetry, AgentFallback, AgentResult } from "./agent.js";
 import { runAgent } from "./agent.js";
 import type { ShellFailureDetail } from "./tools.js";
 import { loadImageAttachments } from "./image-input.js";
@@ -3847,6 +3847,14 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         });
         scheduleRender();
       },
+      fallback: (info: AgentFallback) => {
+        if (!mine()) return;
+        state.transcript.push({
+          kind: "notice",
+          text: `provider fallback: "${info.fromModel}" → "${info.toModel}" (${info.reasonClass})`,
+        });
+        scheduleRender();
+      },
       requestApproval: async ({ name, args }) => {
         if (!mine()) return false;
         state.turn = advanceTurn(state.turn, { type: "approval-request", name });
@@ -4155,6 +4163,8 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         maxWallTimeMs: opts.maxWallTimeMs ?? null,
         maxToolCalls: opts.maxToolCalls ?? null,
         compactThreshold: opts.compactThreshold,
+        // One-shot fallback degrade (Issue #590), carried on the shared Config.
+        fallbackModel: opts.config.fallbackModel ?? null,
         mutatingAllowed: opts.mutatingAllowed ?? true,
         images,
         // Ctrl+C bumps runGeneration (onCtrlC); polling it here lets the run
