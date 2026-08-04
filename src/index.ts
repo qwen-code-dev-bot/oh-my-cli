@@ -65,6 +65,7 @@ import {
   formatSessionNotes,
   SESSION_NOTES_MAX,
 } from "./session-notes.js";
+import { buildSessionsOverviewRecord, formatSessionsOverview } from "./sessions-overview.js";
 import { searchSessions, formatSessionSearch } from "./session-search.js";
 import type { SessionSearchScope } from "./session-search.js";
 import { forkSession, resolveForkTarget, SESSION_FORK_SCHEMA, SESSION_FORK_VERSION } from "./session-fork.js";
@@ -510,6 +511,10 @@ program
   .option("--profile <name>", "Select a named model profile from user settings (overrides settings.defaultProfile)")
   .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit (add --output json for a versioned record)")
   .option(
+    "--sessions-overview",
+    "Show a read-only aggregate health census of the whole session store (integrity, sidecar presence, workspace breakdown, newest activity; add --output json for a versioned record) and exit",
+  )
+  .option(
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
@@ -816,6 +821,27 @@ program
           );
         } else {
           process.stdout.write(formatSessionList(summaries, scopeInfo, archivedHidden) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Sessions-overview mode (Issue #604): one read-only, zero-mutation
+      // aggregate health census of the whole store — integrity verdicts
+      // (exact, never healed), sidecar-presence counts, a bounded workspace
+      // breakdown, and a recency pointer. Exits 0 on a successful read (an
+      // empty store is an honest zero state), 2 on a bad format.
+      if (opts.sessionsOverview) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const record = buildSessionsOverviewRecord(store);
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(formatSessionsOverview(record).join("\n") + "\n");
         }
         process.exit(0);
       }
