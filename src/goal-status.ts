@@ -123,7 +123,11 @@ export function formatGoalStatus(record: GoalStatusRecord): string[] {
     lines.push(`revision:  ${g.revision}`);
   }
   if (record.history.length > 0) {
-    const historyEntries: GoalHistoryEntry[] = record.history.map((h) => ({
+    // record.history is already newest-first (see historyView), but
+    // formatGoalHistoryLines expects the stored chronological order and
+    // reverses internally; feed it chronological order or the display comes
+    // out oldest-first with "(current)" on the wrong entry (Issue #588).
+    const historyEntries: GoalHistoryEntry[] = [...record.history].reverse().map((h) => ({
       revision: h.revision,
       kind: h.kind,
       objective: h.objective,
