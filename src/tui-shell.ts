@@ -38,6 +38,7 @@ import {
 } from "./side-question.js";
 import { buildSessionStats, formatSessionStats } from "./session-stats.js";
 import type { SessionStats, SessionStatsRuntime } from "./session-stats.js";
+import type { ComposerDraftStore } from "./composer-draft.js";
 import { emptyLspView, formatLspView } from "./lsp-runtime.js";
 import type { LspView } from "./lsp-runtime.js";
 import { formatLifecycleView } from "./lifecycle-render.js";
@@ -2639,6 +2640,10 @@ export interface ConversationShellOptions {
   loadActivity?: () => PresentedEvent[];
   settingsPath: string;
   tools: readonly string[];
+  // Durable workspace-scoped composer draft (Issue #556): restored at startup,
+  // saved as the composer text changes, cleared on send/clear-draft. Optional
+  // so a shell without a draft store behaves exactly as before.
+  composerDrafts?: ComposerDraftStore;
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
   env?: Record<string, string | undefined>;
@@ -2736,6 +2741,26 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   let lastSignature: string | null = null;
   let forceFull = true;
   const renderStats = opts.renderStats ?? createRenderStats();
+  // Durable composer draft (#556): the text last persisted for this workspace.
+  // paint() saves whenever the live draft diverges from it, so the store is
+  // written only on real changes and never re-written on every repaint.
+  let lastPersistedDraft = "";
+  // Restore the workspace's unsent draft, if any, so a restart picks up where
+  // the composer left off (#556). A record that cannot be trusted fails
+  // closed: the composer starts empty and the user gets one bounded notice.
+  if (opts.composerDrafts) {
+    const loaded = opts.composerDrafts.load();
+    if (loaded.status === "restored") {
+      state.composer.text = loaded.text;
+      state.composer.mode = loaded.text.includes("\n") ? "multiline" : "focused";
+      lastPersistedDraft = loaded.text;
+    } else if (loaded.status === "corrupt") {
+      state.transcript.push({
+        kind: "notice",
+        text: "composer draft could not be restored; starting with an empty composer",
+      });
+    }
+  }
   // Generation guard: a cancelled run stops contributing to the UI even though
   // the underlying provider call cannot be aborted (no new provider capability).
   let runGeneration = 0;
@@ -2795,6 +2820,24 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   function paint(): void {
     renderScheduled = false;
     if (!running || paletteOpen) return;
+    // Persist the durable draft when the composer's real draft diverges from
+    // what was last saved (#556). During history navigation the composer shows
+    // a recalled entry, so the draft slot — not the visible text — is the
+    // durable draft. Saving here (not per keystroke) bounds write frequency to
+    // coalesced repaints; a failed save retries on the next paint and never
+    // breaks the shell.
+    if (opts.composerDrafts) {
+      const draftNow =
+        history.position === history.entries.length ? state.composer.text : history.draft;
+      if (draftNow !== lastPersistedDraft) {
+        try {
+          opts.composerDrafts.save(draftNow);
+          lastPersistedDraft = draftNow;
+        } catch {
+          /* best-effort durability; retried on the next repaint */
+        }
+      }
+    }
     const next = composeScreen(state);
     renderStats.composeCount++;
     const signature = repaintSignature(state);
