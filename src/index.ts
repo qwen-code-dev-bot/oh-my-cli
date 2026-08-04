@@ -174,6 +174,10 @@ import {
   formatMemoryList,
 } from "./workspace-memory.js";
 import {
+  collectPerfReport,
+  formatPerfReport,
+} from "./perf-report.js";
+import {
   DEFAULT_LSP_SERVERS,
   detectLanguagesFromPaths,
   discoverLanguageServers,
@@ -468,6 +472,7 @@ program
   .option("--memory-add <text>", "Record a durable workspace memory (manual; secrets redacted before persistence) and exit")
   .option("--memory-list", "List this workspace's active memories with provenance (read-only; add --output json for automation) and exit")
   .option("--memory-forget <id>", "Forget a workspace memory by id (soft delete; the tombstone stays auditable) and exit")
+  .option("--perf-report", "Show a read-only, redacted performance diagnostics report with declared budgets for the workspace (add --output json for automation) and exit")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
   .option("--tasks <id-or-name>", "Show a session's read-only background-task center with durable receipts, reconciled against real process state, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
@@ -833,6 +838,43 @@ program
           process.stdout.write(JSON.stringify(buildMemoryListRecord(memWorkspace)) + "\n");
         } else {
           process.stdout.write(formatMemoryList(memWorkspace).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Performance-report mode (Issue #572): a read-only, redacted diagnostic
+      // that attributes wall time to bounded local phases (workspace discovery,
+      // session-store scan, bounded turn-log scan, memory) and compares each
+      // against declared budgets with honest ok/exceeds verdicts. Measurement
+      // only — no writes, no optimization. Exits 0 on success, 2 on a missing
+      // workspace or bad format.
+      if (opts.perfReport) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const perfWorkspaceRoot = String(opts.workspace);
+        let stat: fs.Stats | null = null;
+        try {
+          stat = fs.statSync(perfWorkspaceRoot);
+        } catch {
+          stat = null;
+        }
+        if (!stat || !stat.isDirectory()) {
+          process.stderr.write(
+            `Error: workspace "${redactHomePath(perfWorkspaceRoot)}" is not a readable directory\n`,
+          );
+          process.exit(2);
+        }
+        const report = collectPerfReport({
+          workspace: new Workspace(perfWorkspaceRoot),
+          store: new SessionStore(),
+        });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(report) + "\n");
+        } else {
+          process.stdout.write(formatPerfReport(report).join("\n") + "\n");
         }
         process.exit(0);
       }
