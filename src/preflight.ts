@@ -2,9 +2,10 @@ import OpenAI from "openai";
 import type { Config } from "./config.js";
 import { redactEndpointHost } from "./permission-impact.js";
 import { isQuotaExhausted, quotaExhaustedGuidance } from "./provider.js";
+import { offlineDispatchDecision, offlineRefusalMessage } from "./offline-guard.js";
 
 export type PreflightResult =
-  | { ok: true; model: string; latencyMs: number }
+  | { ok: true; model: string; latencyMs: number; offline?: boolean }
   | { ok: false; category: PreflightFailure; message: string };
 
 export type PreflightFailure =
@@ -16,6 +17,21 @@ export type PreflightFailure =
   | "unknown_error";
 
 export async function runPreflight(config: Config): Promise<PreflightResult> {
+  // Offline posture (Issue #576): report the routing decision WITHOUT any
+  // network probe. A non-loopback route is refused exactly as dispatch would;
+  // a loopback route is allowed without claiming verified connectivity.
+  if (config.offline) {
+    const decision = offlineDispatchDecision({ offline: true, baseUrl: config.baseUrl });
+    if (!decision.allowed) {
+      return {
+        ok: false,
+        category: "network_failure",
+        message: offlineRefusalMessage(decision.redactedHost),
+      };
+    }
+    return { ok: true, model: config.model, latencyMs: 0, offline: true };
+  }
+
   const client = new OpenAI({
     apiKey: config.apiKey,
     baseURL: config.baseUrl,
@@ -121,6 +137,9 @@ function classifyError(err: unknown, config: Config): PreflightResult {
 
 export function formatPreflight(result: PreflightResult): string {
   if (result.ok) {
+    if (result.offline) {
+      return `✓ Offline mode: loopback endpoint allowed for model "${result.model}" (connectivity not probed)`;
+    }
     return `✓ Provider connected: model "${result.model}" (${result.latencyMs}ms)`;
   }
   return `✗ Preflight failed [${result.category}]: ${result.message}`;
