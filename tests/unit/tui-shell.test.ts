@@ -57,6 +57,9 @@ import {
   entryStartLines,
   scrollToKeepAnchor,
   resizeScrollOffset,
+  isExpandableEntry,
+  expandableBlockIndices,
+  moveBlockSelection,
   COMPOSER_MAX_ROWS,
   SLASH_PREVIEW_MAX_ITEMS,
   decodeTerminalEscape,
@@ -1846,5 +1849,106 @@ describe("tui-shell: keyboard-only traversal reaches every primary action (Issue
       height: 10,
     });
     expect(scroll).toBe(14); // 4 + (30 - 20) - (5 - 5)
+  });
+});
+
+describe("tui-shell: keyboard-selectable transcript blocks (Issue #560)", () => {
+  // 20 real lines — well past the preview height, and wraps like prose.
+  const long = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
+
+  const toolEntry = (name: string, output: string): TranscriptEntry => ({
+    kind: "tool",
+    text: "",
+    tool: makeToolOperation({ name, state: "succeeded", turnId: 1, output }),
+  });
+
+  it("classifies expandable blocks: tool detail and long text; never streaming", () => {
+    expect(isExpandableEntry(toolEntry("shell", "some output"), 80)).toBe(true);
+    expect(isExpandableEntry({ kind: "assistant", text: long }, 80)).toBe(true);
+    expect(isExpandableEntry({ kind: "assistant", text: "short" }, 80)).toBe(false);
+    expect(isExpandableEntry({ kind: "streaming", text: long }, 80)).toBe(false);
+  });
+
+  it("lists expandable indices oldest-first, skipping non-candidates", () => {
+    const entries: TranscriptEntry[] = [
+      { kind: "user", text: "short" },
+      toolEntry("shell", "a"),
+      { kind: "assistant", text: long },
+      { kind: "streaming", text: long },
+    ];
+    expect(expandableBlockIndices(entries, 80)).toEqual([1, 2]);
+    expect(expandableBlockIndices([], 80)).toEqual([]);
+  });
+
+  it("walks the selection older-ward from nothing, clamping at the oldest", () => {
+    const candidates = [1, 3, 5];
+    const first = moveBlockSelection({ candidates, current: null, direction: "older" });
+    expect(first).toBe(5); // newest
+    expect(moveBlockSelection({ candidates, current: first, direction: "older" })).toBe(3);
+    expect(moveBlockSelection({ candidates, current: 3, direction: "older" })).toBe(1);
+    // Clamps at the oldest block.
+    expect(moveBlockSelection({ candidates, current: 1, direction: "older" })).toBe(1);
+  });
+
+  it("walks newer-ward and clears past the newest (back to the fallback)", () => {
+    const candidates = [1, 3, 5];
+    expect(moveBlockSelection({ candidates, current: 1, direction: "newer" })).toBe(3);
+    expect(moveBlockSelection({ candidates, current: 3, direction: "newer" })).toBe(5);
+    expect(moveBlockSelection({ candidates, current: 5, direction: "newer" })).toBeNull();
+    // Newer with no selection is a no-op (fallback already targets the newest).
+    expect(moveBlockSelection({ candidates, current: null, direction: "newer" })).toBeNull();
+  });
+
+  it("recovers a stale selection and returns null with no candidates", () => {
+    const candidates = [1, 3];
+    expect(moveBlockSelection({ candidates, current: 99, direction: "older" })).toBe(3);
+    expect(moveBlockSelection({ candidates, current: 99, direction: "newer" })).toBeNull();
+    expect(moveBlockSelection({ candidates: [], current: null, direction: "older" })).toBeNull();
+  });
+
+  it("renders a color-independent marker on the selected block only", () => {
+    const entries: TranscriptEntry[] = [toolEntry("shell", "a"), toolEntry("read", "b")];
+    const style = shellStyle(false); // NO_COLOR path
+    const selected = flattenTranscript(entries, 120, { style, selectedBlock: 0 }).join("\n");
+    const unselected = flattenTranscript(entries, 120, { style }).join("\n");
+    // Exactly one marker line, and it is a literal glyph with no ANSI.
+    const markerLines = selected.split("\n").filter((l) => l.includes("▸"));
+    expect(markerLines.length).toBe(1);
+    expect(markerLines[0]).not.toMatch(ANSI);
+    expect(selected.split("\n").some((l) => l.includes("▸") && l.includes("shell"))).toBe(true);
+    expect(unselected).not.toContain("▸");
+  });
+
+  it("marks a selected long-text block the same way", () => {
+    const entries: TranscriptEntry[] = [{ kind: "assistant", text: long }];
+    const flat = flattenTranscript(entries, 80, { style: shellStyle(false), selectedBlock: 0 });
+    expect(flat.some((l) => l.startsWith("▸"))).toBe(true);
+  });
+
+  it("keeps the marker free of ANSI even when color is on", () => {
+    const entries: TranscriptEntry[] = [toolEntry("shell", "a")];
+    const flat = flattenTranscript(entries, 120, { style: shellStyle("256"), selectedBlock: 0 });
+    const markerLine = flat.find((l) => l.includes("▸"))!;
+    // The glyph itself is plain; any SGR around it is styling, not the marker.
+    expect(markerLine.replace(/\x1b\[[0-9;]*m/g, "").startsWith("▸")).toBe(true);
+  });
+
+  it("documents Home/End in the footer hints and shortcut panel", () => {
+    expect(footerHints(false)).toContain("Home/End");
+    expect(footerHints(true)).toContain("Home/End");
+    const entry = SHORTCUT_HELP.find((s) => s.keys.includes("Home"));
+    expect(entry).toBeDefined();
+    expect(entry?.section).toBe("view");
+  });
+
+  it("composeScreen passes the selection through to the rendered transcript", () => {
+    const state = baseState({
+      transcript: [toolEntry("shell", "a"), toolEntry("read", "b")],
+      selectedBlock: 0,
+    });
+    const lines = renderShell(state);
+    expect(lines.some((l) => l.includes("▸"))).toBe(true);
+    const cleared = renderShell(baseState({ transcript: [toolEntry("shell", "a")] }));
+    expect(cleared.some((l) => l.includes("▸"))).toBe(false);
   });
 });

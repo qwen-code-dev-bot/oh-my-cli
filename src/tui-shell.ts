@@ -124,6 +124,12 @@ const TERMINAL_ESCAPE_KEYS = [
   "\x1b[3~",
   "\x1b[5~",
   "\x1b[6~",
+  // Home/End (Issue #560): both the CSI single-letter forms and the xterm
+  // numeric forms, so block-selection works across terminal emulations.
+  "\x1b[H",
+  "\x1b[F",
+  "\x1b[1~",
+  "\x1b[4~",
   "\x1bOH",
   "\x1bOF",
 ] as const;
@@ -368,6 +374,11 @@ export interface ShellState {
   // newest, and is preserved across expand/collapse (Issue #163, criterion 4).
   // Optional so pure render callers and tests can omit it (treated as 0).
   scroll?: number;
+  // The explicitly selected expandable transcript block (Issue #560), moved
+  // with Home/End; Tab expand/collapse acts on it instead of the implicit
+  // newest-visible block. Optional so pure render callers and tests can omit
+  // it (treated as no selection). Never persisted — view state only.
+  selectedBlock?: number;
   // Whether the user has learned the basic composer flow (sent at least once,
   // or resumed with prior prompts) so the footer hints compress. Optional so
   // pure render callers and tests can omit it (treated as not-yet-learned).
@@ -515,6 +526,10 @@ export function sideAnswerClipboardEscape(text: string): string {
 export interface TranscriptRenderOptions {
   // Block indices shown in full instead of collapsed to a preview.
   expanded?: ReadonlySet<number>;
+  // The explicitly selected transcript block (Issue #560): renders a stable,
+  // color-independent marker on the block's header line, and Tab expand/collapse
+  // acts on it. Undefined/no-selection falls back to the newest-visible rule.
+  selectedBlock?: number;
   // Preview height for collapsed long blocks.
   previewLines?: number;
   // Style used for the block header and disclosure marker (no-op when omitted).
@@ -1411,8 +1426,8 @@ export function renderIdentity(
 // Ctrl+C) remain in both states. Plain ASCII, color-independent.
 export function footerHints(learned: boolean): string {
   return learned
-    ? "Tab expand  ·  ? shortcuts  ·  Ctrl+C exit"
-    : "Enter send  ·  Alt+Enter newline  ·  Up history  ·  Tab expand  ·  ? shortcuts  ·  Ctrl+C exit";
+    ? "Tab expand  ·  Home/End select block  ·  ? shortcuts  ·  Ctrl+C exit"
+    : "Enter send  ·  Alt+Enter newline  ·  Up history  ·  Tab expand  ·  Home/End select block  ·  ? shortcuts  ·  Ctrl+C exit";
 }
 
 export function renderStatusLine(
@@ -1461,6 +1476,7 @@ export const SHORTCUT_HELP: ReadonlyArray<ShortcutEntry> = [
   { keys: "Up / Down", action: "Recall history", section: "prompt" },
   { keys: "?", action: "Toggle Help", section: "prompt" },
   { keys: "Tab", action: "Expand / collapse", section: "view" },
+  { keys: "Home / End", action: "Jump between blocks", section: "view" },
   { keys: "PgUp / PgDn", action: "Scroll transcript", section: "view" },
   { keys: "Ctrl+L", action: "Redraw screen", section: "view" },
   { keys: "Ctrl+C", action: "Cancel / clear / exit", section: "view" },
@@ -1890,6 +1906,51 @@ function entryTone(kind: TranscriptKind, style: ShellStyle): string {
   }
 }
 
+// Whether a transcript entry is an expandable block (Issue #560): a tool
+// operation with inspectable detail, or a committed text block longer than the
+// preview. The live streaming block is never a candidate. Pure and shared by
+// the renderer (marker), the walker (candidates), and the Tab fallback rule.
+export function isExpandableEntry(entry: TranscriptEntry, cols: number): boolean {
+  if (entry.kind === "streaming") return false;
+  if (entry.tool) return toolOpHasDetail(entry.tool);
+  const bodyWidth = Math.max(1, cols - Array.from(TRANSCRIPT_INDENT).length);
+  return wrapText(entry.text, bodyWidth).length > TRANSCRIPT_PREVIEW_LINES;
+}
+
+// Indices of the expandable transcript blocks, oldest first (Issue #560).
+export function expandableBlockIndices(entries: TranscriptEntry[], cols: number): number[] {
+  const out: number[] = [];
+  entries.forEach((entry, index) => {
+    if (isExpandableEntry(entry, cols)) out.push(index);
+  });
+  return out;
+}
+
+// Move an explicit block selection between expandable blocks (Issue #560).
+// Candidates are oldest-first. From no selection, "older" starts at the newest
+// block; "newer" past the newest clears the selection back to the implicit
+// newest-visible fallback. Movement clamps at the oldest block. Pure so the
+// rule is unit-testable without a TTY.
+export function moveBlockSelection(params: {
+  candidates: readonly number[];
+  current: number | null;
+  direction: "older" | "newer";
+}): number | null {
+  const { candidates, current, direction } = params;
+  if (candidates.length === 0) return null;
+  if (direction === "older") {
+    if (current === null) return candidates[candidates.length - 1];
+    const pos = candidates.indexOf(current);
+    if (pos < 0) return candidates[candidates.length - 1];
+    return candidates[Math.max(0, pos - 1)];
+  }
+  if (current === null) return null;
+  const pos = candidates.indexOf(current);
+  if (pos < 0) return null;
+  if (pos >= candidates.length - 1) return null; // newest: clear to the fallback
+  return candidates[pos + 1];
+}
+
 // Flatten transcript entries into labeled, indented blocks separated by a blank
 // row so a mixed conversation reads at a glance. Long blocks collapse to a
 // preview with an explicit disclosure marker; the caller can expand a block by
@@ -1920,7 +1981,13 @@ export function flattenTranscript(
     if (entry.tool) {
       const op = entry.tool;
       const tone = entryTone(entry.kind, style);
-      lines.push(`${tone}${clipLine(toolSummaryLine(op), cols)}${style.reset}`);
+      // The explicit selection marker (Issue #560): the product's pointer glyph
+      // (same convention as the palette selection) in the first two columns,
+      // color-independent so it survives NO_COLOR. Distinct from every entry
+      // glyph (>, ◆, ✦, ●, •, !).
+      const selectedHere = opts.selectedBlock === index;
+      const markerPrefix = selectedHere ? `${style.dim}▸${style.reset} ` : "";
+      lines.push(`${markerPrefix}${tone}${clipLine(toolSummaryLine(op), selectedHere ? cols - 2 : cols)}${style.reset}`);
       // Diff magnitude is shown collapsed so the change is gauged before expansion.
       if (op.diff) {
         const stat = clipLine(diffStatLine(op.diff), bodyWidth);
@@ -1955,8 +2022,14 @@ export function flattenTranscript(
       return;
     }
     const tone = entryTone(entry.kind, style);
-    const header = clipLine(`${entryGlyph(entry.kind)} ${entryLabel(entry.kind)}`, cols);
-    lines.push(`${tone}${header}${style.reset}`);
+    // Selection marker for text blocks mirrors the tool-block marker (#560).
+    const selectedTextHere = opts.selectedBlock === index;
+    const textMarkerPrefix = selectedTextHere ? `${style.dim}▸${style.reset} ` : "";
+    const header = clipLine(
+      `${entryGlyph(entry.kind)} ${entryLabel(entry.kind)}`,
+      selectedTextHere ? cols - 2 : cols,
+    );
+    lines.push(`${textMarkerPrefix}${tone}${header}${style.reset}`);
     const wrapped = wrapText(entry.text, bodyWidth);
     // The live streaming turn is never collapsed so the active answer stays
     // fully visible; committed blocks collapse to a preview when long.
@@ -2407,6 +2480,7 @@ export function composeScreen(state: ShellState): ComposedScreen {
         : renderTranscript(state.transcript, layout.transcript, layout.viewport.cols, {
             expanded: state.expanded,
             scroll: state.scroll,
+            selectedBlock: state.selectedBlock,
             style,
           });
     lines.push(...identityLines, ...transcriptLines);
@@ -3408,25 +3482,24 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   // The newest expandable transcript block currently within the window: the last
   // entry whose block starts above the window's bottom edge. At the bottom
   // (scroll 0) this is simply the latest expandable block, preserving the prior
-  // one-keystroke inspect behavior; scrolled up, it is the newest block on screen.
+  // one-keystroke inspect behavior; scrolled up, it is the newest block on
+  // screen. Fallback target when no explicit selection exists (Issue #560).
   function selectedExpandableIndex(startLines: number[], windowBottom: number): number {
-    const bodyWidth = Math.max(1, state.viewport.cols - Array.from(TRANSCRIPT_INDENT).length);
     for (let i = state.transcript.length - 1; i >= 0; i--) {
       const entry = state.transcript[i];
-      if (entry.kind === "streaming") continue; // live turn is never collapsed
       if ((startLines[i] ?? 0) >= windowBottom) continue; // starts below the window
-      const expandable = entry.tool
-        ? toolOpHasDetail(entry.tool)
-        : wrapText(entry.text, bodyWidth).length > TRANSCRIPT_PREVIEW_LINES;
-      if (expandable) return i;
+      if (isExpandableEntry(entry, state.viewport.cols)) return i;
     }
     return -1;
   }
 
-  // Toggle full-height display of the selected expandable block (the newest one on
-  // screen) and recompute the scroll offset so that block's first line stays put —
-  // opening/closing details never displaces the content being inspected
-  // (Issue #163, criterion 4). A no-op when nothing is collapsible.
+  // Toggle full-height display of the selected expandable block and recompute
+  // the scroll offset so that block's first line stays put — opening/closing
+  // details never displaces the content being inspected (Issue #163,
+  // criterion 4). The explicit block selection wins when one exists and is
+  // still expandable; otherwise the newest-visible block is used, preserving
+  // the original one-keystroke inspect flow (Issue #560). A no-op when nothing
+  // is collapsible.
   function toggleExpandSelected(): void {
     const height = transcriptHeight();
     if (height <= 0) return;
@@ -3435,7 +3508,16 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     const scrollBefore = clamp(state.scroll ?? 0, 0, Math.max(0, flatLenBefore - height));
     const windowBottom = flatLenBefore - scrollBefore;
     const beforeStarts = entryStartLines(state.transcript, cols, { expanded });
-    const sel = selectedExpandableIndex(beforeStarts, windowBottom);
+    let sel = -1;
+    if (
+      state.selectedBlock !== undefined &&
+      state.selectedBlock < state.transcript.length &&
+      isExpandableEntry(state.transcript[state.selectedBlock], cols)
+    ) {
+      sel = state.selectedBlock;
+    } else {
+      sel = selectedExpandableIndex(beforeStarts, windowBottom);
+    }
     if (sel < 0) return;
     const anchorBefore = beforeStarts[sel] ?? 0;
     if (expanded.has(sel)) expanded.delete(sel);
@@ -3461,6 +3543,39 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     if (height <= 0) return;
     const maxScroll = Math.max(0, flattenedLen() - height);
     state.scroll = clamp((state.scroll ?? 0) + delta, 0, maxScroll);
+    scheduleRender();
+  }
+
+  // Scroll only as needed to keep a block's header line visible (Issue #560,
+  // criterion 2): a no-op when the block is already inside the window; the
+  // minimal offset that brings its first line into view otherwise.
+  function scrollToRevealBlock(index: number): void {
+    const height = transcriptHeight();
+    if (height <= 0) return;
+    const flatLen = flattenedLen();
+    const starts = entryStartLines(state.transcript, state.viewport.cols, { expanded });
+    const startLine = starts[index];
+    if (startLine === undefined) return;
+    const maxScroll = Math.max(0, flatLen - height);
+    const scroll = clamp(state.scroll ?? 0, 0, maxScroll);
+    const windowTop = flatLen - height - scroll; // first visible line
+    const windowBottom = flatLen - scroll; // exclusive
+    if (startLine >= windowTop && startLine < windowBottom) return;
+    state.scroll = clamp(flatLen - height - startLine, 0, maxScroll);
+  }
+
+  // Move the explicit block selection between expandable blocks (Issue #560).
+  // Home walks toward older blocks (starting at the newest), End toward newer
+  // ones; past the newest the selection clears back to the implicit
+  // newest-visible Tab behavior. The selection is view-only state — never
+  // persisted and never fed to the model.
+  function moveBlockSelectionLive(direction: "older" | "newer"): void {
+    const candidates = expandableBlockIndices(state.transcript, state.viewport.cols);
+    const current = state.selectedBlock ?? null;
+    const next = moveBlockSelection({ candidates, current, direction });
+    if (next === current) return;
+    state.selectedBlock = next ?? undefined;
+    if (next !== null) scrollToRevealBlock(next);
     scheduleRender();
   }
 
@@ -3697,6 +3812,10 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       if (busy) submitWhileBusy();
       return;
     }
+    // A new interaction clears the explicit block selection deterministically
+    // (Issue #560, criterion 5): the selection is view-only state for inspecting
+    // prior output, so an accepted submit always starts unselected.
+    state.selectedBlock = undefined;
     // Submitting clears any open reference picker along with the composer.
     state.referencePreview = undefined;
     referenceUniverse = null;
@@ -4264,6 +4383,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // lifts the view up (toward older content); PageDown returns toward the newest.
     if (s === "\x1b[5~") return scrollBy(transcriptHeight());
     if (s === "\x1b[6~") return scrollBy(-transcriptHeight());
+    // Home/End walk the explicit selection between expandable transcript blocks
+    // (Issue #560): Home selects the next older block (starting from the newest),
+    // End the next newer one, clearing past the newest. Both sequences were no-ops
+    // before, so the binding never steals composer input (they insert no text).
+    if (s === "\x1bOH" || s === "\x1b[H" || s === "\x1b[1~") return moveBlockSelectionLive("older");
+    if (s === "\x1bOF" || s === "\x1b[F" || s === "\x1b[4~") return moveBlockSelectionLive("newer");
     // Left/Right and other cursor/edit sequences remain no-ops (caret stays at
     // end-of-input in this slice).
     if (
@@ -4272,9 +4397,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       s === "\x1bOC" ||
       s === "\x1bOD" ||
       s === "\x1b[3~" ||
-      s === "\x1b" ||
-      s === "\x1bOH" ||
-      s === "\x1bOF"
+      s === "\x1b"
     ) {
       return;
     }
