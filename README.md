@@ -259,6 +259,12 @@ exact session id or a user-owned name, with the same fail-closed semantics
 (exact id wins; ambiguous, corrupt, and unknown values are reported, never
 substituted).
 
+For automation, `oh-my-cli --list-sessions --output json` emits a versioned
+record (`schema` `oh-my-cli.sessions`) with the resumable/corrupt totals and
+one structured entry per session (id, redacted name/model/workspace, usage
+counts, token estimate, timestamps, corrupt flag) — the same data the text
+listing shows, redacted the same way.
+
 Prefer one step? `oh-my-cli --continue` resumes the most recent healthy
 session declared for the current workspace — no id needed (workspace aliases
 and linked worktrees match the same sessions). With no matching session it
@@ -517,7 +523,7 @@ focused tests and the end-to-end receipt.
 | `--image <paths...>` | Attach image file(s) by path for vision-capable analysis (PNG, JPEG, GIF, or WebP); also `/attach` in interactive mode |
 | `--resume <id-or-name>` | Resume a persisted session by exact id or user-owned name |
 | `--browse-sessions` | Interactively browse, search, and resume a previous session (requires a terminal) |
-| `--list-sessions` | List resumable sessions with a redacted usage summary and exit |
+| `--list-sessions` | List resumable sessions with a redacted usage summary and exit (add `--output json` for a versioned record) |
 | `--session-stats <id-or-name>` | Show a read-only, deterministic activity/efficiency stats view for a session by exact id or user-owned name (add `--output json` for automation) and exit; also `/stats` in interactive mode |
 | `--lsp-status` | Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add `--output json` for automation) and exit; also `/lsp` in interactive mode |
 | `--tasks <id-or-name>` | Show the read-only background-task center for a session, by exact id or user-owned name — lifecycle states, durable receipts, and restart reconciliation (add `--output json` for automation) and exit; also `/tasks` in interactive mode |
