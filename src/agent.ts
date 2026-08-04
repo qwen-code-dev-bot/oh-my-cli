@@ -22,6 +22,12 @@ import type { FailureTaxonomyCollector } from "./run-failure-taxonomy.js";
 
 const MAX_ROUNDS = 30;
 
+// Transcript content for a tool call cancelled before execution (Issue #550).
+// A bounded, secret-free placeholder that keeps the transcript resume-valid:
+// every tool_call_id keeps exactly one tool message. session-stats derives
+// deterministic cancellation counts by matching this exact content.
+export const CANCELLED_TOOL_CONTENT = "[cancelled: turn cancelled before this tool ran]";
+
 // Bounded wait between empty-completion recovery attempts (#244). Mirrors the
 // provider's own bounded backoff so an unattended run can never loop or overspend
 // indefinitely waiting for a non-empty answer.
@@ -274,11 +280,15 @@ export interface AgentResult {
   // failed transiently). Lets a consumer distinguish "exhausted retries"
   // (retries > 0, then provider_error) from "non-retryable" (retries 0).
   retries: number;
-  // Bounded per-tool activity counts for the whole run. Each tool execution is
-  // counted exactly once (no double-counted retries).
+  // Bounded per-tool activity counts for the whole run. Each processed tool
+  // call — executed (with or without error) or cancelled before execution —
+  // is counted exactly once (no double-counted retries).
   stats: {
     toolCalls: Record<string, number>;
     toolFailures: Record<string, number>;
+    // Calls cancelled before execution (#550); a subset of toolCalls that is
+    // never counted in toolFailures.
+    toolCancellations: Record<string, number>;
   };
   // Aggregated token totals across all rounds, or null when the provider never
   // reported usage.
@@ -351,6 +361,7 @@ export async function runAgent(
 
   const toolCalls: Record<string, number> = {};
   const toolFailures: Record<string, number> = {};
+  const toolCancellations: Record<string, number> = {};
   const tokens = { prompt: 0, completion: 0, total: 0 };
   let hasUsage = false;
   // Total transient provider retries observed across the run.
@@ -393,6 +404,7 @@ export async function runAgent(
   const statsSnapshot = () => ({
     toolCalls: { ...toolCalls },
     toolFailures: { ...toolFailures },
+    toolCancellations: { ...toolCancellations },
   });
   const tokensSnapshot = () => (hasUsage ? { ...tokens } : null);
   const costSnapshot = () => (hasUsage ? costUsd : null);
@@ -743,8 +755,45 @@ export async function runAgent(
     messages.push(assistantMsg);
     opts.onMessage(assistantMsg);
 
-    // Execute each tool call
-    for (const tc of assistantToolCalls) {
+    // Execute each tool call. Cooperative cancellation (#489, refined by #550)
+    // is polled before each call in the batch: the call in flight is never
+    // killed, but once a cancel is requested the remaining calls are never
+    // executed and each gets a transcript-valid cancelled placeholder, so the
+    // transcript stays resume-valid and the record distinguishes cancelled
+    // calls from executed ones.
+    for (let i = 0; i < assistantToolCalls.length; i++) {
+      const tc = assistantToolCalls[i];
+      if (opts.cancelRequested?.()) {
+        for (const pending of assistantToolCalls.slice(i)) {
+          bump(toolCalls, pending.name);
+          bump(toolCancellations, pending.name);
+          sink.toolStart({ id: pending.id, name: pending.name, round, args: {} });
+          sink.toolResult({
+            id: pending.id,
+            name: pending.name,
+            result: { content: CANCELLED_TOOL_CONTENT, isError: true },
+            round,
+          });
+          const cancelledMsg: SessionMessage = {
+            role: "tool",
+            content: CANCELLED_TOOL_CONTENT,
+            tool_call_id: pending.id,
+          };
+          messages.push(cancelledMsg);
+          opts.onMessage(cancelledMsg);
+        }
+        return {
+          text: finalText,
+          ok: false,
+          reason: "cancelled",
+          rounds: round,
+          retries,
+          stats: statsSnapshot(),
+          tokens: tokensSnapshot(),
+          estimatedCostUsd: costSnapshot(),
+          costKnown,
+        };
+      }
       // Parse the arguments once so the sink can render structured detail (e.g. a
       // file diff); a malformed payload degrades to no args rather than throwing.
       let parsedArgs: Record<string, unknown> = {};
