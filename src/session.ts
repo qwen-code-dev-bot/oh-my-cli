@@ -48,9 +48,31 @@ export interface SessionGoal {
   updatedAt: number;
 }
 
+/**
+ * One immutable Goal lifecycle transition (Issue #580). `kind` names the
+ * runGoalCommand transition that produced the entry; `legacy` appears only in
+ * entries synthesized for display from pre-history sidecars and is never
+ * written by a transition.
+ */
+export type GoalHistoryKind = "set" | "pause" | "resume" | "achieve" | "clear" | "legacy";
+
+export interface GoalHistoryEntry {
+  revision: number;
+  kind: GoalHistoryKind;
+  /** Objective at this transition, or null for `clear`. */
+  objective: string | null;
+  /** Goal status after the transition, or null for `clear`. */
+  status: "active" | "paused" | "achieved" | null;
+  at: number;
+}
+
 export interface SessionGoalCheckpoint {
   revision: number;
   goal: SessionGoal | null;
+  // Append-only lifecycle history (Issue #580). Absent on sidecars written
+  // before history tracking; readers synthesize a single display entry for
+  // those and never write the synthesis back.
+  history?: GoalHistoryEntry[];
 }
 
 export interface SessionDiagnostics {
@@ -101,6 +123,32 @@ function isSessionGoal(value: unknown): value is SessionGoal {
   );
 }
 
+const GOAL_HISTORY_KINDS: readonly GoalHistoryKind[] = [
+  "set",
+  "pause",
+  "resume",
+  "achieve",
+  "clear",
+  "legacy",
+];
+
+function isGoalHistoryEntry(value: unknown): value is GoalHistoryEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const entry = value as Partial<GoalHistoryEntry>;
+  return (
+    typeof entry.revision === "number" &&
+    entry.revision >= 0 &&
+    typeof entry.kind === "string" &&
+    (GOAL_HISTORY_KINDS as readonly string[]).includes(entry.kind) &&
+    (entry.objective === null || typeof entry.objective === "string") &&
+    (entry.status === null ||
+      entry.status === "active" ||
+      entry.status === "paused" ||
+      entry.status === "achieved") &&
+    typeof entry.at === "number"
+  );
+}
+
 export class SessionStore {
   private dir: string;
 
@@ -143,6 +191,16 @@ export class SessionStore {
         (parsed.goal !== null && !isSessionGoal(parsed.goal))
       ) {
         return { revision: 0, goal: null };
+      }
+      // History validation (Issue #580): an absent history field is a legacy
+      // sidecar (readers synthesize a display entry); a present-but-corrupt
+      // array fails closed exactly like a corrupt sidecar — honest no-goal,
+      // bytes preserved — because the append-only evidence chain is broken.
+      if (parsed.history !== undefined) {
+        if (!Array.isArray(parsed.history) || !parsed.history.every(isGoalHistoryEntry)) {
+          return { revision: 0, goal: null };
+        }
+        return { revision: parsed.revision, goal: parsed.goal ?? null, history: parsed.history };
       }
       return { revision: parsed.revision, goal: parsed.goal ?? null };
     } catch {
