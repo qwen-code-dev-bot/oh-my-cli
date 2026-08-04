@@ -150,20 +150,19 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummary {
 // sibling temp file and renamed over the target so a crash leaves either the
 // previous file or the new complete one — never a partial summary. Follows
 // the export-session overwrite convention: an existing target fails closed
-// unless `force` is set, and the parent directory must already exist. The
-// summary is the existing privacy-safe surface (metadata only), so persisting
-// it opens no new channel for secrets or content.
+// unless `force` is set. Missing parent directories are created as needed
+// (Issue #544); a path component that is a file, or a permission failure,
+// still fails closed with an actionable error. The summary is the existing
+// privacy-safe surface (metadata only), so persisting it opens no new channel
+// for secrets or content.
 export function writeRunSummaryFile(summary: RunSummary, filePath: string, force = false): void {
   const resolved = path.resolve(filePath);
   const dir = path.dirname(resolved);
-  let dirOk = false;
   try {
-    dirOk = fs.statSync(dir).isDirectory();
-  } catch {
-    dirOk = false;
-  }
-  if (!dirOk) {
-    throw new Error(`Cannot write run summary: directory "${dir}" does not exist`);
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`Cannot write run summary: cannot create directory "${dir}" (${detail})`);
   }
   if (!force && fs.existsSync(resolved)) {
     throw new Error(

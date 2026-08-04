@@ -302,8 +302,22 @@ describe("Integration: persist run summaries (--summary-out, Issue #519)", () =>
     expect(replaced.evidence.sessionId).not.toBe(firstSession);
   });
 
-  it("fails closed when the parent directory does not exist", async () => {
-    const file = path.join(tmpDir, "no-such-dir", "run.summary.json");
+  it("creates missing parent directories for nested summary paths (Issue #544)", async () => {
+    const { readRunSummaryFile } = await import("../../src/run-scorecard.js");
+    const file = path.join(tmpDir, "runs", "nested", "run.summary.json");
+    expect(fs.existsSync(path.dirname(file))).toBe(false);
+    server.setResponses([{ type: "text", content: "Done" }]);
+    const r = await runCli(["-p", "hello", "--summary-out", file, "--workspace", tmpDir], baseEnv);
+    expect(r.code).toBe(0);
+    const parsed = readRunSummaryFile(file, "nested-run");
+    expect(parsed.outcome).toBe("success");
+    expect(parsed.reason).toBe("completed");
+  });
+
+  it("fails closed when a path component is a file (Issue #544)", async () => {
+    const blocker = path.join(tmpDir, "summary-blocker");
+    fs.writeFileSync(blocker, "not a directory");
+    const file = path.join(blocker, "run.summary.json");
     server.setResponses([{ type: "text", content: "Done" }]);
     const r = await runCli(["-p", "hello", "--summary-out", file, "--workspace", tmpDir], baseEnv);
     expect(r.code).toBe(1);
