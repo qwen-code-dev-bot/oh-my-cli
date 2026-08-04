@@ -178,6 +178,11 @@ import {
   formatPerfReport,
 } from "./perf-report.js";
 import {
+  appendFailureReceipt,
+  buildFailureRecord,
+  formatFailures,
+} from "./failure-receipts.js";
+import {
   DEFAULT_LSP_SERVERS,
   detectLanguagesFromPaths,
   discoverLanguageServers,
@@ -473,6 +478,7 @@ program
   .option("--memory-list", "List this workspace's active memories with provenance (read-only; add --output json for automation) and exit")
   .option("--memory-forget <id>", "Forget a workspace memory by id (soft delete; the tombstone stays auditable) and exit")
   .option("--perf-report", "Show a read-only, redacted performance diagnostics report with declared budgets for the workspace (add --output json for automation) and exit")
+  .option("--failures <id-or-name>", "Show a session's read-only bounded, redacted shell failure receipts, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
   .option("--tasks <id-or-name>", "Show a session's read-only background-task center with durable receipts, reconciled against real process state, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
@@ -875,6 +881,37 @@ program
           process.stdout.write(JSON.stringify(report) + "\n");
         } else {
           process.stdout.write(formatPerfReport(report).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Failure-receipts mode (Issue #574): render a session's bounded,
+      // redacted shell failure receipts (newest first) from its sidecar.
+      // Strictly read-only: nothing is written. Resolution follows the sibling
+      // read-only surfaces (#536 id-or-name, fail-closed). Exits 0 on success,
+      // 2 on a missing session or bad format.
+      if (opts.failures !== undefined) {
+        const store = new SessionStore();
+        const resolved = resolveSessionTarget(String(opts.failures), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Error: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const id = resolved.sessionId;
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        if (store.integrity(id).status === "missing") {
+          process.stderr.write(`Error: session "${id}" not found\n`);
+          process.exit(2);
+        }
+        const record = buildFailureRecord(store, id);
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(formatFailures(record).join("\n") + "\n");
         }
         process.exit(0);
       }
@@ -2972,6 +3009,10 @@ program
               streamProvider,
               readOnly: Boolean(opts.readOnly),
               cancelRequested: sigint.cancelRequested,
+              onShellFailure: (detail) =>
+                appendFailureReceipt(store, sessionId, detail, {
+                  head: currentRepoHead(workspace.root) || null,
+                }),
             });
           } catch (err: unknown) {
             sigint.dispose();
@@ -3093,6 +3134,10 @@ program
           streamProvider,
           readOnly: Boolean(opts.readOnly),
           cancelRequested: sigint.cancelRequested,
+          onShellFailure: (detail) =>
+            appendFailureReceipt(store, sessionId, detail, {
+              head: currentRepoHead(workspace.root) || null,
+            }),
         });
         sigint.dispose();
         process.on("SIGINT", defaultSigintHandler);
@@ -3316,6 +3361,12 @@ program
             // survives a restart in the same workspace and never leaks into
             // another. Keyed by the canonical workspace identity.
             composerDrafts: openComposerDraftStore({ workspacePath: workspace.root }),
+            // Shell failure receipts (Issue #574): persistence is session-bound;
+            // the shell forwards failed shell executions here.
+            onShellFailure: (detail) =>
+              appendFailureReceipt(store, sessionId, detail, {
+                head: currentRepoHead(workspace.root) || null,
+              }),
           });
           return;
         }
@@ -3472,6 +3523,10 @@ program
                 mutatingAllowed,
                 images,
                 preToolUseHooks,
+                onShellFailure: (detail) =>
+                  appendFailureReceipt(store, sessionId, detail, {
+                    head: currentRepoHead(workspace.root) || null,
+                  }),
               });
               if (goalRevision !== undefined) {
                 const output = settleGoalExecution(

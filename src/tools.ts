@@ -17,6 +17,20 @@ export interface ToolResult {
   // Wall-clock time the tool took to execute, in milliseconds. Populated by
   // long-running tools (shell) so headless consumers can report elapsed time.
   elapsedMs?: number;
+  // Structured descriptor of a failed shell execution (Issue #574). Present
+  // only when the shell command ended non-zero, was killed, or timed out, so
+  // the caller can persist a bounded, redacted failure receipt. Never present
+  // for successful runs.
+  shellFailure?: ShellFailureDetail;
+}
+
+export interface ShellFailureDetail {
+  command: string;
+  status: number | null;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+  cwd: string;
 }
 
 export interface ToolDef {
@@ -249,7 +263,19 @@ export function createTools(): ToolDef[] {
         const run = await runShellCommand({ command, timeoutMs, onLiveness, cwd: workspace.root });
         const elapsedMs = run.elapsedMs;
         if (run.timedOut) {
-          return { content: `Error: command timed out after ${timeoutMs / 1000}s`, isError: true, elapsedMs };
+          return {
+            content: `Error: command timed out after ${timeoutMs / 1000}s`,
+            isError: true,
+            elapsedMs,
+            shellFailure: {
+              command,
+              status: null,
+              timedOut: true,
+              stdout: run.stdout,
+              stderr: run.stderr,
+              cwd: workspace.root,
+            },
+          };
         }
         if (run.status === 0) {
           return { content: run.stdout || "(no output)", elapsedMs };
@@ -259,6 +285,14 @@ export function createTools(): ToolDef[] {
           content: `Exit code ${run.status ?? "unknown"}\n${combined || "unknown error"}`,
           isError: true,
           elapsedMs,
+          shellFailure: {
+            command,
+            status: run.status,
+            timedOut: false,
+            stdout: run.stdout,
+            stderr: run.stderr,
+            cwd: workspace.root,
+          },
         };
       },
     },

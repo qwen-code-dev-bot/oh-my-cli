@@ -1,6 +1,6 @@
 import type { Config } from "./config.js";
 import type { SessionMessage } from "./session.js";
-import type { ToolDef, ToolResult } from "./tools.js";
+import type { ToolDef, ToolResult, ShellFailureDetail } from "./tools.js";
 import { createTools, toolSchemasForOpenAI } from "./tools.js";
 import { streamChat, backoffDelayMs, RETRY_MAX_ATTEMPTS, isQuotaExhausted, quotaExhaustedGuidance } from "./provider.js";
 import type { StreamProvider } from "./provider.js";
@@ -90,6 +90,12 @@ export interface AgentOptions {
   // error, unknown tool, folder-trust denial) so the caller can build a
   // privacy-safe failure-taxonomy report. Undefined ⇒ no collection.
   failureTaxonomy?: FailureTaxonomyCollector;
+  // Optional shell failure receipt sink (Issue #574). When present, every
+  // non-zero/killed/timed-out shell execution reports its structured failure
+  // descriptor so the caller can persist a bounded, redacted receipt. The sink
+  // is best-effort: a recording failure never changes tool results, approval
+  // behavior, or turn outcomes. Undefined ⇒ no capture.
+  onShellFailure?: (detail: ShellFailureDetail) => void;
   // Optional provider stream override. Defaults to the network `streamChat`;
   // the deterministic task-fixture replay (#224) supplies a scripted provider so
   // the same fixture always produces the same run. Undefined ⇒ network provider.
@@ -816,6 +822,7 @@ export async function runAgent(
         opts.failureTaxonomy,
         opts.readOnly ?? false,
         opts.turnImages,
+        opts.onShellFailure,
       );
       sink.toolResult({ id: tc.id, name: tc.name, result, round });
       bump(toolCalls, tc.name);
@@ -859,6 +866,7 @@ async function executeToolCall(
   failureTaxonomy: FailureTaxonomyCollector | undefined,
   readOnly: boolean,
   turnImages?: TurnImageCollector,
+  onShellFailure?: (detail: ShellFailureDetail) => void,
 ): Promise<ToolResult> {
   const tool = toolMap.get(tc.name);
   if (!tool) {
@@ -981,6 +989,15 @@ async function executeToolCall(
       // call; categorize it (a detected path escape takes precedence).
       if (result.isError) {
         failureTaxonomy?.record(pathEscape ? "path_escape" : "tool_error");
+      }
+      // Shell failure receipt capture (Issue #574): best-effort, and a
+      // recording failure never changes the result the turn observes.
+      if (result.shellFailure && onShellFailure) {
+        try {
+          onShellFailure(result.shellFailure);
+        } catch {
+          /* best-effort evidence capture */
+        }
       }
       return result;
     } catch (err: unknown) {
