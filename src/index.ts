@@ -66,6 +66,7 @@ import {
   SESSION_NOTES_MAX,
 } from "./session-notes.js";
 import { buildSessionsOverviewRecord, formatSessionsOverview } from "./sessions-overview.js";
+import { searchSessionNotes, formatSessionNotesSearch } from "./session-notes-search.js";
 import { searchSessions, formatSessionSearch } from "./session-search.js";
 import type { SessionSearchScope } from "./session-search.js";
 import { forkSession, resolveForkTarget, SESSION_FORK_SCHEMA, SESSION_FORK_VERSION } from "./session-fork.js";
@@ -540,6 +541,10 @@ program
   .option(
     "--session-notes <id-or-name>",
     "Show a session's read-only durable notes (newest first; add --output json for automation), by exact id or user-owned name, and exit",
+  )
+  .option(
+    "--search-notes <text>",
+    "Search every session's durable notes for the text (case-insensitive substring; read-only; corrupt sessions included, archived skipped; add --output json for a versioned record) and exit",
   )
   .option("--turn-history <id-or-name>", "Show a read-only, per-turn change provenance view for a session from its durable turn checkpoints, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--memory-add <text>", "Record a durable workspace memory (manual; secrets redacted before persistence) and exit")
@@ -1195,6 +1200,33 @@ program
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
           process.stdout.write(formatSessionNotes(record).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Session-notes-search mode (Issue #606): a read-only scan over every
+      // session's notes ledger for a case-insensitive substring — session,
+      // note timestamp, and a redacted snippet per match. Notes are
+      // integrity-agnostic, so corrupt sessions' notes are searchable;
+      // archived sessions are skipped (consistent discovery semantics).
+      // Zero mutation. Exits 0 on a completed scan (matches or none), 2 on a
+      // blank query or a bad format.
+      if (opts.searchNotes !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        if (String(opts.searchNotes).trim() === "") {
+          process.stderr.write("Error: --search-notes requires non-empty search text\n");
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const record = searchSessionNotes(store, String(opts.searchNotes));
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(formatSessionNotesSearch(record).join("\n") + "\n");
         }
         process.exit(0);
       }
