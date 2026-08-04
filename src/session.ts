@@ -258,6 +258,42 @@ export class SessionStore {
     fs.renameSync(temp, target);
   }
 
+  // Sidecar holding a session's archive marker (Issue #598). A distinct
+  // extension keeps it out of listIds() (which matches *.jsonl). Like the
+  // name sidecar, the marker is integrity-agnostic metadata: it works on
+  // corrupt sessions and never touches transcript bytes.
+  archivedPath(id: string): string {
+    return path.join(this.dir, `${id}.archived.json`);
+  }
+
+  // Read a session's archive marker, or null when the session is not
+  // archived (or the sidecar is missing/unreadable). Reading never mutates.
+  readArchived(id: string): { archived: true; at: number } | null {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.archivedPath(id), "utf-8")) as {
+        archived?: unknown;
+        at?: unknown;
+      };
+      if (parsed.archived !== true) return null;
+      return { archived: true, at: typeof parsed.at === "number" ? parsed.at : 0 };
+    } catch {
+      return null;
+    }
+  }
+
+  // Atomically persist the archive marker with its timestamp (temp + rename).
+  writeArchived(id: string, at: number): void {
+    const target = this.archivedPath(id);
+    const temp = `${target}.tmp`;
+    fs.writeFileSync(temp, `${JSON.stringify({ archived: true, at })}\n`, "utf-8");
+    fs.renameSync(temp, target);
+  }
+
+  // Remove the archive marker (unarchive). Absent markers are a no-op.
+  clearArchived(id: string): void {
+    fs.rmSync(this.archivedPath(id), { force: true });
+  }
+
   // Sidecar holding a session's durable background-task receipts. A distinct
   // extension keeps it out of listIds() (which matches *.jsonl). The persisted
   // form carries only redacted fields and opaque evidence digests — never task

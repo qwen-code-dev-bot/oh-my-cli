@@ -57,6 +57,7 @@ import {
 } from "./session-summary.js";
 import type { SessionScopeInfo } from "./session-summary.js";
 import { salvageSession, resolveSalvageTarget } from "./session-salvage.js";
+import { archiveSession, unarchiveSession, resolveArchiveTarget } from "./session-archive.js";
 import { searchSessions, formatSessionSearch } from "./session-search.js";
 import type { SessionSearchScope } from "./session-search.js";
 import { forkSession, resolveForkTarget, SESSION_FORK_SCHEMA, SESSION_FORK_VERSION } from "./session-fork.js";
@@ -540,6 +541,18 @@ program
     "Salvage the recoverable prefix of a corrupt session into a new resumable session (original untouched) and exit",
   )
   .option(
+    "--archive-session <id-or-name>",
+    "Archive a session out of discovery (listing, search, --continue, picker) into a durable marker; it stays resumable by exact id/name (original untouched) and exit",
+  )
+  .option(
+    "--unarchive-session <id-or-name>",
+    "Restore an archived session to normal discovery, by exact id or user-owned name, and exit",
+  )
+  .option(
+    "--include-archived",
+    "With --list-sessions: include archived sessions (flagged) instead of hiding them with a count",
+  )
+  .option(
     "--fork-session <id-or-name>",
     "Fork a healthy session into a new resumable session (transcript + goal copied with forkedFrom provenance; original untouched; add --output json for a versioned record) and exit",
   )
@@ -733,12 +746,22 @@ program
           process.exit(2);
         }
         const store = new SessionStore();
+        let summaries = collectSessionSummaries(store);
+        // Archive retirement (Issue #598): archived sessions are hidden from
+        // discovery by default with a truthful count; --include-archived shows
+        // them flagged. Hidden before scoping/filtering so those counts apply
+        // to the visible set only.
+        let archivedHidden = 0;
+        if (!opts.includeArchived) {
+          const visible = summaries.filter((s) => !s.archived);
+          archivedHidden = summaries.length - visible.length;
+          summaries = visible;
+        }
         // --workspace-scoped (Issue #596): scope to the canonical identity of
         // --workspace before any other narrowing; an uncanonicalizable target
         // fails closed before any output. Sessions whose workspace cannot be
         // verified are excluded and counted, never silently dropped.
         let scopeInfo: SessionScopeInfo | undefined;
-        let summaries = collectSessionSummaries(store);
         if (opts.workspaceScoped) {
           let targetKey: string;
           try {
@@ -761,9 +784,11 @@ program
         // both modes.
         summaries = filterSessionSummaries(summaries, String(opts.filter ?? ""));
         if (format === "json") {
-          process.stdout.write(JSON.stringify(sessionListRecord(summaries, scopeInfo)) + "\n");
+          process.stdout.write(
+            JSON.stringify(sessionListRecord(summaries, scopeInfo, archivedHidden)) + "\n",
+          );
         } else {
-          process.stdout.write(formatSessionList(summaries, scopeInfo) + "\n");
+          process.stdout.write(formatSessionList(summaries, scopeInfo, archivedHidden) + "\n");
         }
         process.exit(0);
       }
@@ -1326,6 +1351,63 @@ program
             `${shortSessionId(resolved.sessionId)} into new session ${result.newSessionId}\n` +
             `Resume it with: oh-my-cli --resume ${result.newSessionId} -p "<prompt>"\n`,
         );
+        process.exit(0);
+      }
+
+      // Session-archive mode (Issue #598): retire a session from discovery
+      // (listing, search, --continue, picker) via a durable, integrity-agnostic
+      // sidecar marker — metadata only, so the transcript/meta/goal/name bytes
+      // are untouched and even corrupt sessions are archivable. The session
+      // stays resumable by exact id or name. Unarchiving removes the marker.
+      // Exits 0 on success (including idempotent no-ops), 2 on refusal/usage.
+      if (opts.archiveSession !== undefined || opts.unarchiveSession !== undefined) {
+        if (opts.archiveSession !== undefined && opts.unarchiveSession !== undefined) {
+          process.stderr.write(
+            "Error: --archive-session and --unarchive-session cannot be combined\n",
+          );
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const archiving = opts.archiveSession !== undefined;
+        const target = String(archiving ? opts.archiveSession : opts.unarchiveSession);
+        // Id-or-name targeting via the heal-free archive resolver: archiving
+        // is metadata-only and must never quarantine or otherwise mutate its
+        // target, and corrupt sessions are valid archive targets.
+        const resolved = resolveArchiveTarget(target, store);
+        if (!resolved.ok) {
+          process.stderr.write(`Cannot ${archiving ? "archive" : "unarchive"}: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const id = resolved.sessionId;
+        if (store.integrity(id).status === "missing") {
+          process.stderr.write(
+            `Cannot ${archiving ? "archive" : "unarchive"}: session ${shortSessionId(id)} was not found\n`,
+          );
+          process.exit(2);
+        }
+        const result = archiving ? archiveSession(store, id) : unarchiveSession(store, id);
+        if (!result.ok) {
+          process.stderr.write(`Cannot ${archiving ? "archive" : "unarchive"}: ${result.reason}\n`);
+          process.exit(2);
+        }
+        if (archiving) {
+          if (result.alreadyArchived) {
+            process.stdout.write(
+              `Session ${shortSessionId(id)} is already archived (since ${new Date(result.archivedAt ?? 0).toISOString()}).\n`,
+            );
+          } else {
+            process.stdout.write(
+              `Archived session ${shortSessionId(id)} — hidden from session listing, search, --continue, and the picker.\n` +
+                `Resume it anytime with: oh-my-cli --resume ${id} -p "<prompt>"\n`,
+            );
+          }
+        } else if (result.alreadyUnarchived) {
+          process.stdout.write(`Session ${shortSessionId(id)} is not archived.\n`);
+        } else {
+          process.stdout.write(
+            `Unarchived session ${shortSessionId(id)} — it is visible in discovery again.\n`,
+          );
+        }
         process.exit(0);
       }
 
@@ -3078,7 +3160,9 @@ program
           process.exit(1);
         }
         const picked = pickContinueSession(
-          collectSessionSummaries(store),
+          // Archived sessions are retired from discovery (Issue #598): they
+          // are never picked by --continue, though --resume still works.
+          collectSessionSummaries(store).filter((s) => !s.archived),
           workspaceTrustKey(opts.workspace),
         );
         if (!picked.ok) {

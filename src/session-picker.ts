@@ -113,19 +113,23 @@ function classifyState(store: SessionStore, summary: SessionSummary): SessionPic
 
 // Enumerate the store into ordered, redacted rows. Reads each session's
 // integrity and goal so the picker can flag corrupt/stale entries up front.
+// Archived sessions (Issue #598) are retired from discovery and never
+// offered; they remain resumable by exact id or name.
 export function collectSessionPickerRows(
   store: SessionStore,
   opts: SessionPickerRowOptions = {},
 ): SessionPickerRow[] {
   const now = opts.now ?? (() => Date.now());
   const summaries = collectSessionSummaries(store, { now });
-  const rows = summaries.map((summary) =>
-    projectSessionRow(summary, {
-      name: store.readName(summary.id),
-      title: store.readGoal(summary.id).goal?.objective,
-      state: classifyState(store, summary),
-    }),
-  );
+  const rows = summaries
+    .filter((summary) => !summary.archived)
+    .map((summary) =>
+      projectSessionRow(summary, {
+        name: store.readName(summary.id),
+        title: store.readGoal(summary.id).goal?.objective,
+        state: classifyState(store, summary),
+      }),
+    );
   return orderSessionRows(rows);
 }
 
