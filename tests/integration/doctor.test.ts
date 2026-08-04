@@ -56,4 +56,41 @@ describe("Integration: doctor readiness checks", () => {
     expect(r.stdout).toContain("State directory");
     expect(r.stdout).toMatch(/Summary: \d+ passed, \d+ warnings, [1-9]\d* failed/);
   });
+
+  it("emits a versioned oh-my-cli.doctor record with --output json (Issue #540)", async () => {
+    const r = await runCli(["--doctor", "--output", "json"], { HOME: homeDir });
+    expect(r.code).toBe(0);
+    const rec = JSON.parse(r.stdout.trim());
+    expect(rec.schema).toBe("oh-my-cli.doctor");
+    expect(rec.v).toBe(1);
+    expect(rec.ok).toBe(true);
+    expect(Array.isArray(rec.checks)).toBe(true);
+    expect(rec.checks.length).toBeGreaterThan(0);
+    const ids = rec.checks.map((c: { id: string }) => c.id);
+    expect(ids).toContain("node-version");
+    expect(ids).toContain("cli-resolution");
+    expect(ids).toContain("state-directory");
+    expect(ids).toContain("platform-support");
+    // Every check carries the structured fields automation needs.
+    for (const c of rec.checks) {
+      expect(typeof c.label).toBe("string");
+      expect(["pass", "warn", "fail"]).toContain(c.status);
+      expect(typeof c.detail).toBe("string");
+    }
+  });
+
+  it("maps ok=false to exit 1 in JSON mode too (Issue #540)", async () => {
+    const r = await runCli(["--doctor", "--output", "json"], { HOME: "" });
+    expect(r.code).toBe(1);
+    const rec = JSON.parse(r.stdout.trim());
+    expect(rec.schema).toBe("oh-my-cli.doctor");
+    expect(rec.ok).toBe(false);
+    expect(rec.checks.some((c: { status: string }) => c.status === "fail")).toBe(true);
+  });
+
+  it("rejects an unknown --output format with a usage error", async () => {
+    const r = await runCli(["--doctor", "--output", "yaml"], { HOME: homeDir });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("invalid output format");
+  });
 });

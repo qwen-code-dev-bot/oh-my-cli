@@ -28,6 +28,29 @@ export interface DoctorReport {
   ok: boolean;
 }
 
+// Versioned machine-readable record for `--doctor --output json` (Issue
+// #540), following the `oh-my-cli.<surface>` convention of the other
+// read-only diagnostics. Serializes the same content the text report shows —
+// versions, home-collapsed paths, capability states — never secrets.
+export const DOCTOR_SCHEMA = "oh-my-cli.doctor";
+export const DOCTOR_VERSION = 1;
+
+export interface DoctorRecord {
+  schema: typeof DOCTOR_SCHEMA;
+  v: typeof DOCTOR_VERSION;
+  ok: boolean;
+  checks: DoctorCheck[];
+}
+
+export function doctorRecord(report: DoctorReport): DoctorRecord {
+  return {
+    schema: DOCTOR_SCHEMA,
+    v: DOCTOR_VERSION,
+    ok: report.ok,
+    checks: report.checks,
+  };
+}
+
 const MIN_NODE_MAJOR = 22;
 const SUPPORTED_PLATFORMS = ["linux", "darwin", "win32"] as const;
 
