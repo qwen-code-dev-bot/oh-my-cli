@@ -44,7 +44,16 @@ describe("session goal", () => {
       updatedAt: 1400,
     });
     expect(runGoalCommand(store, "a", "clear", 1600)).toBe("Goal cleared (revision 5)");
-    expect(new SessionStore(dir).readGoal("a")).toEqual({ revision: 5, goal: null });
+    const cleared = new SessionStore(dir).readGoal("a");
+    expect(cleared).toMatchObject({ revision: 5, goal: null });
+    // The append-only history survives the clear (Issue #580).
+    expect((cleared.history ?? []).map((e) => e.kind)).toEqual([
+      "set",
+      "pause",
+      "resume",
+      "achieve",
+      "clear",
+    ]);
   });
 
   it("keeps achieved goals terminal until they are cleared or replaced", () => {
