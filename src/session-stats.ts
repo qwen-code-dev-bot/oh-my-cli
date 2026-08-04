@@ -19,6 +19,7 @@
 import { redactSecrets } from "./permission-impact.js";
 import { formatCostUsd } from "./cost.js";
 import type { SessionMessage } from "./session.js";
+import { CANCELLED_TOOL_CONTENT } from "./agent.js";
 
 export const SESSION_STATS_SCHEMA = "oh-my-cli.stats";
 export const SESSION_STATS_VERSION = 1;
@@ -92,6 +93,9 @@ export interface SessionStats {
     calls: StatCountMap;
     // Tool failures from the live runtime; "unavailable" headless/resumed.
     failures: StatCountMap;
+    // Tool calls cancelled before execution (#550), derived deterministically
+    // from the transcript placeholders (resume-safe, available headless too).
+    cancellations: StatCountMap;
   };
   timing: {
     // Wall-clock time spent in provider/tool activity this session.
@@ -184,6 +188,10 @@ export function buildSessionStats(input: BuildSessionStatsInput): SessionStats {
   let assistantTurns = 0;
   let chars = 0;
   const toolCallNames: Record<string, number> = {};
+  // Tool-call id → redacted name, so cancelled placeholders (which carry only
+  // a tool_call_id) can be attributed to their tool name (#550).
+  const toolNameById = new Map<string, string>();
+  const toolCancelledNames: Record<string, number> = {};
   for (const m of input.messages) {
     if (m.role === "user") userTurns++;
     else if (m.role === "assistant") assistantTurns++;
@@ -192,10 +200,16 @@ export function buildSessionStats(input: BuildSessionStatsInput): SessionStats {
       for (const call of m.tool_calls) {
         const name = safeToolName(call?.function?.name);
         toolCallNames[name] = (toolCallNames[name] ?? 0) + 1;
+        if (call?.id) toolNameById.set(call.id, name);
       }
+    }
+    if (m.role === "tool" && m.content === CANCELLED_TOOL_CONTENT) {
+      const name = (m.tool_call_id && toolNameById.get(m.tool_call_id)) || "(unknown)";
+      toolCancelledNames[name] = (toolCancelledNames[name] ?? 0) + 1;
     }
   }
   const calls = boundByName(toolCallNames);
+  const cancellationsBound = boundByName(toolCancelledNames);
 
   const rt = input.runtime;
   const hasTokens = Boolean(rt?.tokens && rt.tokens.total > 0);
@@ -243,6 +257,11 @@ export function buildSessionStats(input: BuildSessionStatsInput): SessionStats {
     tools: {
       calls: { kind: "measured", total: calls.total, byName: calls.byName },
       failures,
+      cancellations: {
+        kind: "measured",
+        total: cancellationsBound.total,
+        byName: cancellationsBound.byName,
+      },
     },
     timing: {
       elapsedMs: rt && rt.elapsedMs != null ? measured(rt.elapsedMs) : unavailable(),
@@ -359,6 +378,14 @@ export function formatSessionStats(
     row(
       "tool failures",
       `${stats.tools.failures.total}${breakdownSuffix(stats.tools.failures.byName)}`,
+    );
+  }
+  // Cancellations are deterministic from the transcript placeholders (#550);
+  // the row appears only when at least one call was cancelled before running.
+  if (stats.tools.cancellations.total > 0) {
+    row(
+      "cancelled",
+      `${stats.tools.cancellations.total}${breakdownSuffix(stats.tools.cancellations.byName)}`,
     );
   }
 

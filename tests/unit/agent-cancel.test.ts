@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { runAgent } from "../../src/agent.js";
 import type { AgentSink } from "../../src/agent.js";
+import { CANCELLED_TOOL_CONTENT } from "../../src/agent.js";
 import { Workspace } from "../../src/workspace.js";
 import type { StreamProvider, StreamEvent } from "../../src/provider.js";
 import type { SessionMessage } from "../../src/session.js";
@@ -181,5 +182,112 @@ describe("runAgent retry reuses one request identity (#489)", () => {
 
     expect(result.ok).toBe(true);
     expect(persisted.filter((m) => m.role === "user").length).toBe(1);
+  });
+});
+
+describe("runAgent tool-batch cancellation (#550)", () => {
+  it("stops a tool batch at the next boundary with truthful cancelled outcomes", async () => {
+    let providerCalls = 0;
+    const provider: StreamProvider = async function* () {
+      providerCalls++;
+      yield {
+        type: "tool_call",
+        id: "c1",
+        name: "read",
+        arguments: JSON.stringify({ path: "a.txt" }),
+      } as StreamEvent;
+      yield {
+        type: "tool_call",
+        id: "c2",
+        name: "grep",
+        arguments: JSON.stringify({ pattern: "x" }),
+      } as StreamEvent;
+      yield {
+        type: "tool_call",
+        id: "c3",
+        name: "read",
+        arguments: JSON.stringify({ path: "a.txt" }),
+      } as StreamEvent;
+    };
+    const persisted: SessionMessage[] = [];
+    // Cancel once the first call of the batch starts: c1 executes, c2 and c3
+    // must never run and must receive cancelled placeholders.
+    const started: string[] = [];
+    const sink = silentSink();
+    sink.toolStart = ({ id }) => {
+      started.push(id);
+    };
+    const result = await runAgent("cancel the batch", [], {
+      config: baseConfig,
+      workspace: new Workspace(makeRepo()),
+      approvalMode: "yolo",
+      sessionId: "test-session",
+      onMessage: (m) => persisted.push(m),
+      sink,
+      streamProvider: provider,
+      cancelRequested: () => started.length >= 1,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("cancelled");
+    expect(providerCalls).toBe(1); // no further provider rounds
+    // Placeholder renders emit paired start+result events; the executed-vs-
+    // cancelled distinction lives in the results and the transcript below.
+    expect(started).toEqual(["c1", "c2", "c3"]);
+
+    // Stats distinguish the executed call from the cancelled ones.
+    expect(result.stats.toolCalls).toEqual({ read: 2, grep: 1 });
+    expect(result.stats.toolCancellations).toEqual({ read: 1, grep: 1 });
+    expect(result.stats.toolFailures).toEqual({});
+
+    // Transcript validity: the assistant tool_calls message is followed by one
+    // tool message per call id — a real result for c1, placeholders for c2/c3.
+    const assistantWithCalls = persisted.filter((m) => Array.isArray(m.tool_calls));
+    expect(assistantWithCalls.length).toBe(1);
+    expect(assistantWithCalls[0].tool_calls!.map((c) => c.id)).toEqual(["c1", "c2", "c3"]);
+    const toolMsgs = persisted.filter((m) => m.role === "tool");
+    expect(toolMsgs.map((m) => m.tool_call_id)).toEqual(["c1", "c2", "c3"]);
+    expect(toolMsgs[0].content).not.toBe(CANCELLED_TOOL_CONTENT);
+    expect(toolMsgs[1].content).toBe(CANCELLED_TOOL_CONTENT);
+    expect(toolMsgs[2].content).toBe(CANCELLED_TOOL_CONTENT);
+  });
+
+  it("without a cancel the batch path is unchanged", async () => {
+    let round = 0;
+    const provider: StreamProvider = async function* () {
+      round++;
+      if (round === 1) {
+        yield {
+          type: "tool_call",
+          id: "c1",
+          name: "read",
+          arguments: JSON.stringify({ path: "a.txt" }),
+        } as StreamEvent;
+        yield {
+          type: "tool_call",
+          id: "c2",
+          name: "read",
+          arguments: JSON.stringify({ path: "a.txt" }),
+        } as StreamEvent;
+        return;
+      }
+      yield { type: "text", delta: "done" } as StreamEvent;
+    };
+    const persisted: SessionMessage[] = [];
+    const result = await runAgent("run the batch", [], {
+      config: baseConfig,
+      workspace: new Workspace(makeRepo()),
+      approvalMode: "yolo",
+      sessionId: "test-session",
+      onMessage: (m) => persisted.push(m),
+      sink: silentSink(),
+      streamProvider: provider,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBe("completed");
+    expect(result.stats.toolCalls).toEqual({ read: 2 });
+    expect(result.stats.toolCancellations).toEqual({});
+    expect(persisted.filter((m) => m.role === "tool").length).toBe(2);
   });
 });

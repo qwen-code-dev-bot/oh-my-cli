@@ -7,6 +7,7 @@ import {
 } from "../../src/session-stats.js";
 import type { SessionStatsRuntime } from "../../src/session-stats.js";
 import type { SessionMessage } from "../../src/session.js";
+import { CANCELLED_TOOL_CONTENT } from "../../src/agent.js";
 
 function call(name: string): NonNullable<SessionMessage["tool_calls"]>[number] {
   return { id: `c-${name}-${Math.random()}`, type: "function", function: { name, arguments: "{}" } };
@@ -43,6 +44,7 @@ describe("buildSessionStats — deterministic log aggregation", () => {
     expect(stats.context.chars).toBe(0);
     expect(stats.context.tokens).toEqual({ kind: "estimate", value: 0 });
     expect(stats.tools.calls.total).toBe(0);
+    expect(stats.tools.cancellations).toEqual({ kind: "measured", total: 0, byName: {} });
   });
 
   it("is deterministic: identical inputs yield byte-identical output", () => {
@@ -226,5 +228,54 @@ describe("formatSessionStats", () => {
     expect(parsed.schema).toBe(SESSION_STATS_SCHEMA);
     expect(parsed.sessionId).toBe("s1");
     expect(parsed.activity.messages).toBe(5);
+  });
+});
+
+describe("session stats: tool-call cancellations (Issue #550)", () => {
+  function cancelledTranscript(): SessionMessage[] {
+    return [
+      { role: "user", content: "do the work" },
+      {
+        role: "assistant",
+        content: "working",
+        tool_calls: [
+          { id: "k1", type: "function", function: { name: "read_file", arguments: "{}" } },
+          { id: "k2", type: "function", function: { name: "grep", arguments: "{}" } },
+          { id: "k3", type: "function", function: { name: "read_file", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", content: "real result", tool_call_id: "k1" },
+      { role: "tool", content: CANCELLED_TOOL_CONTENT, tool_call_id: "k2" },
+      { role: "tool", content: CANCELLED_TOOL_CONTENT, tool_call_id: "k3" },
+    ];
+  }
+
+  it("counts cancelled placeholders by tool name, deterministically", () => {
+    const stats = buildSessionStats({ sessionId: "s1", messages: cancelledTranscript() });
+    expect(stats.tools.cancellations.kind).toBe("measured");
+    expect(stats.tools.cancellations.total).toBe(2);
+    expect(stats.tools.cancellations.byName).toEqual({ read_file: 1, grep: 1 });
+    // Calls still count every call id in the transcript (executed + cancelled).
+    expect(stats.tools.calls.total).toBe(3);
+  });
+
+  it("attributes unattributable placeholders to (unknown)", () => {
+    const stats = buildSessionStats({
+      sessionId: "s1",
+      messages: [{ role: "tool", content: CANCELLED_TOOL_CONTENT, tool_call_id: "orphan" }],
+    });
+    expect(stats.tools.cancellations.byName).toEqual({ "(unknown)": 1 });
+  });
+
+  it("renders a cancelled row only when cancellations exist", () => {
+    const withCancels = formatSessionStats(
+      buildSessionStats({ sessionId: "s1", messages: cancelledTranscript() }),
+    ).join("\n");
+    expect(withCancels).toMatch(/cancelled\s+2/);
+
+    const without = formatSessionStats(
+      buildSessionStats({ sessionId: "s1", messages: transcript() }),
+    ).join("\n");
+    expect(without).not.toMatch(/cancelled/);
   });
 });

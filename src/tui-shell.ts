@@ -3840,6 +3840,10 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         compactThreshold: opts.compactThreshold,
         mutatingAllowed: opts.mutatingAllowed ?? true,
         images,
+        // Ctrl+C bumps runGeneration (onCtrlC); polling it here lets the run
+        // stop at the next cancel boundary with a truthful persisted outcome
+        // (Issue #550) instead of running the whole turn to completion.
+        cancelRequested: () => generation !== runGeneration,
       });
       if (generation !== runGeneration) {
         // Interrupted mid-run: its remaining output is discarded. Settle the
@@ -3905,9 +3909,11 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // history draft so a later Up does not restore the cancelled text.
     switch (cancelDecision(state.turn, state.composer.text.length > 0)) {
       case "interrupt":
-        // A turn is in flight: request cancellation. It settles to "cancelled"
-        // once the in-flight provider call returns (it cannot be aborted
-        // directly), so the indicator first reads "interrupting" then "cancelled".
+        // A turn is in flight: request cancellation. runAgent polls the
+        // generation at every cancel boundary (before provider calls, between
+        // stream events, before each tool call in a batch), so the run stops
+        // at the next boundary and settles to "cancelled" — the indicator
+        // first reads "interrupting" then "cancelled".
         runGeneration++; // stop the in-flight run from contributing further
         // Mark any in-flight tool operations as cancelled so their durable
         // summaries reflect the interruption instead of hanging as "running".
