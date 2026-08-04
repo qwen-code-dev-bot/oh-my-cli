@@ -55,6 +55,8 @@ import {
   sessionListRecord,
 } from "./session-summary.js";
 import { salvageSession, resolveSalvageTarget } from "./session-salvage.js";
+import { forkSession, resolveForkTarget, SESSION_FORK_SCHEMA, SESSION_FORK_VERSION } from "./session-fork.js";
+import type { SessionForkRecord } from "./session-fork.js";
 import {
   runSessionPicker,
   resolveResumeTarget,
@@ -525,7 +527,11 @@ program
     "--salvage-session <id-or-name>",
     "Salvage the recoverable prefix of a corrupt session into a new resumable session (original untouched) and exit",
   )
-  .option("--session-name <name>", "The name for --rename-session; empty/whitespace clears the override")
+  .option(
+    "--fork-session <id-or-name>",
+    "Fork a healthy session into a new resumable session (transcript + goal copied with forkedFrom provenance; original untouched; add --output json for a versioned record) and exit",
+  )
+  .option("--session-name <name>", "The name for --rename-session (empty/whitespace clears the override) or the fork created by --fork-session")
   .option("--compact <id-or-name>", "Compact a session into a bounded summary sidecar (original preserved), targeted by exact id or user-owned name, and exit")
   .option("--compact-threshold <tokens>", "Auto-compact the in-memory transcript when the latest prompt size reaches this (env: OMC_COMPACT_THRESHOLD)")
   .option("--undo-turn <id-or-name>", "Safely undo the most recent completed agent turn of a session (restores its files + transcript), targeted by exact id or user-owned name, and exit")
@@ -1244,6 +1250,85 @@ program
             `${shortSessionId(resolved.sessionId)} into new session ${result.newSessionId}\n` +
             `Resume it with: oh-my-cli --resume ${result.newSessionId} -p "<prompt>"\n`,
         );
+        process.exit(0);
+      }
+
+      // Session-fork mode (Issue #592): branch a healthy session into a fresh,
+      // independently resumable session — transcript and durable Goal copied
+      // with `forkedFrom` provenance — leaving the source byte-identical.
+      // Corrupt/missing/ambiguous sources fail closed before any write (exit
+      // 2), as does an invalid --session-name (validated before anything is
+      // created, so a refusal never leaves a partial fork). Exits 0 on
+      // success. Workspace-mutation provenance (turn checkpoints, failure
+      // receipts, compaction sidecars) stays with the source.
+      if (opts.forkSession !== undefined) {
+        const store = new SessionStore();
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        // Id-or-name targeting (#536) via the fork-specific resolver: it
+        // skips the heal step resume resolution performs, because healing
+        // quarantines a corrupt checkpoint and a fork refusal must leave the
+        // source exactly as it was.
+        const resolved = resolveForkTarget(String(opts.forkSession), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Cannot fork: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const status = store.integrity(resolved.sessionId).status;
+        if (status !== "ok") {
+          const detail =
+            status === "missing"
+              ? "was not found"
+              : status === "corrupt"
+                ? "is corrupt and cannot be forked safely (see --salvage-session for the recoverable prefix)"
+                : `is ${status} and cannot be forked cleanly; resume it first to heal it`;
+          process.stderr.write(`Cannot fork: session ${shortSessionId(resolved.sessionId)} ${detail}\n`);
+          process.exit(2);
+        }
+        // An optional user-owned name for the fork. Validated BEFORE the fork
+        // is created so an invalid name fails closed with nothing written;
+        // names follow the documented #249 contract (never a unique selector).
+        let forkName: string | null = null;
+        if (opts.sessionName !== undefined) {
+          const normalized = normalizeSessionName(String(opts.sessionName));
+          if (!normalized.ok) {
+            process.stderr.write(`Cannot fork: ${normalized.reason}\n`);
+            process.exit(2);
+          }
+          forkName = normalized.name;
+        }
+        const result = forkSession(store, resolved.sessionId);
+        if (!result.ok) {
+          process.stderr.write(`Cannot fork: ${result.reason}\n`);
+          process.exit(2);
+        }
+        const newId = result.newSessionId!;
+        if (forkName !== null) {
+          store.writeName(newId, forkName);
+        }
+        if (format === "json") {
+          const record: SessionForkRecord = {
+            schema: SESSION_FORK_SCHEMA,
+            v: SESSION_FORK_VERSION,
+            sourceSessionId: resolved.sessionId,
+            newSessionId: newId,
+            forkedMessages: result.forkedMessages ?? 0,
+            forkedGoal: result.forkedGoal === true,
+            name: forkName,
+          };
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          const goalNote = result.forkedGoal ? "goal copied" : "no goal";
+          const nameNote = forkName !== null ? ` named "${redactSecrets(forkName).text}"` : "";
+          process.stdout.write(
+            `Forked session ${shortSessionId(resolved.sessionId)} into new session ${newId}` +
+              `${nameNote} (${result.forkedMessages} message(s), ${goalNote})\n` +
+              `Resume it with: oh-my-cli --resume ${newId} -p "<prompt>"\n`,
+          );
+        }
         process.exit(0);
       }
 

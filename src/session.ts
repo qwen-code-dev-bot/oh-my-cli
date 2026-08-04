@@ -39,6 +39,10 @@ export interface SessionMeta {
   // Set on sessions created by `--salvage-session` (Issue #546): the id of
   // the corrupt session whose recoverable prefix this session carries.
   salvagedFrom?: string;
+  // Set on sessions created by `--fork-session` (Issue #592): the id of the
+  // healthy session this one branched from. Like `salvagedFrom`, a
+  // non-secret identifier pointing at the provenance transcript.
+  forkedFrom?: string;
 }
 
 export interface SessionGoal {
