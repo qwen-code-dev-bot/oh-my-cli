@@ -167,6 +167,13 @@ import {
   formatTurnHistory,
 } from "./turn-history.js";
 import {
+  MEMORY_DISABLED_ENV,
+  addWorkspaceMemory,
+  forgetWorkspaceMemory,
+  buildMemoryListRecord,
+  formatMemoryList,
+} from "./workspace-memory.js";
+import {
   DEFAULT_LSP_SERVERS,
   detectLanguagesFromPaths,
   discoverLanguageServers,
@@ -458,6 +465,9 @@ program
   .option("--attention", "Show a read-only, workspace-scoped attention summary of what needs action and exit (add --output json for a versioned record)")
   .option("--session-stats <id-or-name>", "Show a read-only, deterministic activity/efficiency stats view for a session by exact id or user-owned name (add --output json for automation) and exit")
   .option("--turn-history <id-or-name>", "Show a read-only, per-turn change provenance view for a session from its durable turn checkpoints, by exact id or user-owned name (add --output json for automation) and exit")
+  .option("--memory-add <text>", "Record a durable workspace memory (manual; secrets redacted before persistence) and exit")
+  .option("--memory-list", "List this workspace's active memories with provenance (read-only; add --output json for automation) and exit")
+  .option("--memory-forget <id>", "Forget a workspace memory by id (soft delete; the tombstone stays auditable) and exit")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
   .option("--tasks <id-or-name>", "Show a session's read-only background-task center with durable receipts, reconciled against real process state, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
@@ -772,6 +782,57 @@ program
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
           process.stdout.write(formatTurnHistory(record).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Workspace-memory mode (Issue #570): manual durable memories with
+      // provenance, forget, and disable controls. Secrets are redacted before
+      // persistence; the store is scoped by the canonical workspace identity;
+      // it grants no authority and this slice performs no retrieval into
+      // turns. OMC_MEMORY_DISABLED=1 refuses everything. Exits 0 on success,
+      // 2 on empty input, unknown id, corrupt store, or disabled mode.
+      if (
+        opts.memoryAdd !== undefined ||
+        opts.memoryList !== undefined ||
+        opts.memoryForget !== undefined
+      ) {
+        if (process.env[MEMORY_DISABLED_ENV] === "1") {
+          process.stderr.write(
+            `Error: workspace memory is disabled (${MEMORY_DISABLED_ENV}=1); nothing was read or written\n`,
+          );
+          process.exit(2);
+        }
+        const memWorkspace = String(opts.workspace);
+        if (opts.memoryAdd !== undefined) {
+          const result = addWorkspaceMemory(memWorkspace, String(opts.memoryAdd), {}, {
+            head: currentRepoHead(memWorkspace) || undefined,
+          });
+          if (!result.ok) {
+            process.stderr.write(`Error: ${result.reason}\n`);
+            process.exit(2);
+          }
+          process.stdout.write(`Recorded memory ${result.entry?.id ?? ""}\n`);
+          process.exit(0);
+        }
+        if (opts.memoryForget !== undefined) {
+          const result = forgetWorkspaceMemory(memWorkspace, String(opts.memoryForget));
+          if (!result.ok) {
+            process.stderr.write(`Error: ${result.reason}\n`);
+            process.exit(2);
+          }
+          process.stdout.write(`Forgot memory ${String(opts.memoryForget)}\n`);
+          process.exit(0);
+        }
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(buildMemoryListRecord(memWorkspace)) + "\n");
+        } else {
+          process.stdout.write(formatMemoryList(memWorkspace).join("\n") + "\n");
         }
         process.exit(0);
       }
