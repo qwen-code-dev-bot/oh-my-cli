@@ -163,6 +163,10 @@ import {
   formatSessionStats,
 } from "./session-stats.js";
 import {
+  buildTurnHistory,
+  formatTurnHistory,
+} from "./turn-history.js";
+import {
   DEFAULT_LSP_SERVERS,
   detectLanguagesFromPaths,
   discoverLanguageServers,
@@ -453,6 +457,7 @@ program
   )
   .option("--attention", "Show a read-only, workspace-scoped attention summary of what needs action and exit (add --output json for a versioned record)")
   .option("--session-stats <id-or-name>", "Show a read-only, deterministic activity/efficiency stats view for a session by exact id or user-owned name (add --output json for automation) and exit")
+  .option("--turn-history <id-or-name>", "Show a read-only, per-turn change provenance view for a session from its durable turn checkpoints, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
   .option("--tasks <id-or-name>", "Show a session's read-only background-task center with durable receipts, reconciled against real process state, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
@@ -735,6 +740,38 @@ program
           process.stdout.write(JSON.stringify(stats) + "\n");
         } else {
           process.stdout.write(formatSessionStats(stats).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Turn-history mode (Issue #568): render a session's durable
+      // turn-checkpoint log as read-only per-turn change provenance — captured
+      // heads, message deltas, file changes with derived actions and bounded
+      // magnitude, undo state, and receipts. Strictly non-mutating: it reads
+      // the turn log and nothing else, and never echoes file content. Exits 0
+      // on success, 2 on a missing session or bad format.
+      if (opts.turnHistory !== undefined) {
+        const store = new SessionStore();
+        const resolved = resolveSessionTarget(String(opts.turnHistory), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Error: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const id = resolved.sessionId;
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        if (store.integrity(id).status === "missing") {
+          process.stderr.write(`Error: session "${id}" not found\n`);
+          process.exit(2);
+        }
+        const record = buildTurnHistory({ sessionId: id, store });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(formatTurnHistory(record).join("\n") + "\n");
         }
         process.exit(0);
       }
