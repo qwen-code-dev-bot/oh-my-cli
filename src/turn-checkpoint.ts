@@ -240,6 +240,15 @@ function turnLogPath(store: SessionStore, id: string): string {
   return fp.endsWith(".jsonl") ? fp.slice(0, -".jsonl".length) + ".turn.json" : fp + ".turn.json";
 }
 
+/** Whether a turn-log file exists for the session (read-only; Issue #568). */
+export function turnLogExists(store: SessionStore, id: string): boolean {
+  try {
+    return fs.statSync(turnLogPath(store, id)).isFile();
+  } catch {
+    return false;
+  }
+}
+
 export function loadTurnLog(store: SessionStore, id: string): TurnLog {
   const empty: TurnLog = {
     schema: TURN_CHECKPOINT_SCHEMA,
