@@ -183,6 +183,7 @@ import {
   formatFailures,
 } from "./failure-receipts.js";
 import { isOfflineRequested } from "./offline-guard.js";
+import { buildGoalStatusRecord, formatGoalStatus } from "./goal-status.js";
 import {
   DEFAULT_LSP_SERVERS,
   detectLanguagesFromPaths,
@@ -481,6 +482,7 @@ program
   .option("--perf-report", "Show a read-only, redacted performance diagnostics report with declared budgets for the workspace (add --output json for automation) and exit")
   .option("--failures <id-or-name>", "Show a session's read-only bounded, redacted shell failure receipts, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--offline", "Offline mode: block provider routes to non-loopback endpoints fail-closed before any network I/O (also env OMC_OFFLINE=1)")
+  .option("--goal-status <id-or-name>", "Show a session's read-only durable Goal checkpoint (status, objective, timestamps, revision), by exact id or user-owned name (add --output json for automation) and exit")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
   .option("--tasks <id-or-name>", "Show a session's read-only background-task center with durable receipts, reconciled against real process state, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
@@ -914,6 +916,38 @@ program
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
           process.stdout.write(formatFailures(record).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Goal-status mode (Issue #578): render a session's durable Goal
+      // checkpoint (status, redacted objective, ISO timestamps, revision).
+      // Strictly read-only: inspection only, no control authority, no writes.
+      // A corrupt or absent sidecar renders the honest no-goal state exactly
+      // as store.readGoal behaves. Exits 0 (absence of a goal is not an
+      // error), 2 on a missing session or bad format.
+      if (opts.goalStatus !== undefined) {
+        const store = new SessionStore();
+        const resolved = resolveSessionTarget(String(opts.goalStatus), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Error: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const id = resolved.sessionId;
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        if (store.integrity(id).status === "missing") {
+          process.stderr.write(`Error: session "${id}" not found\n`);
+          process.exit(2);
+        }
+        const record = buildGoalStatusRecord(store, id);
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(formatGoalStatus(record).join("\n") + "\n");
         }
         process.exit(0);
       }
