@@ -2,6 +2,23 @@ export interface PaletteCommand {
   name: string;
   description: string;
   action: (args?: string) => Promise<string | void> | string | void;
+  // Live availability predicate (Issue #566): returns the missing capability,
+  // state, or permission when the command cannot run right now, or null when
+  // it can. Absent means always available. Purely advisory UI — the execution
+  // paths keep their own gates, so a predicate failure can never bypass them.
+  disabled?: () => string | null;
+}
+
+// Why a command is unavailable right now (Issue #566), or null when it is
+// available. A throwing predicate fails open to "available": the truth it
+// reports is surfaced again by the execution-time gates it advises.
+export function commandDisabledReason(command: PaletteCommand): string | null {
+  if (!command.disabled) return null;
+  try {
+    return command.disabled() ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function filterCommands(
@@ -22,7 +39,13 @@ export function slashPreviewQuery(text: string): string | null {
 const ESC = "\x1b[";
 const HIDE_CURSOR = `${ESC}?25l`;
 const SHOW_CURSOR = `${ESC}?25h`;
-const CLEAR_LINE = `${ESC}2K`;
+// Erase from the cursor to the end of the line (CSI K). The code trails each
+// rendered line, so a whole-line erase (CSI 2 K) would delete the line's own
+// content; at the cursor's end-of-content position CSI K instead clears any
+// residue from a previous longer frame — and in cleanup(), where the cursor
+// sits at column 0, it still clears the full line (Issue #566 E2E surfaced
+// that the original 2K form left every palette entry invisible).
+const CLEAR_LINE = `${ESC}K`;
 const MOVE_UP = (n: number) => `${ESC}${n}A`;
 
 export interface PaletteStyle {
@@ -47,6 +70,9 @@ export interface PaletteRenderState {
   query: string;
   selected: number;
   maxVisible?: number;
+  // Transient one-line notice (Issue #566): currently the reason shown when
+  // the user activates a disabled command. Rendered below the query line.
+  notice?: string;
 }
 
 // Pure renderer for the palette body. Extracted from the interactive loop so
@@ -61,6 +87,7 @@ export function renderPaletteLines(
   const lines: string[] = [];
   lines.push(`${bold}⌘ Command Palette${reset}  ${dim}↑↓ navigate · Enter run · Esc close${reset}`);
   lines.push(`  ${dim}> ${reset}${state.query}${clearLine}`);
+  if (state.notice) lines.push(`  ${dim}${state.notice}${reset}${clearLine}`);
   lines.push("");
 
   if (filtered.length === 0) {
@@ -71,6 +98,13 @@ export function renderPaletteLines(
     for (let i = start; i < end; i++) {
       const cmd = filtered[i];
       const marker = i === state.selected ? `${bold}▸ ` : "  ";
+      const reason = commandDisabledReason(cmd);
+      if (reason) {
+        // Disabled entries stay visible (discoverable) but render dimmed with
+        // the concrete reason — readable without color (Issue #566).
+        lines.push(`${marker}${dim}${cmd.name}  ${cmd.description} — ${reason}${reset}${clearLine}`);
+        continue;
+      }
       const nameStyle = i === state.selected ? bold : "";
       lines.push(`${marker}${nameStyle}${cmd.name}${reset}  ${dim}${cmd.description}${reset}${clearLine}`);
     }
@@ -97,11 +131,16 @@ export async function runPalette(
     const style = paletteStyle(opts.color ?? true);
     let query = "";
     let selected = 0;
+    let notice = "";
     let filtered = filterCommands(commands, query);
     const maxVisible = 8;
 
     function render() {
-      const lines = renderPaletteLines(filtered, { query, selected, maxVisible }, style);
+      const lines = renderPaletteLines(
+        filtered,
+        { query, selected, maxVisible, ...(notice ? { notice } : {}) },
+        style,
+      );
       const totalLines = lines.length;
       stdout.write(`${MOVE_UP(renderedLines)}${lines.join("\n")}\n`);
       renderedLines = totalLines;
@@ -136,6 +175,17 @@ export async function runPalette(
 
       // Enter
       if (key === "\r" || key === "\n") {
+        if (filtered.length > 0 && selected < filtered.length) {
+          const target = filtered[selected];
+          const reason = commandDisabledReason(target);
+          if (reason) {
+            // Activating a disabled command surfaces its reason instead of
+            // executing; the palette stays open (Issue #566).
+            notice = `${target.name} unavailable — ${reason}`;
+            render();
+            return;
+          }
+        }
         cleanup();
         stdin.setRawMode(false);
         stdin.removeListener("data", onKey);
@@ -149,6 +199,7 @@ export async function runPalette(
 
       // Arrow up
       if (key === "\x1b[A" || key === "\x1bOA") {
+        notice = "";
         if (selected > 0) selected--;
         render();
         return;
@@ -156,6 +207,7 @@ export async function runPalette(
 
       // Arrow down
       if (key === "\x1b[B" || key === "\x1bOB") {
+        notice = "";
         if (selected < filtered.length - 1) selected++;
         render();
         return;
@@ -163,6 +215,7 @@ export async function runPalette(
 
       // Backspace
       if (key === "\x7f" || key === "\b") {
+        notice = "";
         query = query.slice(0, -1);
         filtered = filterCommands(commands, query);
         selected = 0;
@@ -172,6 +225,7 @@ export async function runPalette(
 
       // Printable character
       if (key.length === 1 && key.charCodeAt(0) >= 32 && key.charCodeAt(0) < 127) {
+        notice = "";
         query += key;
         filtered = filterCommands(commands, query);
         selected = 0;

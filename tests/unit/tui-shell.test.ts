@@ -188,6 +188,29 @@ describe("tui-shell: inline slash command preview", () => {
     expect(text).not.toContain("/goal");
   });
 
+  it("mirrors the disabled reason in the slash preview (Issue #566)", () => {
+    const reason = "a turn is in flight — available when it settles";
+    const withDisabled = [
+      { name: "/goal", description: "Set a session goal", action: () => {}, disabled: () => reason },
+      { name: "/help", description: "Show keyboard help", action: () => {} },
+    ];
+    const preview = { items: withDisabled, selected: 0 };
+    const layout = computeLayout(
+      { rows: 24, cols: 100 },
+      { composerRows: composerTotalRows("/", preview) },
+    );
+    const lines = renderComposer(
+      { mode: "focused", text: "/", placeholder: "" },
+      layout,
+      shellStyle(false),
+      { slashPreview: preview },
+    );
+    const text = lines.join("\n");
+    // The disabled reason is readable without color; the enabled entry has none.
+    expect(text).toContain(`/goal  Set a session goal — ${reason}`);
+    expect(text.split("\n").find((l) => l.includes("/help"))).not.toContain("—");
+  });
+
   it("renders an actionable empty state without relying on color", () => {
     const preview = { items: [], selected: 0 };
     const layout = computeLayout(
