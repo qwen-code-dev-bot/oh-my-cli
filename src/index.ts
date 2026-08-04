@@ -65,6 +65,8 @@ import {
   shortSessionId,
 } from "./session-picker.js";
 import { openComposerDraftStore } from "./composer-draft.js";
+import { buildAttention, attentionRecord, formatAttention } from "./attention-summary.js";
+import type { AttentionItem } from "./attention-summary.js";
 import { normalizeSessionName } from "./session-name.js";
 import {
   compactMessages,
@@ -449,6 +451,7 @@ program
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
+  .option("--attention", "Show a read-only, workspace-scoped attention summary of what needs action and exit (add --output json for a versioned record)")
   .option("--session-stats <id-or-name>", "Show a read-only, deterministic activity/efficiency stats view for a session by exact id or user-owned name (add --output json for automation) and exit")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
   .option("--tasks <id-or-name>", "Show a session's read-only background-task center with durable receipts, reconciled against real process state, by exact id or user-owned name (add --output json for automation) and exit")
@@ -662,6 +665,36 @@ program
           process.stdout.write(JSON.stringify(sessionListRecord(summaries)) + "\n");
         } else {
           process.stdout.write(formatSessionList(summaries) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Attention mode (Issue #558): a read-only, workspace-scoped summary of
+      // what needs action after time away — corrupt sessions, recoverable
+      // partial checkpoints, and each session's most recent turn outcome —
+      // derived purely from durable state. Never heals, mutates, approves, or
+      // executes; every listed action is a hint for the user to run. Scoped by
+      // the canonical workspace identity, so other workspaces' sessions never
+      // appear. Exits 0 on a successful read, 2 on a bad format.
+      if (opts.attention) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        let items: AttentionItem[];
+        try {
+          items = buildAttention({ store, workspacePath: String(opts.workspace) });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`Error: cannot compute attention: ${msg}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(attentionRecord(items, String(opts.workspace))) + "\n");
+        } else {
+          process.stdout.write(formatAttention(items, String(opts.workspace)) + "\n");
         }
         process.exit(0);
       }
