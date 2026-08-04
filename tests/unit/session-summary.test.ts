@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { SessionStore } from "../../src/session.js";
 import {
   collectSessionSummaries,
+  filterSessionSummaries,
   formatSessionList,
   pickContinueSession,
   sessionListRecord,
@@ -437,5 +438,55 @@ describe("session summary: sessionListRecord (Issue #542)", () => {
     expect(rec.sessions).toEqual([]);
     const parsed = JSON.parse(JSON.stringify(rec));
     expect(parsed).toEqual(rec);
+  });
+});
+
+describe("session summary: filterSessionSummaries (Issue #548)", () => {
+  const mk = (over: Partial<SessionSummary>): SessionSummary => ({
+    id: "00000000-0000-0000-0000-000000000000",
+    messageCount: 1,
+    userTurns: 1,
+    assistantTurns: 0,
+    toolCalls: 0,
+    totalChars: 10,
+    approxTokens: 3,
+    model: "fake-model",
+    workspace: "/srv/proj",
+    createdAt: 0,
+    lastModified: 1000,
+    ageMs: 5000,
+    corrupt: false,
+    ...over,
+  });
+
+  const alpha = mk({ id: "alpha-1111", name: "Auth Refactor", model: "model-a", workspace: "/srv/alpha" });
+  const beta = mk({ id: "beta-2222", name: "Docs Pass", model: "model-b", workspace: "/srv/beta" });
+
+  it("passes everything through on an empty or blank query", () => {
+    expect(filterSessionSummaries([alpha, beta], "")).toEqual([alpha, beta]);
+    expect(filterSessionSummaries([alpha, beta], "   ")).toEqual([alpha, beta]);
+  });
+
+  it("matches by name, id, model, and workspace (case-insensitive substring)", () => {
+    expect(filterSessionSummaries([alpha, beta], "auth").map((s) => s.id)).toEqual(["alpha-1111"]);
+    expect(filterSessionSummaries([alpha, beta], "AUTH").map((s) => s.id)).toEqual(["alpha-1111"]);
+    expect(filterSessionSummaries([alpha, beta], "beta-22").map((s) => s.id)).toEqual(["beta-2222"]);
+    expect(filterSessionSummaries([alpha, beta], "model-b").map((s) => s.id)).toEqual(["beta-2222"]);
+    expect(filterSessionSummaries([alpha, beta], "/srv/alpha").map((s) => s.id)).toEqual(["alpha-1111"]);
+  });
+
+  it("preserves order and returns multiple matches", () => {
+    const both = filterSessionSummaries([alpha, beta], "model-");
+    expect(both.map((s) => s.id)).toEqual(["alpha-1111", "beta-2222"]);
+  });
+
+  it("returns an empty list when nothing matches", () => {
+    expect(filterSessionSummaries([alpha, beta], "zzz-no-match")).toEqual([]);
+  });
+
+  it("handles summaries with missing optional fields", () => {
+    const bare = mk({ id: "bare-3333", name: undefined, model: undefined, workspace: undefined });
+    expect(filterSessionSummaries([bare], "bare-3333").map((s) => s.id)).toEqual(["bare-3333"]);
+    expect(filterSessionSummaries([bare], "anything-else")).toEqual([]);
   });
 });

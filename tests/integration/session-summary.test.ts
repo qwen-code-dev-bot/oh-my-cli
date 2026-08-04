@@ -227,4 +227,51 @@ describe("Integration: session listing and resume", () => {
     expect(list.code).toBe(2);
     expect(list.stderr).toContain("invalid output format");
   });
+
+  it("filters the listing by name substring in text and JSON modes (Issue #548)", async () => {
+    // Seed a second, distinctly named session (the first session in this file
+    // is named "auth refactor").
+    server.setResponses([{ type: "text", content: "answer for docs" }]);
+    const seed = await runCli(["-p", "Docs task", "--workspace", workspaceDir], baseEnv);
+    expect(seed.code).toBe(0);
+    const sessDir = path.join(sessionDir, ".oh-my-cli", "sessions");
+    const docsId = sessionIds(sessionDir).sort(
+      (a, b) =>
+        fs.statSync(path.join(sessDir, `${b}.jsonl`)).mtimeMs -
+        fs.statSync(path.join(sessDir, `${a}.jsonl`)).mtimeMs,
+    )[0];
+    const renamed = await runCli(
+      ["--rename-session", docsId, "--session-name", "docs pass"],
+      baseEnv,
+    );
+    expect(renamed.code).toBe(0);
+
+    // Text mode: filter by name substring (case-insensitive) keeps only the match.
+    const filtered = await runCli(["--list-sessions", "--filter", "DOCS"], baseEnv);
+    expect(filtered.code).toBe(0);
+    expect(filtered.stdout).toContain(docsId);
+    expect(filtered.stdout).toContain('"docs pass"');
+    expect(filtered.stdout).not.toContain('"auth refactor"');
+    expect(filtered.stdout).toContain("Summary: 1 resumable, 0 corrupt (1 total)");
+
+    // JSON mode: totals reflect the filtered set.
+    const json = await runCli(["--list-sessions", "--filter", "docs", "--output", "json"], baseEnv);
+    expect(json.code).toBe(0);
+    const rec = JSON.parse(json.stdout.trim());
+    expect(rec.schema).toBe("oh-my-cli.sessions");
+    expect(rec.total).toBe(1);
+    expect(rec.sessions.length).toBe(1);
+    expect(rec.sessions[0].id).toBe(docsId);
+
+    // Empty match: empty listing, exit 0.
+    const empty = await runCli(["--list-sessions", "--filter", "zzz-no-such"], baseEnv);
+    expect(empty.code).toBe(0);
+    expect(empty.stdout).toContain("No resumable sessions found.");
+
+    // Unfiltered listing is unchanged (shows both named sessions).
+    const all = await runCli(["--list-sessions"], baseEnv);
+    expect(all.code).toBe(0);
+    expect(all.stdout).toContain('"docs pass"');
+    expect(all.stdout).toContain('"auth refactor"');
+  });
 });

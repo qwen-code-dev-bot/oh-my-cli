@@ -47,7 +47,13 @@ import type { PaletteCommand } from "./palette.js";
 import { runPreflight, formatPreflight } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
-import { collectSessionSummaries, formatSessionList, pickContinueSession, sessionListRecord } from "./session-summary.js";
+import {
+  collectSessionSummaries,
+  filterSessionSummaries,
+  formatSessionList,
+  pickContinueSession,
+  sessionListRecord,
+} from "./session-summary.js";
 import { salvageSession, resolveSalvageTarget } from "./session-salvage.js";
 import {
   runSessionPicker,
@@ -430,7 +436,11 @@ program
   .option("--run-workflow <name>", "Run a named workflow from user settings non-interactively (sequential headless steps) and exit")
   .option("--list-profiles", "List declared model profiles from user settings (read-only, redacted) and exit")
   .option("--profile <name>", "Select a named model profile from user settings (overrides settings.defaultProfile)")
-  .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit")
+  .option("--list-sessions", "List resumable sessions with a redacted usage summary and exit (add --output json for a versioned record)")
+  .option(
+    "--filter <text>",
+    "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
+  )
   .option("--session-stats <id-or-name>", "Show a read-only, deterministic activity/efficiency stats view for a session by exact id or user-owned name (add --output json for automation) and exit")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
   .option("--tasks <id-or-name>", "Show a session's read-only background-task center with durable receipts, reconciled against real process state, by exact id or user-owned name (add --output json for automation) and exit")
@@ -633,7 +643,13 @@ program
           process.exit(2);
         }
         const store = new SessionStore();
-        const summaries = collectSessionSummaries(store);
+        // --filter (Issue #548): case-insensitive substring match over id,
+        // name, model, and workspace; totals reflect the filtered set in
+        // both modes.
+        const summaries = filterSessionSummaries(
+          collectSessionSummaries(store),
+          String(opts.filter ?? ""),
+        );
         if (format === "json") {
           process.stdout.write(JSON.stringify(sessionListRecord(summaries)) + "\n");
         } else {
