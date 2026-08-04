@@ -28,6 +28,8 @@ export interface GoalHistoryView {
 
 export interface GoalStatusView {
   status: "active" | "paused" | "achieved";
+  /** Optional concise title (Issue #586), redacted. */
+  title?: string;
   /** Redacted objective text. */
   objective: string;
   createdAt: string;
@@ -89,6 +91,9 @@ export function buildGoalStatusRecord(store: SessionStore, sessionId: string): G
     hasGoal: true,
     goal: {
       status: goal.status,
+      // Title is sanitized at write time (safeTitle); re-redact at render
+      // like the objective (Issue #586).
+      ...(goal.title !== undefined ? { title: redactSecrets(goal.title).text } : {}),
       // Defense in depth: objectives are sanitized at write time (safeObjective);
       // re-redact at render so a hand-edited sidecar never leaks a secret.
       objective: redactSecrets(goal.objective).text,
@@ -111,6 +116,7 @@ export function formatGoalStatus(record: GoalStatusRecord): string[] {
   } else {
     const g = record.goal;
     lines.push(`status:    ${g.status}`);
+    if (g.title !== undefined) lines.push(`title:     ${g.title}`);
     lines.push(`objective: ${g.objective}`);
     lines.push(`set:       ${g.createdAt}`);
     lines.push(`updated:   ${g.updatedAt}`);
@@ -150,5 +156,9 @@ export function resumeGoalSummaryLine(
   const goal = checkpoint.goal;
   const objective = redactSecrets(goal.objective).text;
   const age = formatSessionAge(Math.max(0, now - goal.updatedAt));
-  return `Goal: ${goal.status} · ${objective} · rev ${checkpoint.revision} · updated ${age}`;
+  // Title-first when present (Issue #586) so compact surfaces scan easily;
+  // re-redact at render in case the sidecar was hand-edited.
+  const label =
+    goal.title !== undefined ? `${goal.status} (${redactSecrets(goal.title).text})` : goal.status;
+  return `Goal: ${label} · ${objective} · rev ${checkpoint.revision} · updated ${age}`;
 }
