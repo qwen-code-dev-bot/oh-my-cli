@@ -4,6 +4,7 @@ import {
   collectSessionSummaries,
   formatSessionList,
   pickContinueSession,
+  sessionListRecord,
 } from "../../src/session-summary.js";
 import type { SessionSummary } from "../../src/session-summary.js";
 import { workspaceTrustKey } from "../../src/folder-trust.js";
@@ -349,5 +350,92 @@ describe("session summary: pickContinueSession (Issue #513)", () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("session summary: sessionListRecord (Issue #542)", () => {
+  const mk = (over: Partial<SessionSummary>): SessionSummary => ({
+    id: "01234567-89ab-cdef-0123-456789abcdef",
+    messageCount: 4,
+    userTurns: 2,
+    assistantTurns: 2,
+    toolCalls: 1,
+    totalChars: 40,
+    approxTokens: 10,
+    model: "fake-model",
+    workspace: "/srv/proj",
+    createdAt: 0,
+    lastModified: 1000,
+    ageMs: 5000,
+    corrupt: false,
+    ...over,
+  });
+
+  it("wraps summaries in the versioned oh-my-cli.sessions record with totals", () => {
+    const rec = sessionListRecord([
+      mk({ id: "a" }),
+      mk({ id: "b", corrupt: true }),
+    ]);
+    expect(rec.schema).toBe("oh-my-cli.sessions");
+    expect(rec.v).toBe(1);
+    expect(rec.total).toBe(2);
+    expect(rec.resumable).toBe(1);
+    expect(rec.corrupt).toBe(1);
+    expect(rec.sessions.map((s) => s.id)).toEqual(["a", "b"]);
+    const a = rec.sessions[0];
+    expect(a.messageCount).toBe(4);
+    expect(a.userTurns).toBe(2);
+    expect(a.assistantTurns).toBe(2);
+    expect(a.toolCalls).toBe(1);
+    expect(a.approxTokens).toBe(10);
+    expect(a.lastModified).toBe(1000);
+    expect(a.ageMs).toBe(5000);
+    expect(a.corrupt).toBe(false);
+    expect(rec.sessions[1].corrupt).toBe(true);
+  });
+
+  it("redacts secret-shaped names and models, and collapses home in workspaces", () => {
+    const nameSecret = ["ghp", "_", "d".repeat(24)].join("");
+    const modelSecret = ["ghp", "_", "e".repeat(24)].join("");
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "omc-sessions-rec-home-"));
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const rec = sessionListRecord([
+        mk({
+          id: "x",
+          name: `release ${nameSecret}`,
+          model: modelSecret,
+          workspace: path.join(home, "proj"),
+        }),
+      ]);
+      const entry = rec.sessions[0];
+      expect(JSON.stringify(entry)).not.toContain(nameSecret);
+      expect(JSON.stringify(entry)).not.toContain(modelSecret);
+      expect(entry.name).toContain("[REDACTED]");
+      expect(entry.model).toContain("[REDACTED]");
+      expect(entry.workspace).toBe("~/proj");
+    } finally {
+      process.env.HOME = prevHome;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("omits name when unset and reports unknown provenance like the text view", () => {
+    const rec = sessionListRecord([mk({ id: "y", model: undefined, workspace: undefined })]);
+    const entry = rec.sessions[0];
+    expect(entry.name).toBeUndefined();
+    expect(entry.model).toBe("unknown");
+    expect(entry.workspace).toBe("unknown");
+  });
+
+  it("serializes an empty store as an empty record", () => {
+    const rec = sessionListRecord([]);
+    expect(rec.total).toBe(0);
+    expect(rec.resumable).toBe(0);
+    expect(rec.corrupt).toBe(0);
+    expect(rec.sessions).toEqual([]);
+    const parsed = JSON.parse(JSON.stringify(rec));
+    expect(parsed).toEqual(rec);
   });
 });

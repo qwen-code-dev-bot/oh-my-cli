@@ -187,4 +187,44 @@ describe("Integration: session listing and resume", () => {
     expect(listed.stdout).not.toContain(secret);
     expect(listed.stdout).toContain('"auth refactor"');
   });
+
+  it("emits a versioned oh-my-cli.sessions record with --output json (Issue #542)", async () => {
+    const list = await runCli(["--list-sessions", "--output", "json"], baseEnv);
+    expect(list.code).toBe(0);
+    const rec = JSON.parse(list.stdout.trim());
+    expect(rec.schema).toBe("oh-my-cli.sessions");
+    expect(rec.v).toBe(1);
+    expect(rec.total).toBe(rec.sessions.length);
+    expect(rec.resumable + rec.corrupt).toBe(rec.total);
+    expect(rec.corrupt).toBeGreaterThanOrEqual(1); // corrupt session seeded above
+
+    // The named session from the previous test appears with its name.
+    const named = rec.sessions.find(
+      (s: { name?: string }) => s.name === "auth refactor",
+    );
+    expect(named).toBeDefined();
+    expect(named.corrupt).toBe(false);
+    expect(typeof named.messageCount).toBe("number");
+    expect(typeof named.approxTokens).toBe("number");
+
+    // The corrupt session is flagged in the record too.
+    const corrupt = rec.sessions.find((s: { corrupt: boolean }) => s.corrupt);
+    expect(corrupt).toBeDefined();
+    expect(corrupt.id).toBe("corrupt-checkpoint");
+
+    // Every entry carries the structured fields automation needs.
+    for (const s of rec.sessions) {
+      expect(typeof s.id).toBe("string");
+      expect(typeof s.model).toBe("string");
+      expect(typeof s.workspace).toBe("string");
+      expect(typeof s.lastModified).toBe("number");
+      expect(typeof s.ageMs).toBe("number");
+    }
+  });
+
+  it("rejects an unknown --output format for --list-sessions (Issue #542)", async () => {
+    const list = await runCli(["--list-sessions", "--output", "yaml"], baseEnv);
+    expect(list.code).toBe(2);
+    expect(list.stderr).toContain("invalid output format");
+  });
 });
