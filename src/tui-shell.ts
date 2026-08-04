@@ -2790,6 +2790,9 @@ export interface ConversationShellOptions {
   // Offline posture (Issue #576): when true, the shell surfaces the offline
   // banner at startup so the user sees the posture before the first request.
   offline?: boolean;
+  // Immediate Goal status summary on resume (Issue #584): shown once in the
+  // transcript when the resumed session carries a durable goal.
+  resumeNotice?: string;
   // Durable workspace-scoped composer draft (Issue #556): restored at startup,
   // saved as the composer text changes, cleared on send/clear-draft. Optional
   // so a shell without a draft store behaves exactly as before.
@@ -2917,6 +2920,11 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       kind: "notice",
       text: "offline mode: provider routes are restricted to loopback endpoints",
     });
+  }
+  // Immediate Goal status summary on resume (Issue #584): informational only —
+  // never changes goal state, never counts as a turn.
+  if (opts.resumeNotice) {
+    state.transcript.push({ kind: "notice", text: opts.resumeNotice });
   }
   // Availability-aware palette commands (Issue #566). The palette and slash
   // preview surface the #511 busy-turn truth before submit: while a turn is

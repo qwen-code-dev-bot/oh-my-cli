@@ -8,6 +8,7 @@ import {
   GOAL_STATUS_VERSION,
   buildGoalStatusRecord,
   formatGoalStatus,
+  resumeGoalSummaryLine,
 } from "../../src/goal-status.js";
 
 const ANSI = /\x1b\[/;
@@ -126,5 +127,75 @@ describe("goal status rendering (Issue #578)", () => {
   it("renders the explicit no-goal state", () => {
     const text = formatGoalStatus(buildGoalStatusRecord(store, sessionId)).join("\n");
     expect(text).toContain("No goal recorded for this session.");
+  });
+});
+
+describe("resume goal summary (Issue #584)", () => {
+  let homeDir: string;
+  let store: SessionStore;
+  let sessionId: string;
+
+  beforeEach(() => {
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "omc-584u-"));
+    store = new SessionStore(homeDir);
+    sessionId = store.newId();
+    store.writeMeta(sessionId, { model: "m", workspace: "/tmp/ws", createdAt: 1 });
+    store.append(sessionId, { role: "user", content: "hi" });
+  });
+  afterEach(() => {
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it("renders one bounded line with status, objective, revision, and age", () => {
+    store.writeGoal(sessionId, {
+      revision: 3,
+      goal: { objective: "ship the thing", status: "active", createdAt: NOW, updatedAt: NOW + 1000 },
+    });
+    const line = resumeGoalSummaryLine(store, sessionId, NOW + 61_000);
+    expect(line).toBe("Goal: active · ship the thing · rev 3 · updated 1m ago");
+  });
+
+  it("reports paused and achieved statuses", () => {
+    for (const status of ["paused", "achieved"] as const) {
+      store.writeGoal(sessionId, {
+        revision: 2,
+        goal: { objective: "an objective", status, createdAt: NOW, updatedAt: NOW },
+      });
+      expect(resumeGoalSummaryLine(store, sessionId, NOW)).toBe(
+        `Goal: ${status} · an objective · rev 2 · updated 0s ago`,
+      );
+    }
+  });
+
+  it("returns null silently when the session has no goal", () => {
+    expect(resumeGoalSummaryLine(store, sessionId, NOW)).toBeNull();
+  });
+
+  it("returns null for a corrupt sidecar and preserves the bytes", () => {
+    fs.writeFileSync(store.goalPath(sessionId), "{ not json");
+    expect(resumeGoalSummaryLine(store, sessionId, NOW)).toBeNull();
+    expect(fs.readFileSync(store.goalPath(sessionId), "utf8")).toBe("{ not json");
+  });
+
+  it("redacts secret-shaped objectives", () => {
+    const secret = ["ghp", "_", "k".repeat(24)].join("");
+    store.writeGoal(sessionId, {
+      revision: 1,
+      goal: { objective: `deploy with ${secret}`, status: "active", createdAt: NOW, updatedAt: NOW },
+    });
+    const line = resumeGoalSummaryLine(store, sessionId, NOW);
+    expect(line).not.toBeNull();
+    expect(line).not.toContain(secret);
+    expect(line).toContain("[REDACTED]");
+  });
+
+  it("never mutates the goal sidecar", () => {
+    store.writeGoal(sessionId, {
+      revision: 1,
+      goal: { objective: "read only", status: "active", createdAt: NOW, updatedAt: NOW },
+    });
+    const before = fs.readFileSync(store.goalPath(sessionId), "utf8");
+    resumeGoalSummaryLine(store, sessionId, NOW);
+    expect(fs.readFileSync(store.goalPath(sessionId), "utf8")).toBe(before);
   });
 });

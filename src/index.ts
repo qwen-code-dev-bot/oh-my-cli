@@ -183,7 +183,7 @@ import {
   formatFailures,
 } from "./failure-receipts.js";
 import { isOfflineRequested } from "./offline-guard.js";
-import { buildGoalStatusRecord, formatGoalStatus } from "./goal-status.js";
+import { buildGoalStatusRecord, formatGoalStatus, resumeGoalSummaryLine } from "./goal-status.js";
 import { runGoalControl } from "./goal-control.js";
 import {
   DEFAULT_LSP_SERVERS,
@@ -2916,6 +2916,11 @@ program
         resumeFlagSessionId = target.sessionId;
       }
       const resumeId = browseResume?.sessionId ?? resumeFlagSessionId ?? continueResumeId;
+      // Immediate Goal status summary on resume (Issue #584): one bounded line
+      // when the resumed session carries a durable goal; silent when it does
+      // not. Shown on stderr for every resume path (picker, --resume,
+      // --continue) and surfaced in the TUI transcript below.
+      let resumeGoalNotice: string | null = null;
       if (resumeId) {
         sessionId = resumeId;
         // Heal an interrupted checkpoint before loading (promotes a complete temp
@@ -2952,6 +2957,13 @@ program
                 `(${parts.join("; ")}); conversation, tool, and approval history are preserved.\n`,
             );
           }
+        }
+        // Surface the resumed session's durable Goal immediately (Issue #584).
+        // Derived read-only via readGoal; absent or corrupt sidecars stay
+        // silent (null) and the resume itself is never altered.
+        resumeGoalNotice = resumeGoalSummaryLine(store, sessionId);
+        if (resumeGoalNotice !== null) {
+          process.stderr.write(`${resumeGoalNotice}\n`);
         }
       } else {
         sessionId = store.newId();
@@ -3458,6 +3470,8 @@ program
             composerDrafts: openComposerDraftStore({ workspacePath: workspace.root }),
             // Offline posture banner before the first request (Issue #576).
             offline: offlineRequested,
+            // Immediate Goal status summary on resume (Issue #584).
+            resumeNotice: resumeGoalNotice ?? undefined,
             // Shell failure receipts (Issue #574): persistence is session-bound;
             // the shell forwards failed shell executions here.
             onShellFailure: (detail) =>

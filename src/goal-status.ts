@@ -12,6 +12,7 @@
 import { redactSecrets } from "./permission-impact.js";
 import type { SessionStore, GoalHistoryEntry } from "./session.js";
 import { goalHistoryForDisplay, formatGoalHistoryLines, GOAL_HISTORY_RENDER_LIMIT } from "./session-goal.js";
+import { formatSessionAge } from "./session-summary.js";
 
 export const GOAL_STATUS_SCHEMA = "oh-my-cli.goal-status" as const;
 export const GOAL_STATUS_VERSION = 1 as const;
@@ -129,4 +130,25 @@ export function formatGoalStatus(record: GoalStatusRecord): string[] {
     }
   }
   return lines;
+}
+
+/**
+ * Immediate Goal status summary for session resume (Issue #584). Returns one
+ * bounded line when the session carries a durable goal, or null when it does
+ * not (absence is silent, not an error). Derived read-only via readGoal, so a
+ * corrupt sidecar behaves exactly as readGoal does today (null, bytes
+ * preserved); the summary never mutates goal state. The objective is
+ * re-redacted at render time and bounded by the write-time safeObjective cap.
+ */
+export function resumeGoalSummaryLine(
+  store: SessionStore,
+  sessionId: string,
+  now: number = Date.now(),
+): string | null {
+  const checkpoint = store.readGoal(sessionId);
+  if (!checkpoint.goal) return null;
+  const goal = checkpoint.goal;
+  const objective = redactSecrets(goal.objective).text;
+  const age = formatSessionAge(Math.max(0, now - goal.updatedAt));
+  return `Goal: ${goal.status} · ${objective} · rev ${checkpoint.revision} · updated ${age}`;
 }
