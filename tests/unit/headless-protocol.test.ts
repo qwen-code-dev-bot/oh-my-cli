@@ -138,6 +138,31 @@ describe("createHeadlessSink: schema for every event", () => {
     expect(r.content).toBe("boom");
   });
 
+  it("carries an explicit outcome state: succeeded / failed / cancelled (#552)", async () => {
+    const { CANCELLED_TOOL_CONTENT } = await import("../../src/agent.js");
+    const out = new FakeOut();
+    const sink = createHeadlessSink(new HeadlessWriter(out));
+    sink.toolResult({ id: "s", name: "read", result: { content: "body" }, round: 0 });
+    sink.toolResult({ id: "f", name: "shell", result: { content: "boom", isError: true }, round: 0 });
+    // A #550 cancelled placeholder carries isError but must never read as a failure.
+    sink.toolResult({
+      id: "c",
+      name: "read",
+      result: { content: CANCELLED_TOOL_CONTENT, isError: true },
+      round: 0,
+    });
+    const [succeeded, failed, cancelled] = out.records();
+    if (succeeded.type !== "tool_result" || failed.type !== "tool_result" || cancelled.type !== "tool_result") {
+      throw new Error("unreachable");
+    }
+    expect(succeeded.state).toBe("succeeded");
+    expect(succeeded.ok).toBe(true);
+    expect(failed.state).toBe("failed");
+    expect(failed.ok).toBe(false);
+    expect(cancelled.state).toBe("cancelled");
+    expect(cancelled.ok).toBe(false);
+  });
+
   it("redacts and truncates tool result content", () => {
     const out = new FakeOut();
     const sink = createHeadlessSink(new HeadlessWriter(out));

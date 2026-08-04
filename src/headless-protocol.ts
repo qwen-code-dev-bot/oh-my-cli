@@ -4,6 +4,7 @@ import type { RunSummary } from "./run-summary.js";
 import type { BottleneckReport } from "./run-bottleneck.js";
 import type { FailureTaxonomyReport } from "./run-failure-taxonomy.js";
 import { redactSecrets } from "./permission-impact.js";
+import { CANCELLED_TOOL_CONTENT } from "./agent.js";
 
 // A stable, versioned newline-delimited JSON protocol for core run lifecycle
 // events. It is opt-in (see `--output json`) and never affects the default
@@ -41,6 +42,10 @@ export type HeadlessEvent =
       id: string;
       name: string;
       ok: boolean;
+      // Explicit outcome state (#552): a closed vocabulary so automation never
+      // conflates a #550 cancelled placeholder with a genuine failure. Purely
+      // additive at v1 — `ok` stays unchanged for existing consumers.
+      state: "succeeded" | "failed" | "cancelled";
       truncated: boolean;
       bytes: number;
       content: string;
@@ -210,12 +215,21 @@ export function createHeadlessSink(
     },
     toolResult: ({ id, name, result, round }) => {
       const s = safeText(result.content ?? "", MAX_TOOL_CONTENT);
+      // Derive the explicit outcome state without ambiguity (#552): a cancelled
+      // placeholder is never a failure, even though it carries isError.
+      const state: "succeeded" | "failed" | "cancelled" =
+        result.content === CANCELLED_TOOL_CONTENT
+          ? "cancelled"
+          : result.isError
+            ? "failed"
+            : "succeeded";
       writer.emit({
         type: "tool_result",
         round,
         id,
         name: safeName(name),
         ok: !result.isError,
+        state,
         truncated: s.truncated,
         bytes: s.bytes,
         content: s.text,
