@@ -1,6 +1,11 @@
 import OpenAI from "openai";
 import type { Config } from "./config.js";
 import type { SessionMessage } from "./session.js";
+import {
+  offlineDispatchDecision,
+  offlineRefusalMessage,
+  OfflineRefusalError,
+} from "./offline-guard.js";
 
 export interface StreamedText {
   type: "text";
@@ -216,6 +221,15 @@ export async function* streamChat(
   messages: SessionMessage[],
   options?: ProviderOptions,
 ): AsyncGenerator<StreamEvent> {
+  // Offline-mode guard (Issue #576): refuse non-loopback routes BEFORE any
+  // network I/O and before the retry loop, so a blocked route never produces
+  // a partial stream or a retry/backoff storm.
+  if (config.offline) {
+    const decision = offlineDispatchDecision({ offline: true, baseUrl: config.baseUrl });
+    if (!decision.allowed) {
+      throw new OfflineRefusalError(offlineRefusalMessage(decision.redactedHost));
+    }
+  }
   let attempt = 0;
   while (true) {
     attempt++;

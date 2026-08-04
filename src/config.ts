@@ -8,6 +8,11 @@ const ConfigSchema = z.object({
   apiKey: z.string().min(1, "OPENAI_API_KEY is required"),
   baseUrl: z.string().url("OPENAI_BASE_URL must be a valid URL"),
   model: z.string().min(1, "OPENAI_MODEL is required"),
+  // Offline posture (Issue #576): when true, provider dispatch to
+  // non-loopback endpoints is refused fail-closed before any network I/O.
+  // Never sourced from the base env schema itself — the caller sets it from
+  // --offline / OMC_OFFLINE.
+  offline: z.boolean().optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

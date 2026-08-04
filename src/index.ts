@@ -182,6 +182,7 @@ import {
   buildFailureRecord,
   formatFailures,
 } from "./failure-receipts.js";
+import { isOfflineRequested } from "./offline-guard.js";
 import {
   DEFAULT_LSP_SERVERS,
   detectLanguagesFromPaths,
@@ -479,6 +480,7 @@ program
   .option("--memory-forget <id>", "Forget a workspace memory by id (soft delete; the tombstone stays auditable) and exit")
   .option("--perf-report", "Show a read-only, redacted performance diagnostics report with declared budgets for the workspace (add --output json for automation) and exit")
   .option("--failures <id-or-name>", "Show a session's read-only bounded, redacted shell failure receipts, by exact id or user-owned name (add --output json for automation) and exit")
+  .option("--offline", "Offline mode: block provider routes to non-loopback endpoints fail-closed before any network I/O (also env OMC_OFFLINE=1)")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
   .option("--tasks <id-or-name>", "Show a session's read-only background-task center with durable receipts, reconciled against real process state, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
@@ -2529,6 +2531,11 @@ program
         process.exit(0);
       }
 
+      // Offline mode (Issue #576): --offline or OMC_OFFLINE=1 guards provider
+      // dispatch for the whole run; read-only surfaces and local tools are
+      // unaffected.
+      const offlineRequested = Boolean(opts.offline) || isOfflineRequested(process.env);
+
       if (opts.preflight) {
         const resolved = resolveModelProfileConfig({
           settingsPath: resolveSettingsPath(opts.settings),
@@ -2540,6 +2547,8 @@ program
           }),
         });
         process.stderr.write(describeResolvedConfig(resolved) + "\n");
+        // Offline posture is reported without any network probe (Issue #576).
+        if (offlineRequested) resolved.config.offline = true;
         const result = await runPreflight(resolved.config);
         process.stdout.write(formatPreflight(result) + "\n");
         process.exit(result.ok ? 0 : 1);
@@ -2558,6 +2567,16 @@ program
         }),
       });
       const config = resolved.config;
+      // Offline mode (Issue #576): provider dispatch to non-loopback
+      // endpoints is refused fail-closed before any network I/O. It guards
+      // only provider dispatch — read-only surfaces and local tools keep
+      // working.
+      if (offlineRequested) {
+        config.offline = true;
+        process.stderr.write(
+          "Offline mode: provider routes are restricted to loopback endpoints.\n",
+        );
+      }
       const store = new SessionStore();
 
       // Side question (Issue #200): ask a bounded, read-only question against a
@@ -3361,6 +3380,8 @@ program
             // survives a restart in the same workspace and never leaks into
             // another. Keyed by the canonical workspace identity.
             composerDrafts: openComposerDraftStore({ workspacePath: workspace.root }),
+            // Offline posture banner before the first request (Issue #576).
+            offline: offlineRequested,
             // Shell failure receipts (Issue #574): persistence is session-bound;
             // the shell forwards failed shell executions here.
             onShellFailure: (detail) =>

@@ -2787,6 +2787,9 @@ export interface ConversationShellOptions {
   // Shell failure receipt sink (Issue #574): the caller owns persistence
   // (session-bound sidecar); the shell only forwards failed shell executions.
   onShellFailure?: (detail: ShellFailureDetail) => void;
+  // Offline posture (Issue #576): when true, the shell surfaces the offline
+  // banner at startup so the user sees the posture before the first request.
+  offline?: boolean;
   // Durable workspace-scoped composer draft (Issue #556): restored at startup,
   // saved as the composer text changes, cleared on send/clear-draft. Optional
   // so a shell without a draft store behaves exactly as before.
@@ -2907,6 +2910,13 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         text: "composer draft could not be restored; starting with an empty composer",
       });
     }
+  }
+  // Offline posture banner (Issue #576): visible before the first request.
+  if (opts.offline) {
+    state.transcript.push({
+      kind: "notice",
+      text: "offline mode: provider routes are restricted to loopback endpoints",
+    });
   }
   // Availability-aware palette commands (Issue #566). The palette and slash
   // preview surface the #511 busy-turn truth before submit: while a turn is
