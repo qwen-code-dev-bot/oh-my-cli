@@ -18,6 +18,7 @@
 import type { SessionStore, SessionMessage } from "./session.js";
 import { shortSessionId } from "./session-picker.js";
 import { redactSecrets } from "./permission-impact.js";
+import { workspaceTrustKey } from "./folder-trust.js";
 
 export const SESSION_SEARCH_SCHEMA = "oh-my-cli.session-search" as const;
 export const SESSION_SEARCH_VERSION = 1 as const;
@@ -57,6 +58,21 @@ export interface SessionSearchRecord {
   elidedPerSession: number;
   /** Matches dropped by the total bound. */
   elidedTotal: number;
+  // Workspace scoping (Issue #596): present only when a scope was active.
+  // Names the redacted scope target and counts the sessions excluded because
+  // their workspace could not be verified.
+  scopedWorkspace?: string;
+  excludedUnverifiable?: number;
+}
+
+// An active workspace scope for the scan (Issue #596): `workspaceKey` is the
+// canonical identity sessions must match; `workspacePath` is the declared
+// target (redacted at render time). `keyOf` is injectable for deterministic
+// tests; it defaults to the folder-trust workspace key.
+export interface SessionSearchScope {
+  workspaceKey: string;
+  workspacePath: string;
+  keyOf?: (workspacePath: string) => string;
 }
 
 function snippetAround(haystack: string, index: number, needleLength: number): string {
@@ -100,24 +116,51 @@ function messageMatches(
 
 // Scan the store for a case-insensitive substring across every loadable
 // session transcript. Deterministic order: sessions by id, messages by
-// transcript order. Read-only — the store is never mutated.
-export function searchSessions(store: SessionStore, query: string): SessionSearchRecord {
+// transcript order. Read-only — the store is never mutated. With a scope
+// (Issue #596), only sessions whose declared workspace collapses to the
+// scope's canonical identity are considered; sessions whose workspace cannot
+// be verified are excluded and counted, and scoped corrupt sessions still
+// count as skipped.
+export function searchSessions(
+  store: SessionStore,
+  query: string,
+  scope?: SessionSearchScope,
+): SessionSearchRecord {
   const needle = query.trim().toLowerCase();
   const matches: SessionSearchMatch[] = [];
   let sessionsScanned = 0;
   let sessionsSkippedCorrupt = 0;
   let elidedPerSession = 0;
   let elidedTotal = 0;
+  let excludedUnverifiable = 0;
+  const keyOf = scope?.keyOf ?? workspaceTrustKey;
 
   if (needle !== "") {
     for (const id of [...store.listIds()].sort()) {
+      const diag = store.loadWithDiagnostics(id);
+      // Workspace scoping runs before integrity accounting: an unverifiable
+      // workspace is excluded whether or not the checkpoint is healthy.
+      if (scope !== undefined) {
+        const declared = diag.meta?.workspace;
+        if (declared === undefined || declared === "") {
+          excludedUnverifiable++;
+          continue;
+        }
+        let key: string;
+        try {
+          key = keyOf(declared);
+        } catch {
+          excludedUnverifiable++;
+          continue;
+        }
+        if (key !== scope.workspaceKey) continue;
+      }
       const status = store.integrity(id).status;
       if (status === "corrupt" || status === "missing") {
         if (status === "corrupt") sessionsSkippedCorrupt++;
         continue;
       }
       sessionsScanned++;
-      const diag = store.loadWithDiagnostics(id);
       const name = store.readName(id);
       let keptThisSession = 0;
       for (let i = 0; i < diag.messages.length; i++) {
@@ -155,19 +198,41 @@ export function searchSessions(store: SessionStore, query: string): SessionSearc
     matches,
     elidedPerSession,
     elidedTotal,
+    ...(scope !== undefined
+      ? {
+          scopedWorkspace: redactWorkspacePath(scope.workspacePath),
+          excludedUnverifiable,
+        }
+      : {}),
   };
+}
+
+// Collapse the home prefix for display, matching the sibling list surface.
+function redactWorkspacePath(p: string): string {
+  const home = process.env.HOME ?? process.env.USERPROFILE;
+  let out = p;
+  if (home && out.startsWith(home)) out = "~" + out.slice(home.length);
+  return redactSecrets(out).text;
 }
 
 export function formatSessionSearch(record: SessionSearchRecord): string {
   const lines: string[] = [];
   lines.push(`Session search — "${record.query}"`);
+  if (record.scopedWorkspace !== undefined) {
+    lines.push(`Scoped to workspace: ${record.scopedWorkspace}`);
+  }
   lines.push("─".repeat(40));
   lines.push("");
+  const excluded =
+    record.excludedUnverifiable !== undefined && record.excludedUnverifiable > 0
+      ? `, excluded ${record.excludedUnverifiable} (workspace unverifiable)`
+      : "";
   lines.push(
     `Scanned ${record.sessionsScanned} session(s)` +
       (record.sessionsSkippedCorrupt > 0
         ? `, skipped ${record.sessionsSkippedCorrupt} corrupt`
         : "") +
+      excluded +
       ".",
   );
   lines.push("");
