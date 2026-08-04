@@ -5,6 +5,7 @@ import {
   renderPaletteLines,
   paletteStyle,
   slashPreviewQuery,
+  commandDisabledReason,
 } from "../../src/palette.js";
 import type { PaletteCommand } from "../../src/palette.js";
 
@@ -107,5 +108,84 @@ describe("Palette: renderPaletteLines color", () => {
     // The command names and descriptions are still rendered.
     expect(text).toContain("/new");
     expect(text).toContain("Start a new conversation session");
+  });
+});
+
+describe("Palette: disabled reasons (Issue #566)", () => {
+  const busyReason = "a turn is in flight — available when it settles";
+  const enabled: PaletteCommand = {
+    name: "/status",
+    description: "Show current session and workspace info",
+    action: () => {},
+  };
+  const disabled: PaletteCommand = {
+    name: "/goal",
+    description: "Set, inspect, pause, resume, achieve, or clear the session goal",
+    action: () => {},
+    disabled: () => busyReason,
+  };
+  const available: PaletteCommand = {
+    name: "/help",
+    description: "Show available commands and options",
+    action: () => {},
+    disabled: () => null,
+  };
+
+  it("reports availability: absent predicate, null predicate, and reason", () => {
+    expect(commandDisabledReason(enabled)).toBeNull();
+    expect(commandDisabledReason(available)).toBeNull();
+    expect(commandDisabledReason(disabled)).toBe(busyReason);
+  });
+
+  it("fails open when the predicate throws (execution gates remain the backstop)", () => {
+    const throwing: PaletteCommand = {
+      name: "/boom",
+      description: "x",
+      action: () => {},
+      disabled: () => {
+        throw new Error("state unavailable");
+      },
+    };
+    expect(commandDisabledReason(throwing)).toBeNull();
+  });
+
+  it("renders disabled entries dimmed with the reason, color or not", () => {
+    for (const color of [true, false]) {
+      const text = renderPaletteLines(
+        [enabled, disabled],
+        { query: "", selected: 1 },
+        paletteStyle(color),
+      ).join("\n");
+      expect(text).toContain(`/goal`);
+      expect(text).toContain(busyReason);
+      // The reason is readable without color.
+      const noColor = renderPaletteLines(
+        [enabled, disabled],
+        { query: "", selected: 1 },
+        paletteStyle(false),
+      ).join("\n");
+      expect(noColor).toContain(busyReason);
+    }
+  });
+
+  it("renders enabled entries without a reason suffix", () => {
+    const text = renderPaletteLines([enabled], { query: "", selected: 0 }, paletteStyle(false)).join("\n");
+    expect(text).toContain("/status");
+    expect(text).not.toContain("—");
+  });
+
+  it("renders the transient notice below the query line", () => {
+    const lines = renderPaletteLines(
+      [disabled],
+      { query: "", selected: 0, notice: "/goal unavailable — " + busyReason },
+      paletteStyle(false),
+    );
+    expect(lines[1]).toContain("> ");
+    expect(lines[2]).toContain("/goal unavailable");
+    expect(lines[2]).toContain(busyReason);
+  });
+
+  it("keeps disabled entries discoverable through filtering", () => {
+    expect(filterCommands([enabled, disabled], "goal").map((c) => c.name)).toEqual(["/goal"]);
   });
 });

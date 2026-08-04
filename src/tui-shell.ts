@@ -20,7 +20,7 @@ import type { AgentSink, AgentUsage, AgentRetry, AgentResult } from "./agent.js"
 import { runAgent } from "./agent.js";
 import { loadImageAttachments } from "./image-input.js";
 import type { LoadedImage } from "./image-input.js";
-import { filterCommands, runPalette, slashPreviewQuery } from "./palette.js";
+import { filterCommands, runPalette, slashPreviewQuery, commandDisabledReason } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
 import { VERSION, WIDE_WORDMARK, colorizeBannerRow } from "./product-banner.js";
@@ -29,6 +29,7 @@ import {
   formatRuntimeSlashCommand,
   resolveSlashCommand,
   busySubmitDecision,
+  isStreamingSafeSlashCommand,
   STREAMING_SAFE_SLASH_COMMANDS,
 } from "./slash-command.js";
 import {
@@ -2423,6 +2424,18 @@ export function renderComposer(
         const marker = active
           ? `${style.accentSoft}◆${style.reset}`
           : `${style.dim}·${style.reset}`;
+        // Mirror the palette's disabled hint (Issue #566): the reason text is
+        // present even without color, so the preview matches the palette.
+        const reason = commandDisabledReason(command);
+        if (reason) {
+          lines.push(
+            clipVisible(
+              `${marker} ${style.dim}${command.name}  ${command.description} — ${reason}${style.reset}`,
+              cols,
+            ),
+          );
+          continue;
+        }
         const name = active
           ? `${style.bold}${style.accent}${command.name}${style.reset}`
           : command.name;
@@ -2891,6 +2904,21 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       });
     }
   }
+  // Availability-aware palette commands (Issue #566). The palette and slash
+  // preview surface the #511 busy-turn truth before submit: while a turn is
+  // in flight, commands outside the streaming-safe allowlist show the concrete
+  // reason instead of advertising actions the submit gate will refuse. The
+  // predicates read live turn state; names, actions, and identifiers are
+  // unchanged, so resolution and execution behave exactly as before.
+  const BUSY_COMMAND_REASON = "a turn is in flight — available when it settles";
+  const paletteCommands: PaletteCommand[] = opts.paletteCommands.map((command) =>
+    isStreamingSafeSlashCommand(command.name) || command.disabled
+      ? command
+      : {
+          ...command,
+          disabled: () => (isActiveTurn(state.turn.phase) ? BUSY_COMMAND_REASON : null),
+        },
+  );
   // Generation guard: a cancelled run stops contributing to the UI even though
   // the underlying provider call cannot be aborted (no new provider capability).
   let runGeneration = 0;
@@ -3054,7 +3082,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       state.slashPreview = undefined;
       return;
     }
-    const items = filterCommands(opts.paletteCommands, query);
+    const items = filterCommands(paletteCommands, query);
     const previous = resetSelection ? 0 : (state.slashPreview?.selected ?? 0);
     state.slashPreview = {
       items,
@@ -3920,7 +3948,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         ? { kind: "prompt" as const }
         : resolveSlashCommand(
             text,
-            opts.paletteCommands.map((command) => command.name),
+            paletteCommands.map((command) => command.name),
           );
     if (slash.kind === "unknown") {
       state.composer.text = "";
@@ -3938,7 +3966,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       slashPreviewDismissedFor = null;
       history = commitDraft(history, "");
       refreshMode();
-      const command = opts.paletteCommands.find(
+      const command = paletteCommands.find(
         (candidate) => candidate.name === slash.name,
       );
       if (command) {
@@ -4015,7 +4043,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     const text = state.composer.text.trim();
     const decision = busySubmitDecision(
       text,
-      resolveSlashCommand(text, opts.paletteCommands.map((command) => command.name)),
+      resolveSlashCommand(text, paletteCommands.map((command) => command.name)),
     );
     if (decision.kind === "ignored") return;
     if (decision.kind === "rejected") {
@@ -4037,7 +4065,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // draft synchronously for the same exit-beats-repaint reason (Issue #564).
     clearDurableDraft(opts.composerDrafts);
     lastPersistedDraft = "";
-    const command = opts.paletteCommands.find(
+    const command = paletteCommands.find(
       (candidate) => candidate.name === decision.name,
     );
     if (!command) {
@@ -4309,7 +4337,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       /* not raw */
     }
     write(CLEAR + HOME);
-    const result = await runPalette(opts.paletteCommands, stdin, stdout, { color: opts.color });
+    const result = await runPalette(paletteCommands, stdin, stdout, { color: opts.color });
     paletteOpen = false;
     try {
       stdin.setRawMode(true);
