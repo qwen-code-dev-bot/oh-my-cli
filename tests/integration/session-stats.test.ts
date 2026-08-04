@@ -185,4 +185,39 @@ describe("Integration: session stats (--session-stats)", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("invalid output format");
   });
+
+  it("surfaces tool-call cancellations from the transcript (Issue #550)", async () => {
+    const { CANCELLED_TOOL_CONTENT } = await import("../../src/agent.js");
+    // Seed a transcript containing one executed call and two cancelled
+    // placeholders, as a cancelled batch persists it.
+    fs.mkdirSync(sessionsHome(), { recursive: true });
+    const id = "cancelled-batch";
+    const lines = [
+      JSON.stringify({ meta: true, model: "fake-model", workspace: tmpDir, createdAt: 1 }),
+      JSON.stringify({ role: "user", content: "do the work" }),
+      JSON.stringify({
+        role: "assistant",
+        content: "working",
+        tool_calls: [
+          { id: "k1", type: "function", function: { name: "read", arguments: "{}" } },
+          { id: "k2", type: "function", function: { name: "shell", arguments: "{}" } },
+        ],
+      }),
+      JSON.stringify({ role: "tool", content: "real result", tool_call_id: "k1" }),
+      JSON.stringify({ role: "tool", content: CANCELLED_TOOL_CONTENT, tool_call_id: "k2" }),
+    ];
+    fs.writeFileSync(path.join(sessionsHome(), `${id}.jsonl`), lines.join("\n") + "\n");
+
+    const text = await runCli(["--session-stats", id], baseEnv);
+    expect(text.code).toBe(0);
+    expect(text.stdout).toMatch(/cancelled\s+1/);
+    expect(text.stdout).toContain("shell×1");
+
+    const json = await runCli(["--session-stats", id, "--output", "json"], baseEnv);
+    expect(json.code).toBe(0);
+    const parsed = JSON.parse(json.stdout.trim());
+    expect(parsed.tools.cancellations.total).toBe(1);
+    expect(parsed.tools.cancellations.byName).toEqual({ shell: 1 });
+    expect(parsed.tools.calls.total).toBe(2);
+  });
 });
