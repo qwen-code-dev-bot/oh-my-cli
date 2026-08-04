@@ -55,6 +55,7 @@ import {
   sessionListRecord,
 } from "./session-summary.js";
 import { salvageSession, resolveSalvageTarget } from "./session-salvage.js";
+import { searchSessions, formatSessionSearch } from "./session-search.js";
 import { forkSession, resolveForkTarget, SESSION_FORK_SCHEMA, SESSION_FORK_VERSION } from "./session-fork.js";
 import type { SessionForkRecord } from "./session-fork.js";
 import {
@@ -501,6 +502,10 @@ program
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
+  .option(
+    "--search-sessions <text>",
+    "Search every loadable session's transcript content for the text (case-insensitive substring; read-only; add --output json for a versioned record) and exit",
+  )
   .option("--attention", "Show a read-only, workspace-scoped attention summary of what needs action and exit (add --output json for a versioned record)")
   .option("--session-stats <id-or-name>", "Show a read-only, deterministic activity/efficiency stats view for a session by exact id or user-owned name (add --output json for automation) and exit")
   .option("--turn-history <id-or-name>", "Show a read-only, per-turn change provenance view for a session from its durable turn checkpoints, by exact id or user-owned name (add --output json for automation) and exit")
@@ -732,6 +737,34 @@ program
           process.stdout.write(JSON.stringify(sessionListRecord(summaries)) + "\n");
         } else {
           process.stdout.write(formatSessionList(summaries) + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Session-search mode (Issue #594): a read-only, headless,
+      // case-insensitive substring search over every loadable session's
+      // transcript content — session, message index, role, and a bounded
+      // redacted snippet per match. Metadata filtering stays with --filter;
+      // this surface searches content. Corrupt checkpoints are skipped and
+      // counted, never fatal, never mutated; the store is byte-identical
+      // after the scan. Exits 0 on a completed scan (matches or none), 2 on
+      // a blank query or a bad format.
+      if (opts.searchSessions !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        if (String(opts.searchSessions).trim() === "") {
+          process.stderr.write("Error: --search-sessions requires non-empty search text\n");
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const record = searchSessions(store, String(opts.searchSessions));
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(formatSessionSearch(record) + "\n");
         }
         process.exit(0);
       }
