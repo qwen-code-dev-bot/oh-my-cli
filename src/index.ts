@@ -184,6 +184,7 @@ import {
 } from "./failure-receipts.js";
 import { isOfflineRequested } from "./offline-guard.js";
 import { buildGoalStatusRecord, formatGoalStatus } from "./goal-status.js";
+import { runGoalControl } from "./goal-control.js";
 import {
   DEFAULT_LSP_SERVERS,
   detectLanguagesFromPaths,
@@ -483,6 +484,7 @@ program
   .option("--failures <id-or-name>", "Show a session's read-only bounded, redacted shell failure receipts, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--offline", "Offline mode: block provider routes to non-loopback endpoints fail-closed before any network I/O (also env OMC_OFFLINE=1)")
   .option("--goal-status <id-or-name>", "Show a session's read-only durable Goal checkpoint (status, objective, timestamps, revision), by exact id or user-owned name (add --output json for automation) and exit")
+  .option("--goal <args>", "Control a session's durable Goal headlessly against --session: an objective sets it; pause / resume / achieve / clear / status behave like the TUI /goal command (add --output json for automation) and exit")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
   .option("--tasks <id-or-name>", "Show a session's read-only background-task center with durable receipts, reconciled against real process state, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
@@ -501,7 +503,7 @@ program
   .option("--redo-turn <id-or-name>", "Redo the most recent undone agent turn of a session, targeted by exact id or user-owned name, and exit")
   .option("--dry-run", "Preview an --undo-turn/--redo-turn plan without changing the workspace or transcript")
   .option("--side-question <text>", "Ask a side question against a session's bounded, read-only context (no tools, no mutation, nothing persisted) and exit")
-  .option("--session <id-or-name>", "Source session whose read-only context seeds --side-question, by exact id or user-owned name")
+  .option("--session <id-or-name>", "Target session for --side-question and --goal, by exact id or user-owned name")
   .option("--doctor", "Run read-only installation and platform readiness checks and exit")
   .option("--readiness", "Inspect repository readiness for a blocked task (read-only) and exit")
   .option("--expected-branch <name>", "Expected branch for the --readiness branch check")
@@ -948,6 +950,46 @@ program
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
           process.stdout.write(formatGoalStatus(record).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Goal-control mode (Issue #582): run the exact /goal semantics
+      // headlessly against a resolved session's durable Goal checkpoint
+      // (set / pause / resume / achieve / clear / status), preserving the #580
+      // append-only history. Session-state mutation only — never tool
+      // authority. Exits 0, or 2 on a missing/ambiguous session, a missing
+      // --session target, a conflicting flag, or a bad output format.
+      if (opts.goal !== undefined) {
+        if (opts.sideQuestion !== undefined) {
+          process.stderr.write("Error: --goal cannot be combined with --side-question\n");
+          process.exit(2);
+        }
+        if (opts.session === undefined) {
+          process.stderr.write("Error: --goal requires --session <id-or-name> to target a session\n");
+          process.exit(2);
+        }
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const resolved = resolveSessionTarget(String(opts.session), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Error: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const id = resolved.sessionId;
+        if (store.integrity(id).status === "missing") {
+          process.stderr.write(`Error: session "${id}" not found\n`);
+          process.exit(2);
+        }
+        const record = runGoalControl(store, id, String(opts.goal));
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(record.output + "\n");
         }
         process.exit(0);
       }
