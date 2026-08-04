@@ -46,14 +46,16 @@ describe("searchSessionNotes (Issue #606)", () => {
     expect(record.v).toBe(SESSION_NOTES_SEARCH_VERSION);
     expect(record.query).toBe("migration");
     expect(record.ledgersScanned).toBe(2);
-    // Newest-first ledger order inside each session.
-    expect(record.matches.map((m) => m.snippet)).toEqual([
-      "MIGRATION plan decided",
-      "migration follow-up",
-    ]);
-    expect(record.matches[0].sessionId).toBe(a);
-    expect(record.matches[0].at).toBe(new Date(NOW).toISOString());
-    expect(record.matches[1].sessionId).toBe(b);
+    // Sessions iterate in deterministic sorted-id order (uuids are random, so
+    // assert the property rather than a coincidental order).
+    const matchIds = record.matches.map((m) => m.sessionId);
+    expect(matchIds).toEqual([...matchIds].sort());
+    const bySession = new Map(record.matches.map((m) => [m.sessionId, m]));
+    expect(bySession.size).toBe(2);
+    expect(bySession.get(a)?.snippet).toBe("MIGRATION plan decided");
+    expect(bySession.get(a)?.at).toBe(new Date(NOW).toISOString());
+    expect(bySession.get(b)?.snippet).toBe("migration follow-up");
+    expect(bySession.get(b)?.at).toBe(new Date(NOW + 2000).toISOString());
     expect(record.elidedPerSession).toBe(0);
     expect(record.elidedTotal).toBe(0);
   });

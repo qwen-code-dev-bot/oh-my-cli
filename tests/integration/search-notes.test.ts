@@ -81,9 +81,6 @@ describe("Integration: cross-session note search (--search-notes, Issue #606)", 
     expect(text.stdout).toContain("migration follow-up pending");
     expect(text.stdout).toContain("(first ledger)");
     expect(text.stdout).toContain("2 match(es).");
-    expect(text.stdout.indexOf("MIGRATION decision logged")).toBeLessThan(
-      text.stdout.indexOf("migration follow-up pending"),
-    );
 
     const json = await runCli(["--search-notes", "migration", "--output", "json"], baseEnv);
     expect(json.code).toBe(0);
@@ -91,10 +88,20 @@ describe("Integration: cross-session note search (--search-notes, Issue #606)", 
     expect(record.schema).toBe("oh-my-cli.session-notes-search");
     expect(record.ledgersScanned).toBe(2);
     expect(record.matches).toHaveLength(2);
-    expect(record.matches[0].sessionId).toBe(a);
-    expect(record.matches[0].sessionName).toBe("first ledger");
-    expect(record.matches[0].at).toBe(new Date(NOW).toISOString());
-    expect(record.matches[1].sessionId).toBe(b);
+    // Deterministic sorted-id iteration order (uuids are random per run).
+    const ids = record.matches.map((m: { sessionId: string }) => m.sessionId);
+    expect(ids).toEqual([...ids].sort());
+    const bySession = new Map(
+      record.matches.map((m: { sessionId: string; snippet: string; sessionName?: string; at: string }) => [
+        m.sessionId,
+        m,
+      ]),
+    );
+    const matchA = bySession.get(a) as { snippet: string; sessionName?: string; at: string };
+    expect(matchA.snippet).toBe("MIGRATION decision logged");
+    expect(matchA.sessionName).toBe("first ledger");
+    expect(matchA.at).toBe(new Date(NOW).toISOString());
+    expect((bySession.get(b) as { snippet: string }).snippet).toBe("migration follow-up pending");
     expect(record.elidedPerSession).toBe(0);
     expect(record.elidedTotal).toBe(0);
   });
