@@ -14,6 +14,7 @@ import { TURN_CHECKPOINT_SCHEMA, TURN_CHECKPOINT_VERSION } from "../../src/turn-
 import { saveCompaction, COMPACTION_SCHEMA, COMPACTION_VERSION } from "../../src/compaction.js";
 import { createTaskSnapshot } from "../../src/task-runtime.js";
 import { appendFailureReceipt } from "../../src/failure-receipts.js";
+import { appendSessionNote, notesPath } from "../../src/session-notes.js";
 
 const NOW = 1_786_200_000_000;
 
@@ -224,7 +225,7 @@ describe("formatSessionInspect (Issue #600)", () => {
     expect(text).toContain('name:       "rendered work"');
     expect(text).toContain("model fake-model");
     expect(text).toContain("repo /srv/ws");
-    expect(text).toContain("sidecars:   name ✓ · goal ✗ · archived ✗ · compact ✗ · tasks ✗ · turn-log ✗ · failures ✗");
+    expect(text).toContain("sidecars:   name ✓ · goal ✗ · archived ✗ · compact ✗ · tasks ✗ · turn-log ✗ · failures ✗ · notes ✗");
     expect(text).toContain(`next:       resume: oh-my-cli --resume ${id} -p "<prompt>"`);
   });
 
@@ -249,5 +250,37 @@ describe("formatSessionInspect (Issue #600)", () => {
     expect(text).toContain("archived:   since");
     expect(text).toContain("failures ✓ (1 receipt(s))");
     expect(text).toContain("--unarchive-session");
+  });
+
+  it("renders notes presence with the exact entry count (Issue #608)", () => {
+    const id = store.newId();
+    store.checkpoint(id, [{ role: "user", content: "hi" }], { createdAt: 1 });
+    expect(appendSessionNote(store, id, "first note", NOW).ok).toBe(true);
+    expect(appendSessionNote(store, id, "second note", NOW + 1000).ok).toBe(true);
+
+    const record = buildSessionInspectRecord(store, id);
+    expect(record.sidecars.notes).toBe(true);
+    expect(record.sidecars.noteCount).toBe(2);
+    expect(record.sidecars.notesCorrupt).toBe(false);
+
+    const text = formatSessionInspect(record).join("\n");
+    expect(text).toContain("notes ✓ (2 entries)");
+  });
+
+  it("renders an unreadable notes sidecar honestly and preserves it (Issue #608)", () => {
+    const id = store.newId();
+    store.checkpoint(id, [{ role: "user", content: "hi" }], { createdAt: 1 });
+    fs.writeFileSync(notesPath(store, id), "{not json\n");
+    const before = fs.readFileSync(notesPath(store, id), "utf-8");
+
+    const record = buildSessionInspectRecord(store, id);
+    expect(record.sidecars.notes).toBe(true);
+    expect(record.sidecars.noteCount).toBe(0);
+    expect(record.sidecars.notesCorrupt).toBe(true);
+
+    const text = formatSessionInspect(record).join("\n");
+    expect(text).toContain("notes ✓ (unreadable sidecar)");
+    // The unreadable sidecar is preserved untouched by the inspection.
+    expect(fs.readFileSync(notesPath(store, id), "utf-8")).toBe(before);
   });
 });
