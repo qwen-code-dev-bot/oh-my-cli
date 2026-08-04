@@ -15,6 +15,7 @@ import { collectSessionSummaries, formatSessionAge } from "./session-summary.js"
 import type { SessionSummary } from "./session-summary.js";
 import { sessionDisplayTitle } from "./session-name.js";
 import type { SessionStore } from "./session.js";
+import { workspaceTrustKey } from "./folder-trust.js";
 
 // A session's resumability, derived from its checkpoint integrity and whether
 // its declared workspace still exists. "stale" means the checkpoint is readable
@@ -191,14 +192,14 @@ export function resolveResumeTarget(id: string, store: SessionStore): ResumeTarg
 
 // Resolve a command-line `--resume <id>` target fail-closed. Unlike the picker
 // path (which validates a checkpoint that was just listed and restores its
-// declared workspace), a flag-provided id resumes into the caller's workspace,
-// so the session's declared workspace is not enforced here. Heal the target
-// checkpoint first (idempotent, scoped to this session alone) so a complete
-// temp left by an interrupted write is promoted rather than misreported as
-// missing, then fail closed when the id is empty, the session is missing, or
-// the checkpoint cannot be resumed safely. A corrupt checkpoint is reported as
-// corrupt even though healing quarantined it aside. Never substitutes a
-// different session.
+// declared workspace), a flag-provided id resumes into the caller's workspace;
+// the workspace binding is enforced by the caller once the target resolves
+// (Issue #554). Heal the target checkpoint first (idempotent, scoped to this
+// session alone) so a complete temp left by an interrupted write is promoted
+// rather than misreported as missing, then fail closed when the id is empty,
+// the session is missing, or the checkpoint cannot be resumed safely. A corrupt
+// checkpoint is reported as corrupt even though healing quarantined it aside.
+// Never substitutes a different session.
 export function resolveResumeFlagTarget(id: string, store: SessionStore): ResumeTarget {
   const target = id.trim();
   if (!target) {
@@ -287,6 +288,64 @@ export function resolveSessionTarget(value: string, store: SessionStore): Resume
   const target = resolveResumeFlagTarget(value, store);
   if (target.ok) return target;
   return resolveResumeByName(value, store);
+}
+
+// Workspace-binding verdict for a resolved `--resume` target (Issue #554).
+// "match": the session's declared workspace collapses to the same canonical
+// identity as the current one (the same comparison --continue uses, so symlink
+// aliases and linked git worktrees of one repository still match). "legacy":
+// the session predates workspace metadata, so there is nothing to compare —
+// resuming warns but is not blocked. "mismatch": a different workspace, or an
+// identity that cannot be canonicalized (fail closed rather than resume into
+// an unverifiable workspace).
+export type ResumeWorkspaceVerdict =
+  | { verdict: "match" }
+  | { verdict: "legacy" }
+  | { verdict: "mismatch"; sessionWorkspace: string };
+
+export function checkResumeWorkspaceBinding(
+  sessionWorkspace: string | undefined,
+  currentWorkspace: string,
+  keyOf: (workspacePath: string) => string = workspaceTrustKey,
+): ResumeWorkspaceVerdict {
+  if (!sessionWorkspace) return { verdict: "legacy" };
+  let sessionKey: string;
+  let currentKey: string;
+  try {
+    sessionKey = keyOf(sessionWorkspace);
+    currentKey = keyOf(currentWorkspace);
+  } catch {
+    return { verdict: "mismatch", sessionWorkspace };
+  }
+  return sessionKey === currentKey
+    ? { verdict: "match" }
+    : { verdict: "mismatch", sessionWorkspace };
+}
+
+// Bounded, redacted refusal for a foreign-workspace resume (#554): names the
+// cause and at least one safe next action. Read-only inspection stays
+// available from anywhere.
+export function resumeWorkspaceMismatchMessage(
+  sessionId: string,
+  sessionWorkspace: string,
+  currentWorkspace: string,
+): string {
+  return (
+    `Cannot resume: session ${shortSessionId(sessionId)} belongs to workspace ` +
+    `${redactWorkspace(sessionWorkspace)}, not the current workspace ` +
+    `${redactWorkspace(currentWorkspace)}. Resume it from its own workspace, or inspect ` +
+    `it anywhere with --export-session ${shortSessionId(sessionId)} or --session-stats ` +
+    `${shortSessionId(sessionId)}.\n`
+  );
+}
+
+// Bounded warning for a legacy session with no recorded workspace (#554):
+// never silently, never blocked.
+export function resumeWorkspaceLegacyMessage(sessionId: string): string {
+  return (
+    `Warning: session ${shortSessionId(sessionId)} has no recorded workspace; ` +
+    `resuming without a workspace binding check.\n`
+  );
 }
 
 export interface SessionPickerRenderState {
