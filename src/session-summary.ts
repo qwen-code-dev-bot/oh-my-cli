@@ -176,6 +176,20 @@ export interface SessionListRecord {
   resumable: number;
   corrupt: number;
   sessions: SessionListEntry[];
+  // Workspace scoping (Issue #596): present only when --workspace-scoped was
+  // active. Names the redacted scope target and counts the sessions excluded
+  // because their workspace could not be verified.
+  scopedWorkspace?: string;
+  excludedUnverifiable?: number;
+}
+
+// The active workspace scope as reported by the listing/search surfaces
+// (Issue #596). `workspace` is the declared scope target (redacted by the
+// renderers); `excludedUnverifiable` counts the sessions whose workspace
+// could not be verified.
+export interface SessionScopeInfo {
+  workspace: string;
+  excludedUnverifiable: number;
 }
 
 // Case-insensitive substring filter over session summaries (Issue #548):
@@ -194,7 +208,50 @@ export function filterSessionSummaries(
   });
 }
 
-export function sessionListRecord(summaries: SessionSummary[]): SessionListRecord {
+// The outcome of workspace scoping for session enumeration (Issue #596).
+export interface WorkspaceScopeResult {
+  kept: SessionSummary[];
+  // Sessions whose workspace could not be verified (absent/legacy metadata,
+  // or a declared path that fails canonicalization).
+  excludedUnverifiable: number;
+}
+
+// Workspace scoping for session enumeration (Issue #596): keep sessions whose
+// declared workspace collapses to the same canonical identity as the target —
+// symlink aliases and linked git worktrees match, exactly like `--continue`
+// and the #554 resume-binding check. Sessions whose workspace cannot be
+// verified are excluded and counted, never silently dropped; sessions that
+// verifiably belong to another workspace are simply out of scope and not
+// counted as excluded. Read-only; order is preserved. `keyOf` is injectable
+// for deterministic tests; it defaults to the folder-trust workspace key.
+export function scopeSessionSummariesByWorkspace(
+  summaries: SessionSummary[],
+  currentKey: string,
+  keyOf: (workspacePath: string) => string = workspaceTrustKey,
+): WorkspaceScopeResult {
+  const kept: SessionSummary[] = [];
+  let excludedUnverifiable = 0;
+  for (const s of summaries) {
+    if (!s.workspace) {
+      excludedUnverifiable++;
+      continue;
+    }
+    let key: string;
+    try {
+      key = keyOf(s.workspace);
+    } catch {
+      excludedUnverifiable++;
+      continue;
+    }
+    if (key === currentKey) kept.push(s);
+  }
+  return { kept, excludedUnverifiable };
+}
+
+export function sessionListRecord(
+  summaries: SessionSummary[],
+  scope?: SessionScopeInfo,
+): SessionListRecord {
   const corrupt = summaries.filter((s) => s.corrupt).length;
   return {
     schema: SESSIONS_SCHEMA,
@@ -217,17 +274,34 @@ export function sessionListRecord(summaries: SessionSummary[]): SessionListRecor
       ageMs: s.ageMs,
       corrupt: s.corrupt,
     })),
+    ...(scope !== undefined
+      ? {
+          scopedWorkspace: redactPath(scope.workspace),
+          excludedUnverifiable: scope.excludedUnverifiable,
+        }
+      : {}),
   };
 }
 
-export function formatSessionList(summaries: SessionSummary[]): string {
+export function formatSessionList(
+  summaries: SessionSummary[],
+  scope?: SessionScopeInfo,
+): string {
   const lines: string[] = [];
   lines.push("Sessions");
+  if (scope !== undefined) {
+    lines.push(`Scoped to workspace: ${redactPath(scope.workspace)}`);
+  }
   lines.push("─".repeat(40));
 
   if (summaries.length === 0) {
     lines.push("");
     lines.push("No resumable sessions found.");
+    if (scope !== undefined && scope.excludedUnverifiable > 0) {
+      lines.push(
+        `(${scope.excludedUnverifiable} session(s) excluded: workspace unverifiable)`,
+      );
+    }
     return lines.join("\n");
   }
 
@@ -235,10 +309,14 @@ export function formatSessionList(summaries: SessionSummary[]): string {
   for (const s of summaries) lines.push(...formatSessionLines(s));
 
   const corrupt = summaries.filter((s) => s.corrupt).length;
+  const excluded =
+    scope !== undefined
+      ? `, ${scope.excludedUnverifiable} excluded (workspace unverifiable)`
+      : "";
   lines.push("");
   lines.push(
     `Summary: ${summaries.length - corrupt} resumable, ${corrupt} corrupt ` +
-      `(${summaries.length} total)`,
+      `(${summaries.length} total${excluded})`,
   );
   lines.push("");
   lines.push(`Resume one with: oh-my-cli --resume <session-id> -p "<prompt>"`);

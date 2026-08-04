@@ -53,9 +53,12 @@ import {
   formatSessionList,
   pickContinueSession,
   sessionListRecord,
+  scopeSessionSummariesByWorkspace,
 } from "./session-summary.js";
+import type { SessionScopeInfo } from "./session-summary.js";
 import { salvageSession, resolveSalvageTarget } from "./session-salvage.js";
 import { searchSessions, formatSessionSearch } from "./session-search.js";
+import type { SessionSearchScope } from "./session-search.js";
 import { forkSession, resolveForkTarget, SESSION_FORK_SCHEMA, SESSION_FORK_VERSION } from "./session-fork.js";
 import type { SessionForkRecord } from "./session-fork.js";
 import {
@@ -506,6 +509,10 @@ program
     "--search-sessions <text>",
     "Search every loadable session's transcript content for the text (case-insensitive substring; read-only; add --output json for a versioned record) and exit",
   )
+  .option(
+    "--workspace-scoped",
+    "With --list-sessions / --search-sessions: scope results to the canonical identity of --workspace (sessions whose workspace cannot be verified are excluded and counted)",
+  )
   .option("--attention", "Show a read-only, workspace-scoped attention summary of what needs action and exit (add --output json for a versioned record)")
   .option("--session-stats <id-or-name>", "Show a read-only, deterministic activity/efficiency stats view for a session by exact id or user-owned name (add --output json for automation) and exit")
   .option("--turn-history <id-or-name>", "Show a read-only, per-turn change provenance view for a session from its durable turn checkpoints, by exact id or user-owned name (add --output json for automation) and exit")
@@ -726,17 +733,37 @@ program
           process.exit(2);
         }
         const store = new SessionStore();
+        // --workspace-scoped (Issue #596): scope to the canonical identity of
+        // --workspace before any other narrowing; an uncanonicalizable target
+        // fails closed before any output. Sessions whose workspace cannot be
+        // verified are excluded and counted, never silently dropped.
+        let scopeInfo: SessionScopeInfo | undefined;
+        let summaries = collectSessionSummaries(store);
+        if (opts.workspaceScoped) {
+          let targetKey: string;
+          try {
+            targetKey = workspaceTrustKey(String(opts.workspace));
+          } catch {
+            process.stderr.write(
+              `Error: cannot scope to workspace "${redactHomePath(String(opts.workspace))}": its identity cannot be canonicalized\n`,
+            );
+            process.exit(2);
+          }
+          const scoped = scopeSessionSummariesByWorkspace(summaries, targetKey);
+          summaries = scoped.kept;
+          scopeInfo = {
+            workspace: String(opts.workspace),
+            excludedUnverifiable: scoped.excludedUnverifiable,
+          };
+        }
         // --filter (Issue #548): case-insensitive substring match over id,
         // name, model, and workspace; totals reflect the filtered set in
         // both modes.
-        const summaries = filterSessionSummaries(
-          collectSessionSummaries(store),
-          String(opts.filter ?? ""),
-        );
+        summaries = filterSessionSummaries(summaries, String(opts.filter ?? ""));
         if (format === "json") {
-          process.stdout.write(JSON.stringify(sessionListRecord(summaries)) + "\n");
+          process.stdout.write(JSON.stringify(sessionListRecord(summaries, scopeInfo)) + "\n");
         } else {
-          process.stdout.write(formatSessionList(summaries) + "\n");
+          process.stdout.write(formatSessionList(summaries, scopeInfo) + "\n");
         }
         process.exit(0);
       }
@@ -760,7 +787,23 @@ program
           process.exit(2);
         }
         const store = new SessionStore();
-        const record = searchSessions(store, String(opts.searchSessions));
+        // --workspace-scoped (Issue #596): scope the scan to the canonical
+        // identity of --workspace; an uncanonicalizable target fails closed
+        // before any output. Composes with the corrupt skip-and-count.
+        let searchScope: SessionSearchScope | undefined;
+        if (opts.workspaceScoped) {
+          let targetKey: string;
+          try {
+            targetKey = workspaceTrustKey(String(opts.workspace));
+          } catch {
+            process.stderr.write(
+              `Error: cannot scope to workspace "${redactHomePath(String(opts.workspace))}": its identity cannot be canonicalized\n`,
+            );
+            process.exit(2);
+          }
+          searchScope = { workspaceKey: targetKey, workspacePath: String(opts.workspace) };
+        }
+        const record = searchSessions(store, String(opts.searchSessions), searchScope);
         if (format === "json") {
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
