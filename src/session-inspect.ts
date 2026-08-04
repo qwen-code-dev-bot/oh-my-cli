@@ -21,6 +21,7 @@ import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { loadCompaction } from "./compaction.js";
 import { turnLogExists, loadTurnLog } from "./turn-checkpoint.js";
 import { failureLogPath, loadFailureLog } from "./failure-receipts.js";
+import { notesPath, readSessionNotes } from "./session-notes.js";
 
 export const SESSION_INSPECT_SCHEMA = "oh-my-cli.session-inspect" as const;
 export const SESSION_INSPECT_VERSION = 1 as const;
@@ -60,6 +61,11 @@ export interface SessionInspectSidecars {
   failuresDropped?: number;
   /** True when the failures sidecar exists but cannot be parsed. */
   failuresCorrupt?: boolean;
+  // Notes ledger (Issue #602), completing the family inventory (Issue #608).
+  notes: boolean;
+  noteCount?: number;
+  /** True when the notes sidecar exists but cannot be parsed. */
+  notesCorrupt?: boolean;
 }
 
 export interface SessionInspectRecord {
@@ -92,6 +98,8 @@ export function buildSessionInspectRecord(
   const turnLog = turnLogPresent ? loadTurnLog(store, id) : null;
   const failuresPresent = fs.existsSync(failureLogPath(store, id));
   const failures = failuresPresent ? loadFailureLog(store, id) : null;
+  const notesPresent = fs.existsSync(notesPath(store, id));
+  const notes = notesPresent ? readSessionNotes(store, id) : null;
 
   const sidecars: SessionInspectSidecars = {
     name: name !== null,
@@ -122,6 +130,10 @@ export function buildSessionInspectRecord(
           failuresDropped: failures.dropped,
           failuresCorrupt: failures.corrupt,
         }
+      : {}),
+    notes: notesPresent,
+    ...(notes !== null
+      ? { noteCount: notes.notes.length, notesCorrupt: notes.corrupt }
       : {}),
   };
 
@@ -209,6 +221,11 @@ export function formatSessionInspect(record: SessionInspectRecord): string[] {
         ? "failures ✓ (unreadable sidecar)"
         : `failures ✓ (${s.failureReceipts} receipt(s)${(s.failuresDropped ?? 0) > 0 ? `, +${s.failuresDropped} dropped` : ""})`
       : "failures ✗",
+    s.notes
+      ? s.notesCorrupt
+        ? "notes ✓ (unreadable sidecar)"
+        : `notes ✓ (${s.noteCount ?? 0} entr${(s.noteCount ?? 0) === 1 ? "y" : "ies"})`
+      : "notes ✗",
   ];
   lines.push(`sidecars:   ${parts.join(" · ")}`);
   lines.push("");

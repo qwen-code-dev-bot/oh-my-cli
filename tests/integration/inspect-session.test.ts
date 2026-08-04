@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { SessionStore } from "../../src/session.js";
 import { runGoalCommand } from "../../src/session-goal.js";
+import { appendSessionNote } from "../../src/session-notes.js";
 
 function runCli(
   args: string[],
@@ -101,8 +102,26 @@ describe("Integration: session health inspection (--inspect-session, Issue #600)
     expect(record.sidecars.tasks).toBe(false);
     expect(record.sidecars.turnLog).toBe(false);
     expect(record.sidecars.failures).toBe(false);
+    expect(record.sidecars.notes).toBe(false);
     // Counts agree between the two modes.
     expect(record.integrity.messageCount).toBe(2);
+  });
+
+  it("renders the notes ledger with the exact entry count (text + JSON agree) (Issue #608)", async () => {
+    const id = seed();
+    expect(appendSessionNote(store, id, "inspect breadcrumb one", NOW).ok).toBe(true);
+    expect(appendSessionNote(store, id, "inspect breadcrumb two", NOW + 1000).ok).toBe(true);
+
+    const text = await runCli(["--inspect-session", id], baseEnv);
+    expect(text.code, `stderr: ${text.stderr}`).toBe(0);
+    expect(text.stdout).toContain("notes ✓ (2 entries)");
+
+    const json = await runCli(["--inspect-session", id, "--output", "json"], baseEnv);
+    expect(json.code).toBe(0);
+    const record = JSON.parse(json.stdout.trim());
+    expect(record.sidecars.notes).toBe(true);
+    expect(record.sidecars.noteCount).toBe(2);
+    expect(record.sidecars.notesCorrupt).toBe(false);
   });
 
   it("is strictly read-only: the store stays byte-identical across text + JSON inspections", async () => {
