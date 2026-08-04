@@ -64,6 +64,7 @@ import {
   resumeWorkspaceLegacyMessage,
   shortSessionId,
 } from "./session-picker.js";
+import { openComposerDraftStore } from "./composer-draft.js";
 import { normalizeSessionName } from "./session-name.js";
 import {
   compactMessages,
@@ -3138,6 +3139,10 @@ program
             loadActivity: () => [],
             settingsPath,
             tools: toolNames,
+            // Durable workspace-scoped composer draft (Issue #556): unsent text
+            // survives a restart in the same workspace and never leaks into
+            // another. Keyed by the canonical workspace identity.
+            composerDrafts: openComposerDraftStore({ workspacePath: workspace.root }),
           });
           return;
         }
