@@ -232,7 +232,9 @@ export function formatSessionList(summaries: SessionSummary[]): string {
 
 function formatSessionLines(s: SessionSummary): string[] {
   const symbol = s.corrupt ? "✗" : "✓";
-  const flag = s.corrupt ? "  (corrupt — partial recovery)" : "";
+  // Corrupt sessions point at the salvage path that delivers the partial
+  // recovery this list advertises (Issue #546).
+  const flag = s.corrupt ? "  (corrupt — salvage with --salvage-session)" : "";
   // The user-owned name (#249) renders next to the id (Issue #530), redacted
   // exactly like the picker renders it — so the discovery surface and the
   // resume surfaces agree.

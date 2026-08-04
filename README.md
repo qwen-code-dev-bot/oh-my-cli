@@ -287,6 +287,15 @@ interrupted write is promoted, a partial one is discarded, and a corrupt one is
 quarantined alongside the session (preserved, never deleted) with a warning —
 without touching other sessions.
 
+A damaged checkpoint is not a total loss: `oh-my-cli --salvage-session
+<id-or-name>` copies every still-parseable message of a corrupt session into
+a fresh resumable session and reports the new id (plus how many messages were
+salvaged and how many corrupt lines were skipped). The salvaged session
+records its source (`salvagedFrom`) and resumes normally; the original
+checkpoint is never mutated or deleted. Healthy or merely partial sessions
+refuse salvage (use `--resume`), and a corrupt session with no recoverable
+content fails closed with an actionable reason.
+
 ### Session compaction
 
 A long session can be compacted into a bounded, versioned summary so it can
