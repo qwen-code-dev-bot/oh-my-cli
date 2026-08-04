@@ -204,6 +204,7 @@ import {
   workspaceTrustKey,
 } from "./folder-trust.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
+import { installSigintCancel, SIGINT_EXIT_CODE } from "./sigint-cancel.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary, writeRunSummaryFile } from "./run-summary.js";
 import { createBottleneckCollector, formatBottleneckReport } from "./run-bottleneck.js";
@@ -238,11 +239,14 @@ import {
 import path from "node:path";
 import fs from "node:fs";
 
-// Handle Ctrl-C gracefully — session is already persisted incrementally
-process.on("SIGINT", () => {
+// Handle Ctrl-C gracefully — session is already persisted incrementally. Named
+// so non-interactive runs can replace it with the cooperative cancel (#552) for
+// their lifetime and restore it afterwards.
+function defaultSigintHandler(): void {
   process.stderr.write("\nInterrupted. Session saved.\n");
   process.exit(130);
-});
+}
+process.on("SIGINT", defaultSigintHandler);
 
 // One bounded top-level fatal-failure boundary (#246) for uncaught exceptions and
 // unhandled rejections during an active run. It restores a usable terminal when
@@ -2743,6 +2747,15 @@ program
           const turnImages = new TurnImageCollector();
           const bottleneck = opts.bottleneck ? createBottleneckCollector() : null;
           const failureTaxonomy = opts.failureTaxonomy ? createFailureTaxonomyCollector() : null;
+          // Cooperative SIGINT cancel (#552): the first Ctrl+C stops the run at
+          // the next cancel boundary with a truthful terminal `complete` record;
+          // a second exits immediately. Replaces the default hard-exit handler
+          // for the run's lifetime only.
+          process.removeListener("SIGINT", defaultSigintHandler);
+          const sigint = installSigintCancel({
+            onInterrupt: () =>
+              process.stderr.write("\nInterrupted: cancelling at the next safe boundary...\n"),
+          });
           let result: AgentResult;
           try {
             result = await runAgent(runPrompt, existingMessages, {
@@ -2765,8 +2778,11 @@ program
               failureTaxonomy: failureTaxonomy?.collector,
               streamProvider,
               readOnly: Boolean(opts.readOnly),
+              cancelRequested: sigint.cancelRequested,
             });
           } catch (err: unknown) {
+            sigint.dispose();
+            process.on("SIGINT", defaultSigintHandler);
             const msg = err instanceof Error ? err.message : String(err);
             writer.emit({ type: "error", stage: "internal", message: redactSecrets(msg).text });
             if (bottleneck) {
@@ -2800,9 +2816,14 @@ program
             writer.emit({ type: "complete", ok: false, exitCode: 1, rounds: 0, reason: "error" });
             process.exit(1);
           }
+          sigint.dispose();
+          process.on("SIGINT", defaultSigintHandler);
           sealSession();
           recordTurnCheckpoint(turnImages);
-          const exitCode = result.ok ? 0 : 1;
+          // A cooperative cancel is a user stop, not a run failure (#552): the
+          // terminal `complete` record carries reason "cancelled" and the
+          // process exits with the conventional SIGINT code.
+          const exitCode = result.ok ? 0 : result.reason === "cancelled" ? SIGINT_EXIT_CODE : 1;
           if (opts.summary || opts.summaryOut !== undefined) {
             const summary = buildRunSummary({
               ok: result.ok,
@@ -2847,6 +2868,14 @@ program
         const turnImages = new TurnImageCollector();
         const bottleneck = opts.bottleneck ? createBottleneckCollector() : null;
         const failureTaxonomy = opts.failureTaxonomy ? createFailureTaxonomyCollector() : null;
+        // Cooperative SIGINT cancel (#552), same contract as the JSON path: one
+        // bounded interruption notice on stderr, a stop at the next cancel
+        // boundary, and the conventional SIGINT exit code.
+        process.removeListener("SIGINT", defaultSigintHandler);
+        const sigint = installSigintCancel({
+          onInterrupt: () =>
+            process.stderr.write("\nInterrupted: cancelling at the next safe boundary...\n"),
+        });
         const result = await runAgent(runPrompt, existingMessages, {
           config,
           workspace,
@@ -2870,12 +2899,16 @@ program
           failureTaxonomy: failureTaxonomy?.collector,
           streamProvider,
           readOnly: Boolean(opts.readOnly),
+          cancelRequested: sigint.cancelRequested,
         });
+        sigint.dispose();
+        process.on("SIGINT", defaultSigintHandler);
         sealSession();
         recordTurnCheckpoint(turnImages);
         // Exit with the run outcome so unattended/CI callers can detect failure;
-        // the plain-text path previously fell through and always exited 0.
-        const exitCode = result.ok ? 0 : 1;
+        // the plain-text path previously fell through and always exited 0. A
+        // cooperative cancel exits with the conventional SIGINT code (#552).
+        const exitCode = result.ok ? 0 : result.reason === "cancelled" ? SIGINT_EXIT_CODE : 1;
         if (opts.summary || opts.summaryOut !== undefined) {
           const summary = buildRunSummary({
             ok: result.ok,
