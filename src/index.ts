@@ -47,7 +47,7 @@ import type { PaletteCommand } from "./palette.js";
 import { runPreflight, formatPreflight } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
 import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
-import { collectSessionSummaries, formatSessionList, pickContinueSession } from "./session-summary.js";
+import { collectSessionSummaries, formatSessionList, pickContinueSession, sessionListRecord } from "./session-summary.js";
 import {
   runSessionPicker,
   resolveResumeTarget,
@@ -620,9 +620,20 @@ program
       }
 
       if (opts.listSessions) {
+        // Machine-readable form follows the sibling listings (Issue #542):
+        // a versioned record for automation, text for humans.
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
         const store = new SessionStore();
         const summaries = collectSessionSummaries(store);
-        process.stdout.write(formatSessionList(summaries) + "\n");
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(sessionListRecord(summaries)) + "\n");
+        } else {
+          process.stdout.write(formatSessionList(summaries) + "\n");
+        }
         process.exit(0);
       }
 

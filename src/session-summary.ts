@@ -141,6 +141,69 @@ export function pickContinueSession(
   return corruptMatch ? { ok: false, reason: "only-corrupt" } : { ok: false, reason: "no-session" };
 }
 
+// Versioned machine-readable record for `--list-sessions --output json`
+// (Issue #542), following the `oh-my-cli.<surface>` convention of the sibling
+// listings/diagnostics. Entries carry the same data the text view renders,
+// redacted through the identical pipelines (secret redaction for model/name,
+// home collapse for workspace paths) — never a new secret surface.
+export const SESSIONS_SCHEMA = "oh-my-cli.sessions";
+export const SESSIONS_VERSION = 1;
+
+export interface SessionListEntry {
+  id: string;
+  /** Redacted user-owned name (#249/#530), present only when set. */
+  name?: string;
+  /** Redacted model identifier, or "unknown". */
+  model: string;
+  /** Redacted workspace path (home collapsed to ~), or "unknown". */
+  workspace: string;
+  messageCount: number;
+  userTurns: number;
+  assistantTurns: number;
+  toolCalls: number;
+  /** Estimated tokens (ceil(chars/4)) — an estimate, stated as such. */
+  approxTokens: number;
+  createdAt: number | null;
+  lastModified: number;
+  ageMs: number;
+  corrupt: boolean;
+}
+
+export interface SessionListRecord {
+  schema: typeof SESSIONS_SCHEMA;
+  v: typeof SESSIONS_VERSION;
+  total: number;
+  resumable: number;
+  corrupt: number;
+  sessions: SessionListEntry[];
+}
+
+export function sessionListRecord(summaries: SessionSummary[]): SessionListRecord {
+  const corrupt = summaries.filter((s) => s.corrupt).length;
+  return {
+    schema: SESSIONS_SCHEMA,
+    v: SESSIONS_VERSION,
+    total: summaries.length,
+    resumable: summaries.length - corrupt,
+    corrupt,
+    sessions: summaries.map((s) => ({
+      id: s.id,
+      ...(s.name ? { name: redact(s.name) } : {}),
+      model: redact(s.model),
+      workspace: redactPath(s.workspace),
+      messageCount: s.messageCount,
+      userTurns: s.userTurns,
+      assistantTurns: s.assistantTurns,
+      toolCalls: s.toolCalls,
+      approxTokens: s.approxTokens,
+      createdAt: s.createdAt,
+      lastModified: s.lastModified,
+      ageMs: s.ageMs,
+      corrupt: s.corrupt,
+    })),
+  };
+}
+
 export function formatSessionList(summaries: SessionSummary[]): string {
   const lines: string[] = [];
   lines.push("Sessions");
