@@ -8,7 +8,9 @@ import {
   defaultDraftsDir,
   draftFileName,
   openComposerDraftStore,
+  clearDurableDraft,
 } from "../../src/composer-draft.js";
+import type { ComposerDraftStore } from "../../src/composer-draft.js";
 
 describe("composer draft store (Issue #556)", () => {
   const tmpDirs: string[] = [];
@@ -145,5 +147,60 @@ describe("composer draft store (Issue #556)", () => {
     expect(name).toMatch(/^[0-9a-f]{64}\.json$/);
     // No path separator can escape the drafts directory.
     expect(name).not.toContain("/");
+  });
+});
+
+describe("clearDurableDraft at submit time (Issue #564)", () => {
+  const tmpDirs: string[] = [];
+  const makeDir = (name: string): string => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), `omc-564-${name}-`));
+    tmpDirs.push(d);
+    return d;
+  };
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  });
+
+  const storeFor = (workspace: string) =>
+    openComposerDraftStore({ workspacePath: workspace, draftsDir: makeDir("drafts") });
+
+  it("removes a persisted draft synchronously, independent of any repaint", () => {
+    const store = storeFor(makeDir("ws"));
+    // The save-on-change repaint persisted the text the user was composing.
+    store.save("/exit");
+    expect(store.load()).toEqual({ status: "restored", text: "/exit" });
+    // Submit consumes the text: the clear happens at once, no repaint involved.
+    clearDurableDraft(store);
+    expect(fs.existsSync(store.filePath)).toBe(false);
+    expect(store.load().status).toBe("none");
+  });
+
+  it("regression: submitted text is gone even when the exit beats the repaint", () => {
+    const store = storeFor(makeDir("ws"));
+    store.save("/exit"); // the coalesced repaint that ran while typing
+    clearDurableDraft(store); // the synchronous submit clear
+    // The shell exits immediately (process.exit) — no further repaint runs.
+    // The next launch must restore nothing.
+    expect(store.load().status).toBe("none");
+  });
+
+  it("is a no-op without a store and never throws on a failing store", () => {
+    expect(() => clearDurableDraft(undefined)).not.toThrow();
+    const failing: ComposerDraftStore = {
+      filePath: "/nonexistent/draft.json",
+      load: () => ({ status: "none" }),
+      save: () => {
+        throw new Error("disk gone");
+      },
+    };
+    expect(() => clearDurableDraft(failing)).not.toThrow();
+  });
+
+  it("does not disturb an unsent draft that was never submitted", () => {
+    // A Ctrl+D/Ctrl+C exit never calls submit, so the clear never runs and the
+    // unsent text stays durable — the reverse defect the fix must not cause.
+    const store = storeFor(makeDir("ws"));
+    store.save("work in progress");
+    expect(store.load()).toEqual({ status: "restored", text: "work in progress" });
   });
 });

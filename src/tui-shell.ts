@@ -38,6 +38,7 @@ import {
 } from "./side-question.js";
 import { buildSessionStats, formatSessionStats } from "./session-stats.js";
 import type { SessionStats, SessionStatsRuntime } from "./session-stats.js";
+import { clearDurableDraft } from "./composer-draft.js";
 import type { ComposerDraftStore } from "./composer-draft.js";
 import { emptyLspView, formatLspView } from "./lsp-runtime.js";
 import type { LspView } from "./lsp-runtime.js";
@@ -3903,6 +3904,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     // (Issue #560, criterion 5): the selection is view-only state for inspecting
     // prior output, so an accepted submit always starts unselected.
     state.selectedBlock = undefined;
+    // Submitted text is consumed, so clear the durable draft synchronously
+    // (Issue #564): an immediate exit (`/exit` → process.exit) can beat the
+    // coalesced repaint that would otherwise persist the cleared composer,
+    // leaving the submitted text behind to be restored on the next launch.
+    clearDurableDraft(opts.composerDrafts);
+    lastPersistedDraft = "";
     // Submitting clears any open reference picker along with the composer.
     state.referencePreview = undefined;
     referenceUniverse = null;
@@ -4026,6 +4033,10 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     state.slashPreview = undefined;
     slashPreviewDismissedFor = null;
     history = commitDraft(history, "");
+    // The read-only command consumed the composer text, so clear the durable
+    // draft synchronously for the same exit-beats-repaint reason (Issue #564).
+    clearDurableDraft(opts.composerDrafts);
+    lastPersistedDraft = "";
     const command = opts.paletteCommands.find(
       (candidate) => candidate.name === decision.name,
     );

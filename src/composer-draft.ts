@@ -35,6 +35,21 @@ export interface ComposerDraftStore {
   save(text: string): void;
 }
 
+// Clear the durable draft synchronously at submit time (Issue #564). The
+// shell's ordinary save-on-change runs in the coalesced repaint, which an
+// immediate exit (e.g. `/exit` → process.exit) can beat — leaving submitted
+// text behind to be restored on the next launch. Submitting consumes the text,
+// so the clear must not depend on any repaint. Best-effort: a failed clear is
+// retried by the next repaint and must never block the submit/exit path.
+export function clearDurableDraft(store: ComposerDraftStore | undefined): void {
+  if (!store) return;
+  try {
+    store.save("");
+  } catch {
+    /* best-effort durability; retried on the next repaint */
+  }
+}
+
 // Mirrors the session store's HOME convention so an isolated test HOME (or a
 // relocated user home) scopes drafts the same way sessions are scoped.
 export function defaultDraftsDir(env: Record<string, string | undefined> = process.env): string {
