@@ -1426,8 +1426,8 @@ export function renderIdentity(
 // Ctrl+C) remain in both states. Plain ASCII, color-independent.
 export function footerHints(learned: boolean): string {
   return learned
-    ? "Tab expand  ·  Home/End select block  ·  ? shortcuts  ·  Ctrl+C exit"
-    : "Enter send  ·  Alt+Enter newline  ·  Up history  ·  Tab expand  ·  Home/End select block  ·  ? shortcuts  ·  Ctrl+C exit";
+    ? "Tab expand  ·  Home/End select block  ·  y copy  ·  ? shortcuts  ·  Ctrl+C exit"
+    : "Enter send  ·  Alt+Enter newline  ·  Up history  ·  Tab expand  ·  Home/End select block  ·  y copy  ·  ? shortcuts  ·  Ctrl+C exit";
 }
 
 export function renderStatusLine(
@@ -1477,6 +1477,7 @@ export const SHORTCUT_HELP: ReadonlyArray<ShortcutEntry> = [
   { keys: "?", action: "Toggle Help", section: "prompt" },
   { keys: "Tab", action: "Expand / collapse", section: "view" },
   { keys: "Home / End", action: "Jump between blocks", section: "view" },
+  { keys: "y", action: "Copy selected block", section: "view" },
   { keys: "PgUp / PgDn", action: "Scroll transcript", section: "view" },
   { keys: "Ctrl+L", action: "Redraw screen", section: "view" },
   { keys: "Ctrl+C", action: "Cancel / clear / exit", section: "view" },
@@ -1949,6 +1950,60 @@ export function moveBlockSelection(params: {
   if (pos < 0) return null;
   if (pos >= candidates.length - 1) return null; // newest: clear to the fallback
   return candidates[pos + 1];
+}
+
+// Copy-payload bound for a transcript block (Issue #562): characters, applied
+// pre-encoding, with truncation disclosed in the confirmation notice rather
+// than embedded in the payload itself.
+export const MAX_COPY_CHARS = 32_768;
+
+// Whether the block-copy keystroke should act (Issue #562, criterion 3): only
+// when a block is selected and the composer is empty — the same empty-composer
+// gate shape as `?` opening help — so the key never steals typing. Validity of
+// the selection (in range, expandable) is checked by the driver with the shared
+// isExpandableEntry rule. Pure so the gate is unit-testable without a TTY.
+export function blockCopyGate(opts: {
+  selectedBlock: number | undefined;
+  composerText: string;
+}): boolean {
+  return opts.selectedBlock !== undefined && opts.composerText.length === 0;
+}
+
+// Strip terminal control characters (keep newline/tab) so a copied text block
+// can never smuggle escape sequences into the clipboard (Issue #562).
+function neutralizeCopyText(text: string): string {
+  let out = "";
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (cp === 0x0a || cp === 0x09 || cp >= 0x20) out += ch;
+  }
+  return out.replace(/\x7f/g, "");
+}
+
+// Derive the clipboard payload for a transcript block (Issue #562). Tool blocks
+// copy exactly what the expanded view shows (summary, failure summary, detail
+// lines, diff) — their content is already sanitized and bounded at construction;
+// text blocks copy the entry text, redacted and control-neutralized. The live
+// streaming block yields null (never copyable). Payloads over MAX_COPY_CHARS
+// are truncated with the truncation flagged for the confirmation notice.
+export function blockCopyPayload(
+  entry: TranscriptEntry,
+): { text: string; truncated: boolean } | null {
+  let text: string | null = null;
+  if (entry.tool) {
+    const op = entry.tool;
+    const lines: string[] = [toolSummaryLine(op)];
+    if (op.diff) lines.push(diffStatLine(op.diff));
+    if (op.failure) lines.push(...renderFailureSummary(op.failure));
+    lines.push(...toolDetailLines(op));
+    if (op.diff) lines.push(...renderDiffBody(op.diff));
+    text = lines.join("\n");
+  } else if (entry.kind !== "streaming") {
+    text = neutralizeCopyText(redactSecrets(entry.text).text);
+  }
+  if (text === null || text.trim() === "") return null;
+  if (text.length <= MAX_COPY_CHARS) return { text, truncated: false };
+  return { text: text.slice(0, MAX_COPY_CHARS), truncated: true };
 }
 
 // Flatten transcript entries into labeled, indented blocks separated by a blank
@@ -3579,6 +3634,38 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     scheduleRender();
   }
 
+  // Copy the explicitly selected block to the terminal clipboard via OSC 52
+  // (Issue #562). Pure output: the selection, scroll position, and transcript
+  // are untouched; the confirmation is one bounded notice that names the copied
+  // size (and truncation) without ever echoing content. A write failure fails
+  // closed with a bounded error notice instead of a silent no-op.
+  function copySelectedBlock(): void {
+    const sel = state.selectedBlock;
+    if (sel === undefined || sel >= state.transcript.length) return;
+    const payload = blockCopyPayload(state.transcript[sel]);
+    if (payload === null) {
+      state.transcript.push({ kind: "notice", text: "The selected block has nothing to copy." });
+      scheduleRender();
+      return;
+    }
+    try {
+      write(sideAnswerClipboardEscape(payload.text));
+    } catch {
+      state.transcript.push({
+        kind: "notice",
+        text: "Copy failed: the terminal refused the clipboard write.",
+      });
+      scheduleRender();
+      return;
+    }
+    const chars = Array.from(payload.text).length;
+    const note = payload.truncated
+      ? `Copied ${chars} chars (truncated to the ${MAX_COPY_CHARS}-char cap).`
+      : `Copied ${chars} chars to the terminal clipboard.`;
+    state.transcript.push({ kind: "notice", text: note });
+    scheduleRender();
+  }
+
   function createShellSink(generation: number): AgentSink {
     const mine = (): boolean => generation === runGeneration && running;
     let streamingText = "";
@@ -4359,6 +4446,19 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
       // `?` on an empty composer toggles the help panel; with any text it inserts
       // the character as usual (Issue #169).
       if (b === 0x3f && questionMarkOpensHelp(state.composer.text)) return toggleHelp();
+      // `y` copies the explicitly selected block (Issue #562), gated exactly like
+      // help: a selection must exist and be expandable, and the composer must be
+      // empty — otherwise the character is typed as usual and input is never
+      // stolen (criterion 3).
+      if (
+        b === 0x79 &&
+        blockCopyGate({ selectedBlock: state.selectedBlock, composerText: state.composer.text })
+      ) {
+        const sel = state.selectedBlock!;
+        if (sel < state.transcript.length && isExpandableEntry(state.transcript[sel], state.viewport.cols)) {
+          return copySelectedBlock();
+        }
+      }
       if (b >= 0x20 && b < 0x7f) return insert(String.fromCharCode(b));
       return;
     }
