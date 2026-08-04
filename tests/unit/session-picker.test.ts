@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { PassThrough } from "node:stream";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -14,6 +15,9 @@ import {
   resolveResumeFlagTarget,
   resolveResumeByName,
   resolveSessionTarget,
+  checkResumeWorkspaceBinding,
+  resumeWorkspaceMismatchMessage,
+  resumeWorkspaceLegacyMessage,
   collectSessionPickerRows,
   renderSessionPickerLines,
   runSessionPicker,
@@ -723,5 +727,96 @@ describe("session picker: runSessionPicker driver", () => {
     expect(result).toBeNull();
     expect(out).toContain("Cannot resume");
     expect(out).toContain("no longer exists");
+  });
+});
+
+describe("workspace binding guard for --resume (Issue #554)", () => {
+  const tmpDirs: string[] = [];
+  const makeDir = (name: string): string => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), `omc-554-${name}-`));
+    tmpDirs.push(d);
+    return d;
+  };
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  });
+
+  it("matches when the session workspace is the current workspace", () => {
+    const ws = makeDir("same");
+    const verdict = checkResumeWorkspaceBinding(ws, ws);
+    expect(verdict.verdict).toBe("match");
+  });
+
+  it("matches a symlink alias of the same directory", () => {
+    const ws = makeDir("real");
+    const alias = path.join(path.dirname(ws), `${path.basename(ws)}-alias`);
+    tmpDirs.push(alias);
+    fs.symlinkSync(ws, alias);
+    expect(checkResumeWorkspaceBinding(alias, ws).verdict).toBe("match");
+    expect(checkResumeWorkspaceBinding(ws, alias).verdict).toBe("match");
+  });
+
+  it("matches a linked git worktree of the same repository", () => {
+    const repo = makeDir("repo");
+    execFileSync("git", ["init", "-q", "-b", "main", repo], { stdio: ["ignore", "pipe", "ignore"] });
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"], { stdio: ["ignore", "pipe", "ignore"] });
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"], { stdio: ["ignore", "pipe", "ignore"] });
+    fs.writeFileSync(path.join(repo, "a.txt"), "base\n");
+    execFileSync("git", ["-C", repo, "add", "a.txt"], { stdio: ["ignore", "pipe", "ignore"] });
+    execFileSync("git", ["-C", repo, "commit", "-q", "-m", "base"], { stdio: ["ignore", "pipe", "ignore"] });
+    const worktree = path.join(repo, "..", `${path.basename(repo)}-wt`);
+    execFileSync("git", ["-C", repo, "worktree", "add", worktree, "-b", "wt"], { stdio: ["ignore", "pipe", "ignore"] });
+    tmpDirs.push(fs.realpathSync(worktree));
+    // The session belongs to the main checkout; resuming from the linked
+    // worktree is the same repository identity.
+    expect(checkResumeWorkspaceBinding(repo, worktree).verdict).toBe("match");
+  });
+
+  it("mismatches a different workspace and carries the session workspace", () => {
+    const a = makeDir("a");
+    const b = makeDir("b");
+    const verdict = checkResumeWorkspaceBinding(a, b);
+    expect(verdict.verdict).toBe("mismatch");
+    if (verdict.verdict === "mismatch") expect(verdict.sessionWorkspace).toBe(a);
+  });
+
+  it("reports legacy for a session with no recorded workspace", () => {
+    expect(checkResumeWorkspaceBinding(undefined, makeDir("cur")).verdict).toBe("legacy");
+    expect(checkResumeWorkspaceBinding("", makeDir("cur2")).verdict).toBe("legacy");
+  });
+
+  it("fails closed when the identity cannot be canonicalized", () => {
+    const verdict = checkResumeWorkspaceBinding("/some/ws", "/other/ws", () => {
+      throw new Error("unavailable");
+    });
+    expect(verdict.verdict).toBe("mismatch");
+  });
+
+  it("accepts an injectable keyOf like --continue", () => {
+    const keyOf = (p: string): string => (p.endsWith("x") ? "same" : p);
+    expect(checkResumeWorkspaceBinding("/a/x", "/b/x", keyOf).verdict).toBe("match");
+    expect(checkResumeWorkspaceBinding("/a/x", "/b/y", keyOf).verdict).toBe("mismatch");
+  });
+
+  it("renders a bounded, redacted refusal naming cause and safe next actions", () => {
+    const secret = ["ghp", "_", "a".repeat(24)].join("");
+    const msg = resumeWorkspaceMismatchMessage(
+      "01234567-89ab-cdef-0123-456789abcdef",
+      `/srv/other-${secret}`,
+      "/srv/current",
+    );
+    expect(msg).toContain("Cannot resume");
+    expect(msg).toContain("01234567");
+    expect(msg).toContain("not the current workspace");
+    expect(msg).toContain("--export-session");
+    expect(msg).toContain("--session-stats");
+    expect(msg).not.toContain(secret);
+  });
+
+  it("renders a bounded legacy warning that blocks nothing", () => {
+    const msg = resumeWorkspaceLegacyMessage("01234567-89ab-cdef-0123-456789abcdef");
+    expect(msg).toContain("Warning");
+    expect(msg).toContain("no recorded workspace");
+    expect(msg).toContain("01234567");
   });
 });

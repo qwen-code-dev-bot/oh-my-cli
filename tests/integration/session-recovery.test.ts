@@ -41,6 +41,7 @@ describe("Integration: session checkpoint recovery on resume", () => {
   let server: FakeServer;
   let homeDir: string;
   let sessDir: string;
+  let workspaceDir: string;
   let baseEnv: Record<string, string>;
 
   beforeAll(async () => {
@@ -55,6 +56,9 @@ describe("Integration: session checkpoint recovery on resume", () => {
     homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "oh-my-cli-recovery-home-"));
     sessDir = path.join(homeDir, ".oh-my-cli", "sessions");
     fs.mkdirSync(sessDir, { recursive: true });
+    // The seeded sessions belong to this workspace; resumes target it too so
+    // the workspace binding guard (#554) lets the recovery semantics run.
+    workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "oh-my-cli-recovery-ws-"));
     baseEnv = {
       OPENAI_API_KEY: "fake-key",
       OPENAI_BASE_URL: server.url,
@@ -66,6 +70,7 @@ describe("Integration: session checkpoint recovery on resume", () => {
 
   afterEach(() => {
     fs.rmSync(homeDir, { recursive: true, force: true });
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
   });
 
   it("promotes a complete checkpoint left by an interrupted write", async () => {
@@ -74,12 +79,12 @@ describe("Integration: session checkpoint recovery on resume", () => {
     // the canonical file was never created.
     fs.writeFileSync(
       path.join(sessDir, `${id}.jsonl.tmp`),
-      JSON.stringify({ meta: true, model: "fake-model", workspace: "/w", createdAt: 1 }) + "\n" +
+      JSON.stringify({ meta: true, model: "fake-model", workspace: workspaceDir, createdAt: 1 }) + "\n" +
         JSON.stringify({ role: "user", content: "prior turn" }) + "\n" +
         JSON.stringify({ role: "assistant", content: "earlier reply" }) + "\n",
     );
 
-    const r = await runCli(["--resume", id, "-p", "next turn"], baseEnv);
+    const r = await runCli(["--resume", id, "-p", "next turn", "--workspace", workspaceDir], baseEnv);
 
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("Recovered response");

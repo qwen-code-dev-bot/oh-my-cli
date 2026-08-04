@@ -59,6 +59,9 @@ import {
   runSessionPicker,
   resolveResumeTarget,
   resolveSessionTarget,
+  checkResumeWorkspaceBinding,
+  resumeWorkspaceMismatchMessage,
+  resumeWorkspaceLegacyMessage,
   shortSessionId,
 } from "./session-picker.js";
 import { normalizeSessionName } from "./session-name.js";
@@ -2587,6 +2590,22 @@ program
         if (!target.ok) {
           process.stderr.write(`Cannot resume: ${target.reason}\n`);
           process.exit(1);
+        }
+        // Workspace binding guard (#554): a --resume target is never silently
+        // resumed into a different workspace. The comparison uses the same
+        // canonical identity as --continue (symlink aliases and linked
+        // worktrees of one repository still match); a legacy session without
+        // workspace metadata warns but is not blocked. Runs before any
+        // provider interaction; the refusal itself never mutates anything.
+        const binding = checkResumeWorkspaceBinding(target.workspace, workspace.root);
+        if (binding.verdict === "mismatch") {
+          process.stderr.write(
+            resumeWorkspaceMismatchMessage(target.sessionId, binding.sessionWorkspace, workspace.root),
+          );
+          process.exit(1);
+        }
+        if (binding.verdict === "legacy") {
+          process.stderr.write(resumeWorkspaceLegacyMessage(target.sessionId));
         }
         resumeFlagSessionId = target.sessionId;
       }

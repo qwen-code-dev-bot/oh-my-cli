@@ -95,9 +95,13 @@ describe("Integration: session listing and resume", () => {
     expect(list.stdout).toContain("Summary: 2 resumable, 0 corrupt (2 total)");
     for (const id of ids) expect(list.stdout).toContain(id);
 
-    // Resume one specific session; its next interaction is preserved.
+    // Resume one specific session; its next interaction is preserved. The
+    // resume targets the session's own workspace (#554 workspace binding).
     server.setResponses([{ type: "text", content: "resumed alpha" }]);
-    const resumed = await runCli(["--resume", ids[0], "-p", "Continue alpha"], baseEnv);
+    const resumed = await runCli(
+      ["--resume", ids[0], "-p", "Continue alpha", "--workspace", workspaceDir],
+      baseEnv,
+    );
     expect(resumed.stdout).toContain("resumed alpha");
     expect(resumed.code).toBe(0);
   });
@@ -140,9 +144,13 @@ describe("Integration: session listing and resume", () => {
     // Listing is read-only: the corrupt checkpoint is untouched.
     expect(fs.readFileSync(corruptPath, "utf-8")).toBe(corruptBefore);
 
-    // The healthy sibling still resumes normally despite the corrupt neighbor.
+    // The healthy sibling still resumes normally despite the corrupt neighbor
+    // (resumed from its own workspace — #554 workspace binding).
     server.setResponses([{ type: "text", content: "still works" }]);
-    const resumed = await runCli(["--resume", healthyId, "-p", "go on"], baseEnv);
+    const resumed = await runCli(
+      ["--resume", healthyId, "-p", "go on", "--workspace", workspaceDir],
+      baseEnv,
+    );
     expect(resumed.stdout).toContain("still works");
     expect(resumed.code).toBe(0);
   });
