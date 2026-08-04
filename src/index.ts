@@ -61,7 +61,7 @@ import {
   formatCompaction,
   loadSessionMessages,
 } from "./compaction.js";
-import { collectDoctorReport, formatDoctorReport } from "./doctor.js";
+import { collectDoctorReport, doctorRecord, formatDoctorReport } from "./doctor.js";
 import { collectRepoReadiness, formatRepoReadiness } from "./repo-readiness.js";
 import { collectRepoContext, formatRepoContext } from "./repo-context.js";
 import { collectRepoMap, formatRepoMap, tokensToBudgetChars } from "./repo-map.js";
@@ -939,8 +939,20 @@ program
       }
 
       if (opts.doctor) {
+        // Machine-readable form follows the sibling diagnostics (Issue #540):
+        // a versioned record for automation, text for humans; exit semantics
+        // are identical in both modes (0 when no check failed, 1 otherwise).
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
         const report = collectDoctorReport();
-        process.stdout.write(formatDoctorReport(report) + "\n");
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(doctorRecord(report)) + "\n");
+        } else {
+          process.stdout.write(formatDoctorReport(report) + "\n");
+        }
         process.exit(report.ok ? 0 : 1);
       }
 
