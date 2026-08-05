@@ -24,6 +24,7 @@ import {
   applyJournalSkip,
   bucketEntriesByDay,
   bucketEntriesByHour,
+  bucketEntriesByWeek,
   filterEntriesByKind,
   filterEntriesByWindow,
   formatRelativeAge,
@@ -34,6 +35,7 @@ import type {
   JournalHourBucket,
   JournalOrder,
   JournalTimeWindow,
+  JournalWeekBucket,
   SessionJournalKind,
 } from "./session-journal.js";
 
@@ -462,6 +464,74 @@ export function formatWorkspaceJournalByHour(record: WorkspaceJournalByHourRecor
   ];
   for (const b of record.byHour) {
     lines.push(`  ${b.hour} ×${b.count}`);
+  }
+  return lines;
+}
+
+export const WORKSPACE_JOURNAL_BY_WEEK_SCHEMA = "oh-my-cli.workspace-journal-by-week" as const;
+export const WORKSPACE_JOURNAL_BY_WEEK_VERSION = 1 as const;
+
+/**
+ * Per-ISO-week grouping of the merged workspace journal (Issue #658): when
+ * the kept set happened at week granularity, never what it says — week
+ * buckets and counts only. Same shape as the per-day grouping (#646), one
+ * level coarser.
+ */
+export interface WorkspaceJournalByWeekRecord {
+  schema: typeof WORKSPACE_JOURNAL_BY_WEEK_SCHEMA;
+  v: typeof WORKSPACE_JOURNAL_BY_WEEK_VERSION;
+  /** The workspace the grouping is scoped to, redacted + home-collapsed. */
+  workspace: string;
+  /** Sessions whose journals were merged. */
+  sessionsScanned: number;
+  /** Workspace sessions skipped because they are archived. */
+  sessionsSkippedArchived: number;
+  /** Per-ISO-week buckets of the kept set, chronological, present weeks only. */
+  byWeek: JournalWeekBucket[];
+  /** Entries kept after every filter and bound (sums with `byWeek`). */
+  count: number;
+  /** Older entries dropped by the bound. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the per-week grouping record for a workspace (Issue #658).
+ * Semantics are exactly `buildWorkspaceJournal`'s — same scoping, filters,
+ * and bounds — but the result carries week buckets only, never entry
+ * contents. Bucketing fixes the order, so no newest-first option exists
+ * here.
+ */
+export function buildWorkspaceJournalByWeek(
+  store: SessionStore,
+  opts: Omit<WorkspaceJournalOptions, "newestFirst">,
+): WorkspaceJournalByWeekRecord {
+  const journal = buildWorkspaceJournal(store, opts);
+  return {
+    schema: WORKSPACE_JOURNAL_BY_WEEK_SCHEMA,
+    v: WORKSPACE_JOURNAL_BY_WEEK_VERSION,
+    workspace: journal.workspace,
+    sessionsScanned: journal.sessionsScanned,
+    sessionsSkippedArchived: journal.sessionsSkippedArchived,
+    byWeek: bucketEntriesByWeek(journal.entries),
+    count: journal.entries.length,
+    elided: journal.elided,
+    skipped: journal.skipped,
+  };
+}
+
+export function formatWorkspaceJournalByWeek(record: WorkspaceJournalByWeekRecord): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  if (record.count === 0) {
+    return [`0 event(s).${elidedNote}${skippedNote}`];
+  }
+  const lines = [
+    `${record.count} event(s) across ${record.byWeek.length} week(s).${elidedNote}${skippedNote}`,
+  ];
+  for (const b of record.byWeek) {
+    lines.push(`  ${b.week} ×${b.count}`);
   }
   return lines;
 }

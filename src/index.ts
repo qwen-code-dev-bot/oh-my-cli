@@ -78,12 +78,14 @@ import {
   buildWorkspaceJournalByDay,
   buildWorkspaceJournalByHour,
   buildWorkspaceJournalBySession,
+  buildWorkspaceJournalByWeek,
   buildWorkspaceJournalCount,
   buildWorkspaceJournalSummary,
   formatWorkspaceJournal,
   formatWorkspaceJournalByDay,
   formatWorkspaceJournalByHour,
   formatWorkspaceJournalBySession,
+  formatWorkspaceJournalByWeek,
   formatWorkspaceJournalCount,
   formatWorkspaceJournalSummary,
 } from "./workspace-journal.js";
@@ -91,11 +93,13 @@ import {
   buildSessionJournal,
   buildSessionJournalByDay,
   buildSessionJournalByHour,
+  buildSessionJournalByWeek,
   buildSessionJournalCount,
   buildSessionJournalSummary,
   formatSessionJournal,
   formatSessionJournalByDay,
   formatSessionJournalByHour,
+  formatSessionJournalByWeek,
   formatSessionJournalCount,
   formatSessionJournalSummary,
 } from "./session-journal.js";
@@ -642,6 +646,10 @@ program
     "With --session-journal/--workspace-journal: group the entries the filters and bounds keep by UTC hour — hour buckets and counts only, never entry contents (add --output json for a versioned record)",
   )
   .option(
+    "--by-week",
+    "With --session-journal/--workspace-journal: group the entries the filters and bounds keep by ISO week — week buckets and counts only, never entry contents (add --output json for a versioned record)",
+  )
+  .option(
     "--by-session",
     "With --workspace-journal: group the entries the filters and bounds keep by contributing session — session ids and counts only, never entry contents (add --output json for a versioned record)",
   )
@@ -1157,6 +1165,32 @@ program
             process.stdout.write(JSON.stringify(byHourRecord) + "\n");
           } else {
             process.stdout.write(formatWorkspaceJournalByHour(byHourRecord).join("\n") + "\n");
+          }
+          process.exit(0);
+        }
+        if (opts.byWeek === true) {
+          // Per-ISO-week grouping mode (Issue #658): the same pipeline, but
+          // the output carries ISO week buckets only — never entry contents.
+          // Bucketing fixes the order, so --newest-first has no effect here.
+          let byWeekRecord;
+          try {
+            byWeekRecord = buildWorkspaceJournalByWeek(new SessionStore(), {
+              workspace: String(opts.workspace),
+              kinds,
+              window,
+              limit,
+              skip,
+            });
+          } catch {
+            process.stderr.write(
+              `Error: cannot journal workspace "${redactHomePath(String(opts.workspace))}": its identity cannot be canonicalized\n`,
+            );
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(byWeekRecord) + "\n");
+          } else {
+            process.stdout.write(formatWorkspaceJournalByWeek(byWeekRecord).join("\n") + "\n");
           }
           process.exit(0);
         }
@@ -1680,6 +1714,28 @@ program
             process.stdout.write(JSON.stringify(grouped.byHour) + "\n");
           } else {
             process.stdout.write(formatSessionJournalByHour(grouped.byHour).join("\n") + "\n");
+          }
+          process.exit(0);
+        }
+        if (opts.byWeek === true) {
+          // Per-ISO-week grouping mode (Issue #658): the same pipeline and
+          // resolution semantics, but the output carries ISO week buckets
+          // only — never entry contents. Bucketing fixes the order, so
+          // --newest-first has no effect here.
+          const grouped = buildSessionJournalByWeek(store, resolved.sessionId, {
+            kinds,
+            window,
+            limit,
+            skip,
+          });
+          if ("error" in grouped) {
+            process.stderr.write(`Cannot read journal: ${grouped.error}\n`);
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(grouped.byWeek) + "\n");
+          } else {
+            process.stdout.write(formatSessionJournalByWeek(grouped.byWeek).join("\n") + "\n");
           }
           process.exit(0);
         }
