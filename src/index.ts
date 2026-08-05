@@ -79,6 +79,7 @@ import {
   buildWorkspaceJournalByHour,
   buildWorkspaceJournalByMonth,
   buildWorkspaceJournalBySession,
+  buildWorkspaceJournalBySessionDay,
   buildWorkspaceJournalByWeek,
   buildWorkspaceJournalCount,
   buildWorkspaceJournalSummary,
@@ -87,6 +88,7 @@ import {
   formatWorkspaceJournalByHour,
   formatWorkspaceJournalByMonth,
   formatWorkspaceJournalBySession,
+  formatWorkspaceJournalBySessionDay,
   formatWorkspaceJournalByWeek,
   formatWorkspaceJournalCount,
   formatWorkspaceJournalSummary,
@@ -662,6 +664,10 @@ program
     "With --workspace-journal: group the entries the filters and bounds keep by contributing session — session ids and counts only, never entry contents (add --output json for a versioned record)",
   )
   .option(
+    "--by-session-day",
+    "With --workspace-journal: cross-tab the entries the filters and bounds keep by day and contributing session — day/session ids and counts only, never entry contents (add --output json for a versioned record)",
+  )
+  .option(
     "--relative",
     "With --session-journal/--workspace-journal: render entry timestamps as ages relative to read time in text output (JSON stays epoch-based)",
   )
@@ -1121,6 +1127,35 @@ program
             process.stdout.write(JSON.stringify(bySessionRecord) + "\n");
           } else {
             process.stdout.write(formatWorkspaceJournalBySession(bySessionRecord).join("\n") + "\n");
+          }
+          process.exit(0);
+        }
+        if (opts.bySessionDay === true) {
+          // Session × day cross-tab mode (Issue #662): the same pipeline,
+          // but the output carries (day × session) pair buckets only —
+          // never entry contents. Bucketing fixes the order, so
+          // --newest-first has no effect here.
+          let bySessionDayRecord;
+          try {
+            bySessionDayRecord = buildWorkspaceJournalBySessionDay(new SessionStore(), {
+              workspace: String(opts.workspace),
+              kinds,
+              window,
+              limit,
+              skip,
+            });
+          } catch {
+            process.stderr.write(
+              `Error: cannot journal workspace "${redactHomePath(String(opts.workspace))}": its identity cannot be canonicalized\n`,
+            );
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(bySessionDayRecord) + "\n");
+          } else {
+            process.stdout.write(
+              formatWorkspaceJournalBySessionDay(bySessionDayRecord).join("\n") + "\n",
+            );
           }
           process.exit(0);
         }
