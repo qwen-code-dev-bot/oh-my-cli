@@ -765,3 +765,124 @@ export function formatSessionJournalByHour(record: SessionJournalByHourRecord): 
   }
   return lines;
 }
+
+/**
+ * Compute the ISO-8601 week key `YYYY-Www` of a UTC timestamp (Issue #658).
+ * Weeks start on Monday and week 1 contains the year's first Thursday; the
+ * key carries the ISO week-year, not the calendar year — early-January days
+ * can resolve into the previous year's last week and late-December days
+ * into the next year's week 1.
+ */
+export function isoWeekKey(at: number): string {
+  const d = new Date(at);
+  const dateUtc = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  // Monday=1 … Sunday=7; the Thursday of the same ISO week determines the
+  // week-year and the week number.
+  const dayOfWeek = d.getUTCDay() === 0 ? 7 : d.getUTCDay();
+  const thursday = dateUtc + (4 - dayOfWeek) * MS_PER_DAY;
+  const thursdayDate = new Date(thursday);
+  const isoYear = thursdayDate.getUTCFullYear();
+  const jan1 = Date.UTC(isoYear, 0, 1);
+  const week = Math.floor((thursday - jan1) / (7 * MS_PER_DAY)) + 1;
+  return `${isoYear}-W${String(week).padStart(2, "0")}`;
+}
+
+/** One per-ISO-week bucket of journal entries (Issue #658). */
+export interface JournalWeekBucket {
+  /** The ISO-8601 week, YYYY-Www. */
+  week: string;
+  /** Kept entries whose timestamp falls in that week. */
+  count: number;
+}
+
+/**
+ * Bucket journal entries by ISO-8601 week (Issue #658): chronological
+ * (oldest week first — week-year keys sort chronologically), containing only
+ * weeks present in the given sequence. Shared by the per-session journal
+ * (#618) and the workspace journal merge (#630).
+ */
+export function bucketEntriesByWeek<T extends { at: number }>(
+  entries: readonly T[],
+): JournalWeekBucket[] {
+  const counts = new Map<string, number>();
+  for (const e of entries) {
+    const week = isoWeekKey(e.at);
+    counts.set(week, (counts.get(week) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([week, count]) => ({ week, count }));
+}
+
+export const SESSION_JOURNAL_BY_WEEK_SCHEMA = "oh-my-cli.session-journal-by-week" as const;
+export const SESSION_JOURNAL_BY_WEEK_VERSION = 1 as const;
+
+/**
+ * Per-week grouping of one session's journal (Issue #658): when the kept
+ * set happened at ISO-week granularity, never what it says — week buckets
+ * and counts only. Same shape as the per-day grouping (#646), one level
+ * coarser.
+ */
+export interface SessionJournalByWeekRecord {
+  schema: typeof SESSION_JOURNAL_BY_WEEK_SCHEMA;
+  v: typeof SESSION_JOURNAL_BY_WEEK_VERSION;
+  sessionId: string;
+  /** Transcript integrity at read time — honest context for the grouping. */
+  integrity: "ok" | "partial" | "corrupt" | "missing";
+  /** Per-ISO-week buckets of the kept set, chronological, present weeks only. */
+  byWeek: JournalWeekBucket[];
+  /** Entries kept after every filter and bound (sums with `byWeek`). */
+  count: number;
+  /** Older entries dropped by --limit (Issue #636); 0 without it. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the per-week grouping record for one session (Issue #658).
+ * Semantics are exactly `buildSessionJournal`'s — same pipeline, same
+ * heal-free resolution, same error string for a missing session — but the
+ * result carries week buckets only, never entry contents. Bucketing fixes
+ * the order, so no newest-first option exists here.
+ */
+export function buildSessionJournalByWeek(
+  store: SessionStore,
+  id: string,
+  opts: {
+    kinds?: ReadonlySet<SessionJournalKind>;
+    window?: JournalTimeWindow;
+    skip?: number;
+    limit?: number;
+  } = {},
+): { byWeek: SessionJournalByWeekRecord } | { error: string } {
+  const built = buildSessionJournal(store, id, opts);
+  if ("error" in built) return { error: built.error };
+  return {
+    byWeek: {
+      schema: SESSION_JOURNAL_BY_WEEK_SCHEMA,
+      v: SESSION_JOURNAL_BY_WEEK_VERSION,
+      sessionId: built.journal.sessionId,
+      integrity: built.journal.integrity,
+      byWeek: bucketEntriesByWeek(built.journal.entries),
+      count: built.journal.entries.length,
+      elided: built.journal.elided,
+      skipped: built.journal.skipped,
+    },
+  };
+}
+
+export function formatSessionJournalByWeek(record: SessionJournalByWeekRecord): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  if (record.count === 0) {
+    return [`0 event(s).${elidedNote}${skippedNote}`];
+  }
+  const lines = [
+    `${record.count} event(s) across ${record.byWeek.length} week(s).${elidedNote}${skippedNote}`,
+  ];
+  for (const b of record.byWeek) {
+    lines.push(`  ${b.week} ×${b.count}`);
+  }
+  return lines;
+}
