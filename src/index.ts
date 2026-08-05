@@ -71,6 +71,7 @@ import { buildSessionsOverviewRecord, formatSessionsOverview } from "./sessions-
 import {
   buildStaleSessionsReport,
   formatStaleSessions,
+  staleSessionsStrictExit,
   STALE_DEFAULT_DAYS,
 } from "./stale-sessions.js";
 import { buildSessionStorageReport, formatSessionStorageReport } from "./session-storage.js";
@@ -625,7 +626,7 @@ program
   )
   .option(
     "--strict",
-    "With --store-doctor or --health-report: exit 1 when the checkup verdict is attention-needed / the health report finds a corrupt transcript or damaged sidecar (0 when healthy or partial-only) so automation can gate on store health; output is unchanged",
+    "With --store-doctor, --health-report, or --stale-sessions: exit 1 when the checkup verdict is attention-needed, the health report finds a corrupt transcript or damaged sidecar, or stale archive candidates exist (0 otherwise — healthy, partial-only, or no candidates) so automation can gate on store health; output is unchanged",
   )
   .option(
     "--ascii",
@@ -1058,7 +1059,10 @@ program
       // oldest first; pinned/archived older sessions count as protected.
       // Nothing is ever archived by this surface; the store is never mutated.
       // Exits 0 on a successful report (empty is honest), 2 on a bad
-      // threshold or a bad format.
+      // threshold or a bad format. With --strict (Issue #680) the exit code
+      // signals the findings for retention automation: 1 when at least one
+      // archive candidate exists, 0 otherwise — protected pinned/archived
+      // sessions and fresh or empty stores never fail.
       if (opts.staleSessions !== undefined) {
         const format = String(opts.output ?? "text");
         if (format !== "text" && format !== "json") {
@@ -1083,7 +1087,7 @@ program
         } else {
           process.stdout.write(renderReportLines(formatStaleSessions(record), opts.ascii));
         }
-        process.exit(0);
+        process.exit(opts.strict === true ? staleSessionsStrictExit(record) : 0);
       }
 
       // Storage-report mode (Issue #664): a strictly read-only per-session
