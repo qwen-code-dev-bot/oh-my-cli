@@ -635,6 +635,10 @@ program
     "With --workspace-journal: group the entries the filters and bounds keep by contributing session — session ids and counts only, never entry contents (add --output json for a versioned record)",
   )
   .option(
+    "--relative",
+    "With --session-journal/--workspace-journal: render entry timestamps as ages relative to read time in text output (JSON stays epoch-based)",
+  )
+  .option(
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
@@ -1192,7 +1196,9 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
-          process.stdout.write(formatWorkspaceJournal(record).join("\n") + "\n");
+          process.stdout.write(
+            formatWorkspaceJournal(record, { relative: opts.relative === true }).join("\n") + "\n",
+          );
         }
         process.exit(0);
       }
@@ -1677,7 +1683,10 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(built.journal) + "\n");
         } else {
-          process.stdout.write(formatSessionJournal(built.journal).join("\n") + "\n");
+          process.stdout.write(
+            formatSessionJournal(built.journal, { relative: opts.relative === true }).join("\n") +
+              "\n",
+          );
         }
         process.exit(0);
       }
