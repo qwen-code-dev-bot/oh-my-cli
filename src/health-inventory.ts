@@ -47,6 +47,9 @@ export interface HealthInventory {
   integrations: IntegrationHealth[];
 }
 
+export const HEALTH_INVENTORY_SCHEMA = "oh-my-cli.health-inventory" as const;
+export const HEALTH_INVENTORY_VERSION = 1 as const;
+
 const DEFAULT_TIMEOUT = 3000;
 const MIN_TIMEOUT = 50;
 const MAX_TIMEOUT = 30000;
@@ -313,6 +316,38 @@ function safeTarget(rec: IntegrationRecord): string {
 export function healthInventoryStrictExit(inv: HealthInventory): number {
   if (inv.parseError !== undefined) return 1;
   return inv.integrations.some((i) => i.enabled && i.category !== "healthy") ? 1 : 0;
+}
+
+/**
+ * Versioned machine-readable record for the health inventory (Issue #694):
+ * the same facts as the text surface — the home-collapsed settings path,
+ * probe timeout, and every integration with its credential-safe target —
+ * as stable fields for automation. `parseError` is carried only when
+ * present. Pure: identical input always yields the identical record.
+ */
+export function healthInventoryRecord(inv: HealthInventory): Record<string, unknown> {
+  const record: Record<string, unknown> = {
+    schema: HEALTH_INVENTORY_SCHEMA,
+    v: HEALTH_INVENTORY_VERSION,
+    settingsPath: redactPath(inv.settingsPath),
+    settingsFound: inv.settingsFound,
+    probeTimeoutMs: inv.probeTimeoutMs,
+    integrations: inv.integrations.map((i) => {
+      const entry: Record<string, unknown> = {
+        kind: i.kind,
+        name: i.name,
+        target: i.target,
+        enabled: i.enabled,
+        category: i.category,
+        reason: i.reason,
+        probeMs: i.probeMs,
+      };
+      if (i.transport !== undefined) entry.transport = i.transport;
+      return entry;
+    }),
+  };
+  if (inv.parseError !== undefined) record.parseError = inv.parseError;
+  return record;
 }
 
 export function formatHealthInventory(inv: HealthInventory): string {
