@@ -74,7 +74,7 @@ import {
   STALE_DEFAULT_DAYS,
 } from "./stale-sessions.js";
 import { buildSessionStorageReport, formatSessionStorageReport } from "./session-storage.js";
-import { buildSessionHealthReport, formatSessionHealthReport } from "./session-health.js";
+import { buildSessionHealthReport, formatSessionHealthReport, healthReportStrictExit } from "./session-health.js";
 import { buildStoreDoctorReport, formatStoreDoctorReport, storeDoctorStrictExit } from "./store-doctor.js";
 import { renderReportLines } from "./ascii-output.js";
 import {
@@ -625,7 +625,7 @@ program
   )
   .option(
     "--strict",
-    "With --store-doctor: exit 1 when the checkup verdict is attention-needed (0 when healthy) so automation can gate on store health; output is unchanged",
+    "With --store-doctor or --health-report: exit 1 when the checkup verdict is attention-needed / the health report finds a corrupt transcript or damaged sidecar (0 when healthy or partial-only) so automation can gate on store health; output is unchanged",
   )
   .option(
     "--ascii",
@@ -1113,7 +1113,11 @@ program
       // ok/partial/corrupt by the store's existing machinery, worst-first
       // with per-status rollups. Never heals, never mutates. Exit 0 on a
       // successful report regardless of health state (the report is
-      // diagnostic output, not a failure signal), 2 on a bad format.
+      // diagnostic output, not a failure signal), 2 on a bad format. With
+      // --strict (Issue #678) the exit code signals the damage findings
+      // for automation: 1 when any transcript is corrupt or any session
+      // carries a damaged sidecar, 0 otherwise (partial transcripts alone
+      // are recoverable trailing tears and never fail).
       if (opts.healthReport === true) {
         const format = String(opts.output ?? "text");
         if (format !== "text" && format !== "json") {
@@ -1127,7 +1131,7 @@ program
         } else {
           process.stdout.write(renderReportLines(formatSessionHealthReport(record), opts.ascii));
         }
-        process.exit(0);
+        process.exit(opts.strict === true ? healthReportStrictExit(record) : 0);
       }
 
       // Store-doctor mode (Issue #670): a strictly read-only, diagnostic

@@ -14,8 +14,9 @@
 // re-diagnosing, never healing), checks the JSON parseability of each
 // present sidecar, rolls the statuses up, and orders sessions worst-first.
 // Exit status is not a health signal — a successful report exits 0 even
-// when sessions are damaged. Nothing is created, healed, quarantined, or
-// mutated.
+// when sessions are damaged, unless `--strict` (Issue #678) maps the
+// damage findings to exit code 1 for automation. Nothing is created,
+// healed, quarantined, or mutated.
 
 import fs from "node:fs";
 import type { SessionStore } from "./session.js";
@@ -139,6 +140,17 @@ export function buildSessionHealthReport(store: SessionStore): SessionHealthReco
     sessionsWithDamagedSidecars,
     sessions,
   };
+}
+
+/**
+ * Map a health report to the `--strict` exit code (Issue #678): 1 when
+ * any transcript is corrupt or any session carries a damaged sidecar,
+ * 0 otherwise — partial transcripts alone are recoverable trailing tears
+ * and never fail. Pure; output is unaffected — the exit code is the
+ * machine-readable signal.
+ */
+export function healthReportStrictExit(record: SessionHealthRecord): number {
+  return record.counts.corrupt > 0 || record.sessionsWithDamagedSidecars > 0 ? 1 : 0;
 }
 
 export function formatSessionHealthReport(record: SessionHealthRecord): string[] {
