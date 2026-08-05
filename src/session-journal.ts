@@ -121,20 +121,30 @@ export function filterEntriesByWindow<T extends { at: number }>(
 }
 
 /**
- * Parse the --limit value (Issue #636): a positive integer as a decimal
- * string. Throws with a caller-ready message on anything else so the CLI
- * can fail closed before any output.
+ * Parse a positive-integer count flag (--limit/#636, --skip/#638) from its
+ * decimal string form. Throws with a caller-ready message on anything else
+ * so the CLI can fail closed before any output.
  */
-export function parseJournalLimit(raw: string): number {
+function parsePositiveCount(raw: string, flag: string): number {
   const text = raw.trim();
   if (!/^\d+$/.test(text)) {
-    throw new Error(`Error: invalid --limit value: "${raw}" (expected a positive integer)`);
+    throw new Error(`Error: invalid ${flag} value: "${raw}" (expected a positive integer)`);
   }
   const value = Number(text);
   if (value === 0 || !Number.isSafeInteger(value)) {
-    throw new Error(`Error: invalid --limit value: "${raw}" (expected a positive integer)`);
+    throw new Error(`Error: invalid ${flag} value: "${raw}" (expected a positive integer)`);
   }
   return value;
+}
+
+/** Parse the --limit value (Issue #636). */
+export function parseJournalLimit(raw: string): number {
+  return parsePositiveCount(raw, "--limit");
+}
+
+/** Parse the --skip value (Issue #638). */
+export function parseJournalSkip(raw: string): number {
+  return parsePositiveCount(raw, "--skip");
 }
 
 /**
@@ -150,6 +160,23 @@ export function applyJournalLimit<T>(
   if (limit === undefined) return { entries: [...entries], elided: 0 };
   const elided = Math.max(0, entries.length - limit);
   return { entries: entries.slice(elided), elided };
+}
+
+/**
+ * Set aside the newest `skip` entries of an oldest-first journal sequence
+ * (Issue #638), keeping the entries before them and reporting how many
+ * newer entries were skipped. Undefined means "no skip" (all entries, order
+ * preserved, nothing skipped); a skip at or beyond the count yields an empty
+ * kept set with a truthful skipped count. Shared by the per-session journal
+ * (#618) and the workspace journal merge (#630).
+ */
+export function applyJournalSkip<T>(
+  entries: readonly T[],
+  skip: number | undefined,
+): { entries: T[]; skipped: number } {
+  if (skip === undefined) return { entries: [...entries], skipped: 0 };
+  const skipped = Math.min(skip, entries.length);
+  return { entries: entries.slice(0, entries.length - skipped), skipped };
 }
 
 export interface SessionJournalEntry {
@@ -170,6 +197,8 @@ export interface SessionJournalRecord {
   entries: SessionJournalEntry[];
   /** Older entries dropped by --limit (Issue #636); 0 without it. */
   elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
 }
 
 function redact(text: string): string {
@@ -253,8 +282,9 @@ export function buildSessionJournalEntries(
  * when the session is missing so the CLI can map it to a meaningful exit
  * status. Reading never mutates the store. An optional kind set filters the
  * entries (Issue #632), an optional inclusive time window bounds them
- * (Issue #634), and an optional limit keeps only the newest entries
- * (Issue #636); without any of these the journal is unchanged.
+ * (Issue #634), an optional skip sets aside the newest entries, and an
+ * optional limit keeps only the newest of what remains (Issue #636/#638);
+ * without any of these the journal is unchanged.
  */
 export function buildSessionJournal(
   store: SessionStore,
@@ -262,6 +292,7 @@ export function buildSessionJournal(
   opts: {
     kinds?: ReadonlySet<SessionJournalKind>;
     window?: JournalTimeWindow;
+    skip?: number;
     limit?: number;
   } = {},
 ): { journal: SessionJournalRecord } | { error: string } {
@@ -273,7 +304,10 @@ export function buildSessionJournal(
     filterEntriesByKind(buildSessionJournalEntries(store, id), opts.kinds),
     opts.window,
   );
-  const limited = applyJournalLimit(filtered, opts.limit);
+  // Skip sets aside the newest entries first (Issue #638); limit then bounds
+  // the remainder (Issue #636), so elision counts reflect the skip-remainder.
+  const skippedAside = applyJournalSkip(filtered, opts.skip);
+  const limited = applyJournalLimit(skippedAside.entries, opts.limit);
   return {
     journal: {
       schema: SESSION_JOURNAL_SCHEMA,
@@ -282,6 +316,7 @@ export function buildSessionJournal(
       integrity: integrity.status as SessionJournalRecord["integrity"],
       entries: limited.entries,
       elided: limited.elided,
+      skipped: skippedAside.skipped,
     },
   };
 }
@@ -293,6 +328,9 @@ export function formatSessionJournal(record: SessionJournalRecord): string[] {
   lines.push("");
   if (record.entries.length === 0) {
     lines.push("No journal entries.");
+    if (record.skipped > 0) {
+      lines.push(`(+${record.skipped} newer event(s) skipped.)`);
+    }
     return lines;
   }
   for (const e of record.entries) {
@@ -300,6 +338,7 @@ export function formatSessionJournal(record: SessionJournalRecord): string[] {
   }
   lines.push("");
   const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
-  lines.push(`${record.entries.length} event(s).${elidedNote}`);
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  lines.push(`${record.entries.length} event(s).${elidedNote}${skippedNote}`);
   return lines;
 }

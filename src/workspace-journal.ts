@@ -20,7 +20,7 @@ import { shortSessionId } from "./session-picker.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { workspaceTrustKey } from "./folder-trust.js";
 import { buildSessionJournalEntries } from "./session-journal.js";
-import { filterEntriesByKind, filterEntriesByWindow } from "./session-journal.js";
+import { applyJournalSkip, filterEntriesByKind, filterEntriesByWindow } from "./session-journal.js";
 import type { JournalTimeWindow, SessionJournalKind } from "./session-journal.js";
 
 export const WORKSPACE_JOURNAL_SCHEMA = "oh-my-cli.workspace-journal" as const;
@@ -53,6 +53,8 @@ export interface WorkspaceJournalRecord {
   entries: WorkspaceJournalEntry[];
   /** Older entries dropped by the bound. */
   elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
 }
 
 export interface WorkspaceJournalOptions {
@@ -70,6 +72,8 @@ export interface WorkspaceJournalOptions {
    * default bound entirely (callers may tighten below or expand above it).
    */
   limit?: number;
+  /** Set aside the newest entries before bounding (Issue #638). */
+  skip?: number;
 }
 
 export function buildWorkspaceJournal(
@@ -127,12 +131,14 @@ export function buildWorkspaceJournal(
 
   // Keep the newest entries; elide the older tail with a truthful count.
   // The time window (Issue #634) and the kind filter (Issue #632) apply
-  // before the bound, so elision counts reflect the filtered set. Scoping
-  // and archived-skipping already happened during the merge above.
+  // first; skip (Issue #638) sets aside the newest of the filtered set; the
+  // bound then applies to the skip-remainder, so elision counts reflect it.
+  // Scoping and archived-skipping already happened during the merge above.
   const windowed = filterEntriesByWindow(merged, opts.window);
   const filtered = filterEntriesByKind(windowed, opts.kinds);
-  const elided = Math.max(0, filtered.length - maxEntries);
-  const entries = filtered.slice(elided);
+  const skippedAside = applyJournalSkip(filtered, opts.skip);
+  const elided = Math.max(0, skippedAside.entries.length - maxEntries);
+  const entries = skippedAside.entries.slice(elided);
 
   return {
     schema: WORKSPACE_JOURNAL_SCHEMA,
@@ -142,6 +148,7 @@ export function buildWorkspaceJournal(
     sessionsSkippedArchived,
     entries,
     elided,
+    skipped: skippedAside.skipped,
   };
 }
 
@@ -159,6 +166,9 @@ export function formatWorkspaceJournal(record: WorkspaceJournalRecord): string[]
   if (record.entries.length === 0) {
     lines.push("");
     lines.push("No journal entries for this workspace.");
+    if (record.skipped > 0) {
+      lines.push(`(+${record.skipped} newer event(s) skipped.)`);
+    }
     return lines;
   }
   lines.push("");
@@ -170,6 +180,7 @@ export function formatWorkspaceJournal(record: WorkspaceJournalRecord): string[]
   }
   lines.push("");
   const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
-  lines.push(`${record.entries.length} event(s) shown.${elidedNote}`);
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  lines.push(`${record.entries.length} event(s) shown.${elidedNote}${skippedNote}`);
   return lines;
 }

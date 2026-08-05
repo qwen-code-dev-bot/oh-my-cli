@@ -75,7 +75,12 @@ import {
 } from "./stale-sessions.js";
 import { buildWorkspaceJournal, formatWorkspaceJournal } from "./workspace-journal.js";
 import { buildSessionJournal, formatSessionJournal } from "./session-journal.js";
-import { JOURNAL_KINDS, parseJournalLimit, parseJournalTimestamp } from "./session-journal.js";
+import {
+  JOURNAL_KINDS,
+  parseJournalLimit,
+  parseJournalSkip,
+  parseJournalTimestamp,
+} from "./session-journal.js";
 import type { JournalTimeWindow, SessionJournalKind } from "./session-journal.js";
 import { buildSessionDiff, formatSessionDiff } from "./session-diff.js";
 import { searchSessionNotes, formatSessionNotesSearch } from "./session-notes-search.js";
@@ -586,6 +591,10 @@ program
     "With --session-journal/--workspace-journal: keep only the newest <n> entries (a positive integer; older entries are elided with a truthful count)",
   )
   .option(
+    "--skip <n>",
+    "With --session-journal/--workspace-journal: set aside the newest <n> entries and show the ones before them (a positive integer; compose with --limit to page backward)",
+  )
+  .option(
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
@@ -1011,6 +1020,13 @@ program
           process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
           process.exit(2);
         }
+        let skip: number | undefined;
+        try {
+          skip = opts.skip === undefined ? undefined : parseJournalSkip(String(opts.skip));
+        } catch (err) {
+          process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+          process.exit(2);
+        }
         let record;
         try {
           record = buildWorkspaceJournal(new SessionStore(), {
@@ -1018,6 +1034,7 @@ program
             kinds,
             window,
             limit,
+            skip,
           });
         } catch {
           process.stderr.write(
@@ -1419,13 +1436,20 @@ program
           process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
           process.exit(2);
         }
+        let skip: number | undefined;
+        try {
+          skip = opts.skip === undefined ? undefined : parseJournalSkip(String(opts.skip));
+        } catch (err) {
+          process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+          process.exit(2);
+        }
         const store = new SessionStore();
         const resolved = resolveArchiveTarget(String(opts.sessionJournal), store);
         if (!resolved.ok) {
           process.stderr.write(`Cannot read journal: ${resolved.reason}\n`);
           process.exit(2);
         }
-        const built = buildSessionJournal(store, resolved.sessionId, { kinds, window, limit });
+        const built = buildSessionJournal(store, resolved.sessionId, { kinds, window, limit, skip });
         if ("error" in built) {
           process.stderr.write(`Cannot read journal: ${built.error}\n`);
           process.exit(2);
