@@ -120,6 +120,38 @@ export function filterEntriesByWindow<T extends { at: number }>(
   );
 }
 
+/**
+ * Parse the --limit value (Issue #636): a positive integer as a decimal
+ * string. Throws with a caller-ready message on anything else so the CLI
+ * can fail closed before any output.
+ */
+export function parseJournalLimit(raw: string): number {
+  const text = raw.trim();
+  if (!/^\d+$/.test(text)) {
+    throw new Error(`Error: invalid --limit value: "${raw}" (expected a positive integer)`);
+  }
+  const value = Number(text);
+  if (value === 0 || !Number.isSafeInteger(value)) {
+    throw new Error(`Error: invalid --limit value: "${raw}" (expected a positive integer)`);
+  }
+  return value;
+}
+
+/**
+ * Keep only the newest `limit` entries of an oldest-first journal sequence
+ * (Issue #636), reporting how many older entries were elided. Undefined
+ * means "no limit" (all entries, order preserved, nothing elided). Shared
+ * by the per-session journal (#618) and the workspace journal merge (#630).
+ */
+export function applyJournalLimit<T>(
+  entries: readonly T[],
+  limit: number | undefined,
+): { entries: T[]; elided: number } {
+  if (limit === undefined) return { entries: [...entries], elided: 0 };
+  const elided = Math.max(0, entries.length - limit);
+  return { entries: entries.slice(elided), elided };
+}
+
 export interface SessionJournalEntry {
   /** Epoch ms when the event happened. */
   at: number;
@@ -136,6 +168,8 @@ export interface SessionJournalRecord {
   integrity: "ok" | "partial" | "corrupt" | "missing";
   /** Oldest first; ties break deterministically by kind, then detail. */
   entries: SessionJournalEntry[];
+  /** Older entries dropped by --limit (Issue #636); 0 without it. */
+  elided: number;
 }
 
 function redact(text: string): string {
@@ -218,28 +252,36 @@ export function buildSessionJournalEntries(
  * Build the journal for one session. Returns an error string (not throwing)
  * when the session is missing so the CLI can map it to a meaningful exit
  * status. Reading never mutates the store. An optional kind set filters the
- * entries (Issue #632) and an optional inclusive time window bounds them
- * (Issue #634); without either the journal is unchanged.
+ * entries (Issue #632), an optional inclusive time window bounds them
+ * (Issue #634), and an optional limit keeps only the newest entries
+ * (Issue #636); without any of these the journal is unchanged.
  */
 export function buildSessionJournal(
   store: SessionStore,
   id: string,
-  opts: { kinds?: ReadonlySet<SessionJournalKind>; window?: JournalTimeWindow } = {},
+  opts: {
+    kinds?: ReadonlySet<SessionJournalKind>;
+    window?: JournalTimeWindow;
+    limit?: number;
+  } = {},
 ): { journal: SessionJournalRecord } | { error: string } {
   const integrity = store.integrity(id);
   if (integrity.status === "missing") {
     return { error: `no such session "${id}"` };
   }
+  const filtered = filterEntriesByWindow(
+    filterEntriesByKind(buildSessionJournalEntries(store, id), opts.kinds),
+    opts.window,
+  );
+  const limited = applyJournalLimit(filtered, opts.limit);
   return {
     journal: {
       schema: SESSION_JOURNAL_SCHEMA,
       v: SESSION_JOURNAL_VERSION,
       sessionId: id,
       integrity: integrity.status as SessionJournalRecord["integrity"],
-      entries: filterEntriesByWindow(
-        filterEntriesByKind(buildSessionJournalEntries(store, id), opts.kinds),
-        opts.window,
-      ),
+      entries: limited.entries,
+      elided: limited.elided,
     },
   };
 }
@@ -257,6 +299,7 @@ export function formatSessionJournal(record: SessionJournalRecord): string[] {
     lines.push(`  ${new Date(e.at).toISOString()} · ${e.kind} · ${e.detail}`);
   }
   lines.push("");
-  lines.push(`${record.entries.length} event(s).`);
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  lines.push(`${record.entries.length} event(s).${elidedNote}`);
   return lines;
 }

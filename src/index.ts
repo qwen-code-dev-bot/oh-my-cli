@@ -75,7 +75,7 @@ import {
 } from "./stale-sessions.js";
 import { buildWorkspaceJournal, formatWorkspaceJournal } from "./workspace-journal.js";
 import { buildSessionJournal, formatSessionJournal } from "./session-journal.js";
-import { JOURNAL_KINDS, parseJournalTimestamp } from "./session-journal.js";
+import { JOURNAL_KINDS, parseJournalLimit, parseJournalTimestamp } from "./session-journal.js";
 import type { JournalTimeWindow, SessionJournalKind } from "./session-journal.js";
 import { buildSessionDiff, formatSessionDiff } from "./session-diff.js";
 import { searchSessionNotes, formatSessionNotesSearch } from "./session-notes-search.js";
@@ -582,6 +582,10 @@ program
     "With --session-journal/--workspace-journal: only show entries at or before this ISO-8601 timestamp (a bare date YYYY-MM-DD means end of day UTC)",
   )
   .option(
+    "--limit <n>",
+    "With --session-journal/--workspace-journal: keep only the newest <n> entries (a positive integer; older entries are elided with a truthful count)",
+  )
+  .option(
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
@@ -1000,12 +1004,20 @@ program
           process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
           process.exit(2);
         }
+        let limit: number | undefined;
+        try {
+          limit = opts.limit === undefined ? undefined : parseJournalLimit(String(opts.limit));
+        } catch (err) {
+          process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+          process.exit(2);
+        }
         let record;
         try {
           record = buildWorkspaceJournal(new SessionStore(), {
             workspace: String(opts.workspace),
             kinds,
             window,
+            limit,
           });
         } catch {
           process.stderr.write(
@@ -1400,13 +1412,20 @@ program
           process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
           process.exit(2);
         }
+        let limit: number | undefined;
+        try {
+          limit = opts.limit === undefined ? undefined : parseJournalLimit(String(opts.limit));
+        } catch (err) {
+          process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+          process.exit(2);
+        }
         const store = new SessionStore();
         const resolved = resolveArchiveTarget(String(opts.sessionJournal), store);
         if (!resolved.ok) {
           process.stderr.write(`Cannot read journal: ${resolved.reason}\n`);
           process.exit(2);
         }
-        const built = buildSessionJournal(store, resolved.sessionId, { kinds, window });
+        const built = buildSessionJournal(store, resolved.sessionId, { kinds, window, limit });
         if ("error" in built) {
           process.stderr.write(`Cannot read journal: ${built.error}\n`);
           process.exit(2);
