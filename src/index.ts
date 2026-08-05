@@ -77,6 +77,7 @@ import {
   buildWorkspaceJournal,
   buildWorkspaceJournalByDay,
   buildWorkspaceJournalByHour,
+  buildWorkspaceJournalByMonth,
   buildWorkspaceJournalBySession,
   buildWorkspaceJournalByWeek,
   buildWorkspaceJournalCount,
@@ -84,6 +85,7 @@ import {
   formatWorkspaceJournal,
   formatWorkspaceJournalByDay,
   formatWorkspaceJournalByHour,
+  formatWorkspaceJournalByMonth,
   formatWorkspaceJournalBySession,
   formatWorkspaceJournalByWeek,
   formatWorkspaceJournalCount,
@@ -93,12 +95,14 @@ import {
   buildSessionJournal,
   buildSessionJournalByDay,
   buildSessionJournalByHour,
+  buildSessionJournalByMonth,
   buildSessionJournalByWeek,
   buildSessionJournalCount,
   buildSessionJournalSummary,
   formatSessionJournal,
   formatSessionJournalByDay,
   formatSessionJournalByHour,
+  formatSessionJournalByMonth,
   formatSessionJournalByWeek,
   formatSessionJournalCount,
   formatSessionJournalSummary,
@@ -650,6 +654,10 @@ program
     "With --session-journal/--workspace-journal: group the entries the filters and bounds keep by ISO week — week buckets and counts only, never entry contents (add --output json for a versioned record)",
   )
   .option(
+    "--by-month",
+    "With --session-journal/--workspace-journal: group the entries the filters and bounds keep by calendar month — month buckets and counts only, never entry contents (add --output json for a versioned record)",
+  )
+  .option(
     "--by-session",
     "With --workspace-journal: group the entries the filters and bounds keep by contributing session — session ids and counts only, never entry contents (add --output json for a versioned record)",
   )
@@ -1191,6 +1199,33 @@ program
             process.stdout.write(JSON.stringify(byWeekRecord) + "\n");
           } else {
             process.stdout.write(formatWorkspaceJournalByWeek(byWeekRecord).join("\n") + "\n");
+          }
+          process.exit(0);
+        }
+        if (opts.byMonth === true) {
+          // Per-month grouping mode (Issue #660): the same pipeline, but the
+          // output carries calendar-month buckets only — never entry
+          // contents. Bucketing fixes the order, so --newest-first has no
+          // effect here.
+          let byMonthRecord;
+          try {
+            byMonthRecord = buildWorkspaceJournalByMonth(new SessionStore(), {
+              workspace: String(opts.workspace),
+              kinds,
+              window,
+              limit,
+              skip,
+            });
+          } catch {
+            process.stderr.write(
+              `Error: cannot journal workspace "${redactHomePath(String(opts.workspace))}": its identity cannot be canonicalized\n`,
+            );
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(byMonthRecord) + "\n");
+          } else {
+            process.stdout.write(formatWorkspaceJournalByMonth(byMonthRecord).join("\n") + "\n");
           }
           process.exit(0);
         }
@@ -1736,6 +1771,28 @@ program
             process.stdout.write(JSON.stringify(grouped.byWeek) + "\n");
           } else {
             process.stdout.write(formatSessionJournalByWeek(grouped.byWeek).join("\n") + "\n");
+          }
+          process.exit(0);
+        }
+        if (opts.byMonth === true) {
+          // Per-month grouping mode (Issue #660): the same pipeline and
+          // resolution semantics, but the output carries calendar-month
+          // buckets only — never entry contents. Bucketing fixes the order,
+          // so --newest-first has no effect here.
+          const grouped = buildSessionJournalByMonth(store, resolved.sessionId, {
+            kinds,
+            window,
+            limit,
+            skip,
+          });
+          if ("error" in grouped) {
+            process.stderr.write(`Cannot read journal: ${grouped.error}\n`);
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(grouped.byMonth) + "\n");
+          } else {
+            process.stdout.write(formatSessionJournalByMonth(grouped.byMonth).join("\n") + "\n");
           }
           process.exit(0);
         }
