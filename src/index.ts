@@ -74,6 +74,7 @@ import {
   STALE_DEFAULT_DAYS,
 } from "./stale-sessions.js";
 import { buildSessionStorageReport, formatSessionStorageReport } from "./session-storage.js";
+import { buildSessionHealthReport, formatSessionHealthReport } from "./session-health.js";
 import {
   buildWorkspaceJournal,
   buildWorkspaceJournalByDay,
@@ -613,6 +614,10 @@ program
     "Show a read-only per-session on-disk storage footprint report ranked largest-first — transcript and sidecar bytes, totals, and the largest session (add --output json for a versioned record) and exit",
   )
   .option(
+    "--health-report",
+    "Show a read-only session transcript health report — every session's integrity (ok/partial/corrupt) worst-first with per-status rollups; diagnostic only, never heals (add --output json for a versioned record) and exit",
+  )
+  .option(
     "--workspace-journal",
     "Show a read-only merged chronology of every session declared for the --workspace (default cwd) identity (add --output json for a versioned record) and exit",
   )
@@ -1085,6 +1090,28 @@ program
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
           process.stdout.write(formatSessionStorageReport(record).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Health-report mode (Issue #666): a strictly read-only, diagnostic
+      // transcript-integrity report — every discovered session classified
+      // ok/partial/corrupt by the store's existing machinery, worst-first
+      // with per-status rollups. Never heals, never mutates. Exit 0 on a
+      // successful report regardless of health state (the report is
+      // diagnostic output, not a failure signal), 2 on a bad format.
+      if (opts.healthReport === true) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const record = buildSessionHealthReport(store);
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(formatSessionHealthReport(record).join("\n") + "\n");
         }
         process.exit(0);
       }
