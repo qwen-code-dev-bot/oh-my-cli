@@ -46,7 +46,7 @@ import { runPalette, defaultCommands } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
 import { runPreflight, formatPreflight, validateFallbackModel } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
-import { collectHealthInventory, formatHealthInventory } from "./health-inventory.js";
+import { collectHealthInventory, formatHealthInventory, healthInventoryStrictExit } from "./health-inventory.js";
 import {
   collectSessionSummaries,
   filterSessionSummaries,
@@ -638,7 +638,7 @@ program
   )
   .option(
     "--strict",
-    "With --store-doctor, --health-report, --stale-sessions, or --attention: exit 1 when the checkup verdict is attention-needed, the health report finds a corrupt transcript or damaged sidecar, stale archive candidates exist, or the workspace attention summary lists any item (0 otherwise — healthy, partial-only, no candidates, or a quiet workspace) so automation can gate on store health; output is unchanged",
+    "With --store-doctor, --health-report, --stale-sessions, --attention, or --health: exit 1 when the checkup verdict is attention-needed, the health report finds a corrupt transcript or damaged sidecar, stale archive candidates exist, the workspace attention summary lists any item, or any enabled integration in the health inventory is unhealthy (0 otherwise — healthy, partial-only, no candidates, a quiet workspace, or only disabled/healthy integrations) so automation can gate on store and integration health; output is unchanged",
   )
   .option(
     "--ascii",
@@ -3925,11 +3925,20 @@ program
         process.exit(result.ok ? 0 : result.reason === "git_error" ? 2 : 1);
       }
 
+      // Health mode (Issue #12): a read-only inventory of the configured
+      // MCP servers and extensions, probed shallowly with a hard timeout
+      // and never mutating settings or integration state. Exits 0 on a
+      // successful probe — the inventory is diagnostic output, not a
+      // failure signal. With --strict (Issue #690) the exit code signals
+      // the findings for automation: 1 when the settings cannot be parsed
+      // or any enabled integration is unhealthy (unavailable or
+      // misconfigured), 0 otherwise — disabled entries and an empty
+      // inventory are honest zero states, never failures.
       if (opts.health) {
         const settingsPath = resolveSettingsPath(opts.settings);
         const inventory = await collectHealthInventory(settingsPath);
         process.stdout.write(formatHealthInventory(inventory) + "\n");
-        process.exit(0);
+        process.exit(opts.strict === true ? healthInventoryStrictExit(inventory) : 0);
       }
 
       if (opts.sandboxInfo) {
