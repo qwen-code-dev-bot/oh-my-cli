@@ -11,7 +11,9 @@
 // reports totals. Missing files contribute 0 bytes honestly (a vanished
 // transcript reports 0 rather than failing); archived sessions are included
 // — they still occupy disk — and marked. Nothing is created, healed, or
-// mutated.
+// mutated. With `--strict --budget` (Issue #692) the exit code gates the
+// total footprint against a declared byte budget so retention automation
+// can enforce size limits without parsing prose.
 
 import fs from "node:fs";
 import type { SessionStore } from "./session.js";
@@ -92,6 +94,35 @@ export function buildSessionStorageReport(store: SessionStore): SessionStorageRe
     largestSessionId: sessions.length > 0 ? sessions[0].sessionId : null,
     sessions,
   };
+}
+
+/**
+ * Map a storage report to the `--strict --budget` exit code (Issue #692):
+ * 1 when the total footprint exceeds the budget, 0 when at or under — an
+ * empty store is 0 bytes and never fails a non-negative budget. Pure; the
+ * report output is unaffected — the exit code is the machine-readable
+ * signal.
+ */
+export function storageBudgetStrictExit(totalBytes: number, budgetBytes: number): number {
+  return totalBytes > budgetBytes ? 1 : 0;
+}
+
+/**
+ * Parse the --budget value (Issue #692): a non-negative integer byte
+ * count. Throws with a caller-ready message on anything else so the CLI
+ * can fail closed before any output.
+ */
+export function parseStorageBudget(raw: string): number {
+  const text = raw.trim();
+  const fail = (): never => {
+    throw new Error(
+      `Error: invalid --storage-budget value: "${raw}" (expected a non-negative integer byte count)`,
+    );
+  };
+  if (!/^\d+$/.test(text)) fail();
+  const value = Number(text);
+  if (!Number.isSafeInteger(value)) fail();
+  return value;
 }
 
 export function formatSessionStorageReport(record: SessionStorageRecord): string[] {

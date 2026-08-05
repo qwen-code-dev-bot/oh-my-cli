@@ -74,7 +74,7 @@ import {
   staleSessionsStrictExit,
   STALE_DEFAULT_DAYS,
 } from "./stale-sessions.js";
-import { buildSessionStorageReport, formatSessionStorageReport } from "./session-storage.js";
+import { buildSessionStorageReport, formatSessionStorageReport, parseStorageBudget, storageBudgetStrictExit } from "./session-storage.js";
 import { buildSessionHealthReport, formatSessionHealthReport, healthReportStrictExit } from "./session-health.js";
 import { buildStoreDoctorReport, formatStoreDoctorReport, storeDoctorStrictExit } from "./store-doctor.js";
 import { renderReportLines } from "./ascii-output.js";
@@ -637,8 +637,12 @@ program
     "Run a read-only consolidated store checkup composing health, sidecar, storage, and stale-session diagnostics into one summary with an overall verdict; diagnostic only, never heals (add --output json for a versioned record) and exit",
   )
   .option(
+    "--storage-budget <bytes>",
+    "With --storage-report --strict: gate the exit code on the store's total footprint against this non-negative integer byte budget (exit 1 when exceeded); only valid together with --strict",
+  )
+  .option(
     "--strict",
-    "With --store-doctor, --health-report, --stale-sessions, --attention, or --health: exit 1 when the checkup verdict is attention-needed, the health report finds a corrupt transcript or damaged sidecar, stale archive candidates exist, the workspace attention summary lists any item, or any enabled integration in the health inventory is unhealthy (0 otherwise — healthy, partial-only, no candidates, a quiet workspace, or only disabled/healthy integrations) so automation can gate on store and integration health; output is unchanged",
+    "With --store-doctor, --health-report, --stale-sessions, --attention, --health, or --storage-report --budget: exit 1 when the checkup verdict is attention-needed, the health report finds a corrupt transcript or damaged sidecar, stale archive candidates exist, the workspace attention summary lists any item, any enabled integration in the health inventory is unhealthy, or the store's total footprint exceeds the byte budget (0 otherwise — healthy, partial-only, no candidates, a quiet workspace, only disabled/healthy integrations, or footprint at/under budget) so automation can gate on store and integration health; output is unchanged",
   )
   .option(
     "--ascii",
@@ -1115,12 +1119,38 @@ program
       // largest-first, totals, and the largest session. Missing files count
       // 0 bytes honestly; archived sessions are included and marked; nothing
       // is created, healed, or mutated. Exits 0 on a successful report
-      // (empty is honest), 2 on a bad format.
+      // (empty is honest), 2 on a bad format. With --strict --budget
+      // (Issue #692) the exit code gates the total footprint against the
+      // declared byte budget for automation: 1 when exceeded, 0 at or
+      // under. The budget is only meaningful as a gate, so --strict without
+      // --budget and --budget without --strict both exit 2 before any
+      // output.
       if (opts.storageReport === true) {
         const format = String(opts.output ?? "text");
         if (format !== "text" && format !== "json") {
           process.stderr.write(`Error: invalid output format "${format}"\n`);
           process.exit(2);
+        }
+        if (opts.strict === true && opts.storageBudget === undefined) {
+          process.stderr.write(
+            "Error: --strict on --storage-report requires --storage-budget <bytes> (a footprint gate needs a budget)\n",
+          );
+          process.exit(2);
+        }
+        if (opts.storageBudget !== undefined && opts.strict !== true) {
+          process.stderr.write(
+            "Error: --storage-budget is only used with --strict on --storage-report\n",
+          );
+          process.exit(2);
+        }
+        let budgetBytes: number | undefined;
+        if (opts.storageBudget !== undefined) {
+          try {
+            budgetBytes = parseStorageBudget(String(opts.storageBudget));
+          } catch (err) {
+            process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+            process.exit(2);
+          }
         }
         const store = new SessionStore();
         const record = buildSessionStorageReport(store);
@@ -1129,7 +1159,11 @@ program
         } else {
           process.stdout.write(renderReportLines(formatSessionStorageReport(record), opts.ascii));
         }
-        process.exit(0);
+        process.exit(
+          opts.strict === true && budgetBytes !== undefined
+            ? storageBudgetStrictExit(record.totalBytes, budgetBytes)
+            : 0,
+        );
       }
 
       // Health-report mode (Issue #666): a strictly read-only, diagnostic
