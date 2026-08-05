@@ -12,7 +12,9 @@
 // readable history appear), redaction on every free-form value, honest
 // absence for unreadable sidecars (a corrupt goal or notes sidecar
 // contributes nothing, never guesses), deterministic ordering, and zero
-// mutation of the store.
+// mutation of the store. With `--follow` (Issue #688) the journal is
+// watchable live: the builder is re-run on a poll and pure identity
+// helpers decide what newly appeared, as text lines or JSON-lines.
 
 import fs from "node:fs";
 import type { SessionStore } from "./session.js";
@@ -397,6 +399,64 @@ export function buildSessionJournal(
       order,
     },
   };
+}
+
+/**
+ * Stable identity for a session-journal entry (Issue #688): a tuple of the
+ * entry instant, its kind, and its detail — per-session scope needs no
+ * session field. Pure: identical input always yields the identical
+ * identity.
+ */
+export function sessionJournalEntryIdentity(e: SessionJournalEntry): string {
+  return `${e.at}\u0000${e.kind}\u0000${e.detail}`;
+}
+
+/**
+ * Diff a freshly rebuilt journal against the identities already seen
+ * (Issue #688): returns only the entries that newly appeared, in the
+ * builder's chronological order. Vanished entries produce nothing —
+ * follow mode never re-emits. Pure.
+ */
+export function sessionDiffNewEntries(
+  seen: ReadonlySet<string>,
+  current: readonly SessionJournalEntry[],
+): SessionJournalEntry[] {
+  return current.filter((e) => !seen.has(sessionJournalEntryIdentity(e)));
+}
+
+/**
+ * One journal line in the per-session canonical format (Issue #688),
+ * shared by the snapshot renderer and the live follow emitter so both
+ * render byte-identically.
+ */
+export function sessionJournalEntryLine(
+  e: SessionJournalEntry,
+  stamp: (at: number) => string,
+): string {
+  return `  ${stamp(e.at)} · ${e.kind} · ${e.detail}`;
+}
+
+/**
+ * One session-journal entry as a self-describing JSON line (Issue #688):
+ * the session-journal schema/version identity, the session, and the entry
+ * fields, with the session's transcript integrity only when it is not ok.
+ * Pure: identical input always yields the identical line; one complete
+ * JSON value per line for record-at-a-time consumers.
+ */
+export function sessionJournalEntryJsonLine(
+  e: SessionJournalEntry,
+  ctx: { sessionId: string; integrity?: "partial" | "corrupt" },
+): string {
+  const line: Record<string, unknown> = {
+    schema: SESSION_JOURNAL_SCHEMA,
+    v: SESSION_JOURNAL_VERSION,
+    sessionId: ctx.sessionId,
+    at: e.at,
+    kind: e.kind,
+    detail: e.detail,
+  };
+  if (ctx.integrity !== undefined) line.integrity = ctx.integrity;
+  return JSON.stringify(line);
 }
 
 /**
