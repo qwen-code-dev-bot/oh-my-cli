@@ -73,6 +73,7 @@ import {
   formatStaleSessions,
   STALE_DEFAULT_DAYS,
 } from "./stale-sessions.js";
+import { buildSessionStorageReport, formatSessionStorageReport } from "./session-storage.js";
 import {
   buildWorkspaceJournal,
   buildWorkspaceJournalByDay,
@@ -608,6 +609,10 @@ program
     "Show a read-only, advisory retention report: sessions older than the threshold (default 30 days) that are neither pinned nor archived are archive candidates (add --output json for a versioned record) and exit",
   )
   .option(
+    "--storage-report",
+    "Show a read-only per-session on-disk storage footprint report ranked largest-first — transcript and sidecar bytes, totals, and the largest session (add --output json for a versioned record) and exit",
+  )
+  .option(
     "--workspace-journal",
     "Show a read-only merged chronology of every session declared for the --workspace (default cwd) identity (add --output json for a versioned record) and exit",
   )
@@ -1058,6 +1063,28 @@ program
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
           process.stdout.write(formatStaleSessions(record).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Storage-report mode (Issue #664): a strictly read-only per-session
+      // on-disk footprint report — transcript + sidecar bytes ranked
+      // largest-first, totals, and the largest session. Missing files count
+      // 0 bytes honestly; archived sessions are included and marked; nothing
+      // is created, healed, or mutated. Exits 0 on a successful report
+      // (empty is honest), 2 on a bad format.
+      if (opts.storageReport === true) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const record = buildSessionStorageReport(store);
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(formatSessionStorageReport(record).join("\n") + "\n");
         }
         process.exit(0);
       }
