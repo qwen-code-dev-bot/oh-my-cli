@@ -667,3 +667,101 @@ export function formatSessionJournalByDay(record: SessionJournalByDayRecord): st
   }
   return lines;
 }
+
+/** One per-UTC-hour bucket of journal entries (Issue #656). */
+export interface JournalHourBucket {
+  /** The UTC hour, YYYY-MM-DDTHH. */
+  hour: string;
+  /** Kept entries whose timestamp falls in that hour. */
+  count: number;
+}
+
+/**
+ * Bucket journal entries by UTC hour (Issue #656): chronological (oldest
+ * hour first), containing only hours present in the given sequence. Shared
+ * by the per-session journal (#618) and the workspace journal merge (#630).
+ */
+export function bucketEntriesByHour<T extends { at: number }>(
+  entries: readonly T[],
+): JournalHourBucket[] {
+  const counts = new Map<string, number>();
+  for (const e of entries) {
+    const hour = new Date(e.at).toISOString().slice(0, 13);
+    counts.set(hour, (counts.get(hour) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([hour, count]) => ({ hour, count }));
+}
+
+export const SESSION_JOURNAL_BY_HOUR_SCHEMA = "oh-my-cli.session-journal-by-hour" as const;
+export const SESSION_JOURNAL_BY_HOUR_VERSION = 1 as const;
+
+/**
+ * Per-hour grouping of one session's journal (Issue #656): when the kept
+ * set happened at hour granularity, never what it says — hour buckets and
+ * counts only. Same shape as the per-day grouping (#646), one level finer.
+ */
+export interface SessionJournalByHourRecord {
+  schema: typeof SESSION_JOURNAL_BY_HOUR_SCHEMA;
+  v: typeof SESSION_JOURNAL_BY_HOUR_VERSION;
+  sessionId: string;
+  /** Transcript integrity at read time — honest context for the grouping. */
+  integrity: "ok" | "partial" | "corrupt" | "missing";
+  /** Per-UTC-hour buckets of the kept set, chronological, present hours only. */
+  byHour: JournalHourBucket[];
+  /** Entries kept after every filter and bound (sums with `byHour`). */
+  count: number;
+  /** Older entries dropped by --limit (Issue #636); 0 without it. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the per-hour grouping record for one session (Issue #656).
+ * Semantics are exactly `buildSessionJournal`'s — same pipeline, same
+ * heal-free resolution, same error string for a missing session — but the
+ * result carries hour buckets only, never entry contents. Bucketing fixes
+ * the order, so no newest-first option exists here.
+ */
+export function buildSessionJournalByHour(
+  store: SessionStore,
+  id: string,
+  opts: {
+    kinds?: ReadonlySet<SessionJournalKind>;
+    window?: JournalTimeWindow;
+    skip?: number;
+    limit?: number;
+  } = {},
+): { byHour: SessionJournalByHourRecord } | { error: string } {
+  const built = buildSessionJournal(store, id, opts);
+  if ("error" in built) return { error: built.error };
+  return {
+    byHour: {
+      schema: SESSION_JOURNAL_BY_HOUR_SCHEMA,
+      v: SESSION_JOURNAL_BY_HOUR_VERSION,
+      sessionId: built.journal.sessionId,
+      integrity: built.journal.integrity,
+      byHour: bucketEntriesByHour(built.journal.entries),
+      count: built.journal.entries.length,
+      elided: built.journal.elided,
+      skipped: built.journal.skipped,
+    },
+  };
+}
+
+export function formatSessionJournalByHour(record: SessionJournalByHourRecord): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  if (record.count === 0) {
+    return [`0 event(s).${elidedNote}${skippedNote}`];
+  }
+  const lines = [
+    `${record.count} event(s) across ${record.byHour.length} hour(s).${elidedNote}${skippedNote}`,
+  ];
+  for (const b of record.byHour) {
+    lines.push(`  ${b.hour} ×${b.count}`);
+  }
+  return lines;
+}

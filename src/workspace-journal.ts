@@ -23,6 +23,7 @@ import { buildSessionJournalEntries, JOURNAL_KINDS } from "./session-journal.js"
 import {
   applyJournalSkip,
   bucketEntriesByDay,
+  bucketEntriesByHour,
   filterEntriesByKind,
   filterEntriesByWindow,
   formatRelativeAge,
@@ -30,6 +31,7 @@ import {
 } from "./session-journal.js";
 import type {
   JournalDayBucket,
+  JournalHourBucket,
   JournalOrder,
   JournalTimeWindow,
   SessionJournalKind,
@@ -392,6 +394,74 @@ export function formatWorkspaceJournalByDay(record: WorkspaceJournalByDayRecord)
   ];
   for (const b of record.byDay) {
     lines.push(`  ${b.day} ×${b.count}`);
+  }
+  return lines;
+}
+
+export const WORKSPACE_JOURNAL_BY_HOUR_SCHEMA = "oh-my-cli.workspace-journal-by-hour" as const;
+export const WORKSPACE_JOURNAL_BY_HOUR_VERSION = 1 as const;
+
+/**
+ * Per-hour grouping of the merged workspace journal (Issue #656): when the
+ * kept set happened at hour granularity, never what it says — hour buckets
+ * and counts only. Same shape as the per-day grouping (#646), one level
+ * finer.
+ */
+export interface WorkspaceJournalByHourRecord {
+  schema: typeof WORKSPACE_JOURNAL_BY_HOUR_SCHEMA;
+  v: typeof WORKSPACE_JOURNAL_BY_HOUR_VERSION;
+  /** The workspace the grouping is scoped to, redacted + home-collapsed. */
+  workspace: string;
+  /** Sessions whose journals were merged. */
+  sessionsScanned: number;
+  /** Workspace sessions skipped because they are archived. */
+  sessionsSkippedArchived: number;
+  /** Per-UTC-hour buckets of the kept set, chronological, present hours only. */
+  byHour: JournalHourBucket[];
+  /** Entries kept after every filter and bound (sums with `byHour`). */
+  count: number;
+  /** Older entries dropped by the bound. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the per-hour grouping record for a workspace (Issue #656).
+ * Semantics are exactly `buildWorkspaceJournal`'s — same scoping, filters,
+ * and bounds — but the result carries hour buckets only, never entry
+ * contents. Bucketing fixes the order, so no newest-first option exists
+ * here.
+ */
+export function buildWorkspaceJournalByHour(
+  store: SessionStore,
+  opts: Omit<WorkspaceJournalOptions, "newestFirst">,
+): WorkspaceJournalByHourRecord {
+  const journal = buildWorkspaceJournal(store, opts);
+  return {
+    schema: WORKSPACE_JOURNAL_BY_HOUR_SCHEMA,
+    v: WORKSPACE_JOURNAL_BY_HOUR_VERSION,
+    workspace: journal.workspace,
+    sessionsScanned: journal.sessionsScanned,
+    sessionsSkippedArchived: journal.sessionsSkippedArchived,
+    byHour: bucketEntriesByHour(journal.entries),
+    count: journal.entries.length,
+    elided: journal.elided,
+    skipped: journal.skipped,
+  };
+}
+
+export function formatWorkspaceJournalByHour(record: WorkspaceJournalByHourRecord): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  if (record.count === 0) {
+    return [`0 event(s).${elidedNote}${skippedNote}`];
+  }
+  const lines = [
+    `${record.count} event(s) across ${record.byHour.length} hour(s).${elidedNote}${skippedNote}`,
+  ];
+  for (const b of record.byHour) {
+    lines.push(`  ${b.hour} ×${b.count}`);
   }
   return lines;
 }
