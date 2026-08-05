@@ -158,7 +158,7 @@ describe("Integration: workspace journal follow (--follow, Issue #684)", () => {
       baseEnv,
     );
     expect(res.code).toBe(2);
-    expect(res.stderr).toContain("--follow requires text output");
+    expect(res.stderr).toContain("--follow requires text or jsonl output");
     expect(res.stdout).toBe("");
   });
 

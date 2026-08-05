@@ -99,6 +99,7 @@ import {
   formatWorkspaceJournalCount,
   formatWorkspaceJournalSummary,
   journalEntryIdentity,
+  workspaceJournalEntryJsonLine,
   workspaceJournalEntryLine,
 } from "./workspace-journal.js";
 import type { WorkspaceJournalEntry, WorkspaceJournalRecord } from "./workspace-journal.js";
@@ -875,7 +876,7 @@ program
   )
   .option(
     "--output <format>",
-    "Output format for -p mode: text (default) or json (versioned NDJSON event stream)",
+    "Output format for -p mode: text (default) or json (versioned NDJSON event stream); report surfaces accept text|json, and --workspace-journal --follow also accepts jsonl (one JSON object per entry)",
     "text",
   )
   .option(
@@ -1189,8 +1190,16 @@ program
       // uncanonicalizable workspace or a bad format.
       if (opts.workspaceJournal) {
         const format = String(opts.output ?? "text");
-        if (format !== "text" && format !== "json") {
+        if (format !== "text" && format !== "json" && format !== "jsonl") {
           process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        // JSON-lines streaming is the follow-mode shape (Issue #686); the
+        // aggregated snapshot record keeps --output json.
+        if (format === "jsonl" && opts.follow !== true) {
+          process.stderr.write(
+            "Error: --output jsonl requires --follow (snapshots use --output json)\n",
+          );
           process.exit(2);
         }
         let kinds: ReadonlySet<SessionJournalKind> | undefined;
@@ -1230,7 +1239,7 @@ program
         if (opts.follow === true) {
           if (format === "json") {
             process.stderr.write(
-              "Error: --follow requires text output; --output json is not supported with --follow\n",
+              "Error: --follow requires text or jsonl output; --output json is not supported with --follow\n",
             );
             process.exit(2);
           }
@@ -1300,9 +1309,17 @@ program
             process.exit(2);
           }
           const relative = opts.relative === true;
-          process.stdout.write(
-            renderReportLines(formatWorkspaceJournal(snapshot, { relative }), opts.ascii),
-          );
+          if (format === "jsonl") {
+            // Streaming shape (Issue #686): one self-describing JSON object
+            // per entry in render order, flushed per record.
+            for (const entry of snapshot.entries) {
+              process.stdout.write(workspaceJournalEntryJsonLine(entry) + "\n");
+            }
+          } else {
+            process.stdout.write(
+              renderReportLines(formatWorkspaceJournal(snapshot, { relative }), opts.ascii),
+            );
+          }
           const stamp = (at: number): string =>
             relative ? formatRelativeAge(at, Date.now()) : new Date(at).toISOString();
           const timer = setInterval(() => {
@@ -1310,7 +1327,9 @@ program
             for (const entry of fresh) {
               seen.add(journalEntryIdentity(entry));
               process.stdout.write(
-                renderReportLines([workspaceJournalEntryLine(entry, stamp)], opts.ascii) + "\n",
+                format === "jsonl"
+                  ? workspaceJournalEntryJsonLine(entry) + "\n"
+                  : renderReportLines([workspaceJournalEntryLine(entry, stamp)], opts.ascii) + "\n",
               );
             }
           }, pollMs);
