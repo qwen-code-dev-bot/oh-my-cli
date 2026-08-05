@@ -25,12 +25,11 @@ describe("asciiSafe transformation (Issue #672)", () => {
     expect(asciiSafeLine("─".repeat(40))).toBe("-".repeat(40));
   });
 
-  it("leaves plain ASCII and non-decorative Unicode untouched", () => {
+  it("leaves plain ASCII and unrelated unicode untouched", () => {
     expect(asciiSafeLine("plain ascii 123")).toBe("plain ascii 123");
-    // Non-decorative unicode (e.g. semantic marks, user content) is content,
-    // never rewritten by the glyph map.
-    expect(asciiSafeLine("✓ done")).toBe("✓ done");
-    expect(asciiSafeLine("café")).toBe("café");
+    // Semantic marks are mapped by design since Issue #674 (covered by
+    // ascii-semantic.test.ts); unrelated unicode is content, never rewritten.
+    expect(asciiSafeLine("café ☃")).toBe("café ☃");
   });
 
   it("preserves line counts and is idempotent", () => {
