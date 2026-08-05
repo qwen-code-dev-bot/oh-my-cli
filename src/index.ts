@@ -3404,9 +3404,9 @@ program
           process.exit(1);
         }
         const picked = pickContinueSession(
-          // Archived sessions are retired from discovery (Issue #598): they
-          // are never picked by --continue, though --resume still works.
-          collectSessionSummaries(store).filter((s) => !s.archived),
+          // Discovery semantics (archived never picked, pinned preferred)
+          // live inside pickContinueSession itself (Issue #616).
+          collectSessionSummaries(store),
           workspaceTrustKey(opts.workspace),
         );
         if (!picked.ok) {
@@ -3419,7 +3419,7 @@ program
         }
         const modelNote = picked.model ? ` (model: ${redactSecrets(picked.model).text})` : "";
         process.stderr.write(
-          `Continuing session ${shortSessionId(picked.sessionId)}${modelNote} — most recent for this workspace\n`,
+          `Continuing session ${shortSessionId(picked.sessionId)}${modelNote} — selected for this workspace\n`,
         );
         continueResumeId = picked.sessionId;
       }
