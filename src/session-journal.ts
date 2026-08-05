@@ -81,12 +81,14 @@ const RELATIVE_UNIT_MS: Record<"s" | "m" | "h" | "d" | "w", number> = {
 /**
  * Parse one --since/--until value (Issue #634, extended by #652). Accepts
  * an ISO-8601 timestamp, a date-only value (a date-only --since means start
- * of day UTC and a date-only --until means end of day UTC 23:59:59.999), or
- * a relative spec resolved against the reference instant (read time):
- * `now`, or `<N><unit>` with units s/m/h/d/w meaning "N units ago"
+ * of day UTC and a date-only --until means end of day UTC 23:59:59.999), a
+ * calendar word (Issue #654) — `today` or `yesterday`, resolved to the
+ * start (for --since) or end (for --until) of the current or preceding UTC
+ * day — or a relative spec resolved against the reference instant (read
+ * time): `now`, or `<N><unit>` with units s/m/h/d/w meaning "N units ago"
  * (e.g. `2d` = two days before the reference). The reference instant is
- * injectable so relative resolution is deterministic under test. Throws with
- * a caller-ready message on anything unparseable so the CLI can fail closed
+ * injectable so resolution is deterministic under test. Throws with a
+ * caller-ready message on anything unparseable so the CLI can fail closed
  * before any output.
  */
 export function parseJournalTimestamp(
@@ -101,6 +103,12 @@ export function parseJournalTimestamp(
   }
   if (text === "now") {
     return reference;
+  }
+  if (text === "today" || text === "yesterday") {
+    const ref = new Date(reference);
+    const startOfToday = Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth(), ref.getUTCDate());
+    const startOfDay = text === "today" ? startOfToday : startOfToday - MS_PER_DAY;
+    return bound === "since" ? startOfDay : startOfDay + MS_PER_DAY - 1;
   }
   const relative = RELATIVE_OFFSET.exec(text);
   if (relative !== null) {
@@ -126,13 +134,13 @@ export function parseJournalTimestamp(
   // whole dates, so fail closed instead.
   if (/^\d{4}-\d{2}$/.test(text)) {
     throw new Error(
-      `Error: invalid --${bound} timestamp: "${raw}" (expected an ISO-8601 timestamp, a date YYYY-MM-DD, or a relative offset like 30s/45m/6h/2d/1w/now)`,
+      `Error: invalid --${bound} timestamp: "${raw}" (expected an ISO-8601 timestamp, a date YYYY-MM-DD, a relative offset like 30s/45m/6h/2d/1w/now, or today/yesterday)`,
     );
   }
   const parsed = Date.parse(text);
   if (Number.isNaN(parsed)) {
     throw new Error(
-      `Error: invalid --${bound} timestamp: "${raw}" (expected an ISO-8601 timestamp, a date YYYY-MM-DD, or a relative offset like 30s/45m/6h/2d/1w/now)`,
+      `Error: invalid --${bound} timestamp: "${raw}" (expected an ISO-8601 timestamp, a date YYYY-MM-DD, a relative offset like 30s/45m/6h/2d/1w/now, or today/yesterday)`,
     );
   }
   return parsed;

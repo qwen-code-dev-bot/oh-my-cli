@@ -603,11 +603,11 @@ program
   )
   .option(
     "--since <when>",
-    "With --session-journal/--workspace-journal: only show entries at or after this time — an ISO-8601 timestamp, a bare date YYYY-MM-DD (start of day UTC), or a relative offset that long ago (30s/45m/6h/2d/1w, or now)",
+    "With --session-journal/--workspace-journal: only show entries at or after this time — an ISO-8601 timestamp, a bare date YYYY-MM-DD (start of day UTC), a relative offset that long ago (30s/45m/6h/2d/1w, or now), or a calendar word (today/yesterday)",
   )
   .option(
     "--until <when>",
-    "With --session-journal/--workspace-journal: only show entries at or before this time — an ISO-8601 timestamp, a bare date YYYY-MM-DD (end of day UTC), or a relative offset that long ago (30s/45m/6h/2d/1w, or now)",
+    "With --session-journal/--workspace-journal: only show entries at or before this time — an ISO-8601 timestamp, a bare date YYYY-MM-DD (end of day UTC), a relative offset that long ago (30s/45m/6h/2d/1w, or now), or a calendar word (today/yesterday)",
   )
   .option(
     "--limit <n>",
