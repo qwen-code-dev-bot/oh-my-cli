@@ -31,6 +31,12 @@ const GLYPH_MAP: Record<string, string> = { "\u2500": "-", "\u00b7": "|", "\u00d
 function mapGlyphs(text: string): string {
   return text.replace(/[\u2500\u00b7\u00d7\u2014]/g, (ch) => GLYPH_MAP[ch]);
 }
+// The sessions overview prints a wall-clock relative age ("last active Ns
+// ago"); the two runs happen a second apart, so normalize that token before
+// comparing the two renderings.
+function normalizeWallClock(text: string): string {
+  return text.replace(/last active .*$/gm, "last active X");
+}
 
 describe("Integration: ASCII-safe output (--ascii, Issue #672)", () => {
   let homeDir: string;
@@ -76,8 +82,8 @@ describe("Integration: ASCII-safe output (--ascii, Issue #672)", () => {
     expect(ascii.code, `stderr: ${ascii.stderr}`).toBe(0);
     // ASCII output carries no non-ASCII characters at all.
     expect(NON_ASCII.test(ascii.stdout)).toBe(false);
-    // Content equality modulo the glyph map.
-    expect(mapGlyphs(plain.stdout)).toBe(ascii.stdout);
+    // Content equality modulo the glyph map (and wall-clock relative ages).
+    expect(normalizeWallClock(mapGlyphs(plain.stdout))).toBe(normalizeWallClock(ascii.stdout));
     // Same structure: identical line counts.
     expect(ascii.stdout.split("\n").length).toBe(plain.stdout.split("\n").length);
   }
