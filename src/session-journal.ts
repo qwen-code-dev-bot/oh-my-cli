@@ -1,0 +1,155 @@
+// Per-session durable event journal (Issue #618).
+//
+// The durable-state surfaces render one facet at a time (goal status, notes,
+// inspect card); nothing answers "how did this session get here?" in one
+// chronological view. This module assembles a read-only journal from state
+// that already carries timestamps: session creation (meta), goal transition
+// history, notes, and the pin/archive markers, plus a last-activity entry
+// from the transcript mtime.
+//
+// Guarantees follow the read-only family conventions: heal-free resolution
+// at the call site (corrupt transcripts are still journalable — markers and
+// readable history appear), redaction on every free-form value, honest
+// absence for unreadable sidecars (a corrupt goal or notes sidecar
+// contributes nothing, never guesses), deterministic ordering, and zero
+// mutation of the store.
+
+import fs from "node:fs";
+import type { SessionStore } from "./session.js";
+import { shortSessionId } from "./session-picker.js";
+import { redactSecrets } from "./permission-impact.js";
+import { goalHistoryForDisplay } from "./session-goal.js";
+import { readSessionNotes } from "./session-notes.js";
+
+export const SESSION_JOURNAL_SCHEMA = "oh-my-cli.session-journal" as const;
+export const SESSION_JOURNAL_VERSION = 1 as const;
+
+export type SessionJournalKind =
+  | "created"
+  | "goal"
+  | "note"
+  | "pinned"
+  | "archived"
+  | "last-activity";
+
+export interface SessionJournalEntry {
+  /** Epoch ms when the event happened. */
+  at: number;
+  kind: SessionJournalKind;
+  /** Human-readable, redacted detail for this event. */
+  detail: string;
+}
+
+export interface SessionJournalRecord {
+  schema: typeof SESSION_JOURNAL_SCHEMA;
+  v: typeof SESSION_JOURNAL_VERSION;
+  sessionId: string;
+  /** Transcript integrity at read time — honest context for the journal. */
+  integrity: "ok" | "partial" | "corrupt" | "missing";
+  /** Oldest first; ties break deterministically by kind, then detail. */
+  entries: SessionJournalEntry[];
+}
+
+function redact(text: string): string {
+  return redactSecrets(text).text;
+}
+
+/**
+ * Build the journal for one session. Returns an error string (not throwing)
+ * when the session is missing so the CLI can map it to a meaningful exit
+ * status. Reading never mutates the store.
+ */
+export function buildSessionJournal(
+  store: SessionStore,
+  id: string,
+): { journal: SessionJournalRecord } | { error: string } {
+  const integrity = store.integrity(id);
+  if (integrity.status === "missing") {
+    return { error: `no such session "${id}"` };
+  }
+
+  const entries: SessionJournalEntry[] = [];
+  const diag = store.loadWithDiagnostics(id);
+
+  if (typeof diag.meta?.createdAt === "number") {
+    entries.push({ at: diag.meta.createdAt, kind: "created", detail: "session created" });
+  }
+
+  // Goal transitions from the stored history. Unreadable/absent goal
+  // sidecars contribute nothing (honest absence). Legacy sidecars without a
+  // history array surface the single synthesized legacy entry.
+  const goalCheckpoint = store.readGoal(id);
+  for (const h of goalHistoryForDisplay(goalCheckpoint)) {
+    const label = h.objective === null ? "(cleared)" : redact(h.objective);
+    entries.push({
+      at: h.at,
+      kind: "goal",
+      detail: `${h.kind} · ${h.status ?? "—"} · ${label}`,
+    });
+  }
+
+  // Notes ledger; an unreadable sidecar contributes nothing.
+  const notesLoad = readSessionNotes(store, id);
+  if (!notesLoad.corrupt) {
+    for (const n of notesLoad.notes) {
+      entries.push({ at: n.at, kind: "note", detail: `note added · ${redact(n.text)}` });
+    }
+  }
+
+  const pinned = store.readPinned(id);
+  if (pinned !== null) {
+    entries.push({ at: pinned.at, kind: "pinned", detail: "pinned to the top of discovery" });
+  }
+
+  const archived = store.readArchived(id);
+  if (archived !== null) {
+    entries.push({ at: archived.at, kind: "archived", detail: "archived — retired from discovery" });
+  }
+
+  let lastModified: number | null = null;
+  try {
+    lastModified = fs.statSync(store.filePath(id)).mtimeMs;
+  } catch {
+    /* a vanished file contributes no last-activity entry */
+  }
+  if (lastModified !== null) {
+    entries.push({
+      at: Math.floor(lastModified),
+      kind: "last-activity",
+      detail: "transcript last modified",
+    });
+  }
+
+  // Chronological, oldest first; equal timestamps break deterministically
+  // by kind, then detail, so identical input always yields identical output.
+  entries.sort(
+    (a, b) => a.at - b.at || a.kind.localeCompare(b.kind) || a.detail.localeCompare(b.detail),
+  );
+
+  return {
+    journal: {
+      schema: SESSION_JOURNAL_SCHEMA,
+      v: SESSION_JOURNAL_VERSION,
+      sessionId: id,
+      integrity: integrity.status as SessionJournalRecord["integrity"],
+      entries,
+    },
+  };
+}
+
+export function formatSessionJournal(record: SessionJournalRecord): string[] {
+  const lines: string[] = [];
+  lines.push(`Session journal — ${shortSessionId(record.sessionId)} (${record.integrity})`);
+  lines.push("─".repeat(40));
+  lines.push("");
+  if (record.entries.length === 0) {
+    lines.push("No journal entries.");
+    return lines;
+  }
+  for (const e of record.entries) {
+    lines.push(`  ${new Date(e.at).toISOString()} · ${e.kind} · ${e.detail}`);
+  }
+  lines.push("");
+  lines.push(`${record.entries.length} event(s).`);
+  return lines;
+}
