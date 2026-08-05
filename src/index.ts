@@ -1432,8 +1432,10 @@ program
       // missing session, collision, or write error.
       if (opts.exportSession !== undefined) {
         const store = new SessionStore();
-        // Id-or-name targeting (#536).
-        const resolved = resolveSessionTarget(String(opts.exportSession), store);
+        // Id-or-name targeting (#536) via the heal-free resolver: the export
+        // is read-only and honest about integrity, so corrupt sessions are
+        // exportable (flagged) and nothing is ever quarantined here (#614).
+        const resolved = resolveArchiveTarget(String(opts.exportSession), store);
         if (!resolved.ok) {
           process.stderr.write(`Error: ${resolved.reason}\n`);
           process.exit(2);
