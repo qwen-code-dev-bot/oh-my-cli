@@ -625,7 +625,7 @@ program
   )
   .option(
     "--ascii",
-    "With the read-only report/journal surfaces: render text output ASCII-safe (decorative glyphs mapped to ASCII equivalents); JSON output is unchanged",
+    "With the read-only report/journal/session surfaces: render text output ASCII-safe (decorative and semantic glyphs mapped to ASCII equivalents); JSON output is unchanged",
   )
   .option(
     "--workspace-journal",
@@ -1558,7 +1558,7 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(stats) + "\n");
         } else {
-          process.stdout.write(formatSessionStats(stats).join("\n") + "\n");
+          process.stdout.write(renderReportLines(formatSessionStats(stats), opts.ascii));
         }
         process.exit(0);
       }
@@ -1736,7 +1736,7 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
-          process.stdout.write(formatSessionInspect(record).join("\n") + "\n");
+          process.stdout.write(renderReportLines(formatSessionInspect(record), opts.ascii));
         }
         process.exit(0);
       }
@@ -1797,7 +1797,7 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
-          process.stdout.write(formatSessionNotes(record).join("\n") + "\n");
+          process.stdout.write(renderReportLines(formatSessionNotes(record), opts.ascii));
         }
         process.exit(0);
       }
@@ -2053,7 +2053,7 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(built.diff) + "\n");
         } else {
-          process.stdout.write(formatSessionDiff(built.diff).join("\n") + "\n");
+          process.stdout.write(renderReportLines(formatSessionDiff(built.diff), opts.ascii));
         }
         process.exit(0);
       }
@@ -2097,7 +2097,7 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
-          process.stdout.write(formatSessionNotesSearch(record).join("\n") + "\n");
+          process.stdout.write(renderReportLines(formatSessionNotesSearch(record), opts.ascii));
         }
         process.exit(0);
       }
