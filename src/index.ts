@@ -76,14 +76,18 @@ import {
 import {
   buildWorkspaceJournal,
   buildWorkspaceJournalCount,
+  buildWorkspaceJournalSummary,
   formatWorkspaceJournal,
   formatWorkspaceJournalCount,
+  formatWorkspaceJournalSummary,
 } from "./workspace-journal.js";
 import {
   buildSessionJournal,
   buildSessionJournalCount,
+  buildSessionJournalSummary,
   formatSessionJournal,
   formatSessionJournalCount,
+  formatSessionJournalSummary,
 } from "./session-journal.js";
 import {
   JOURNAL_KINDS,
@@ -613,6 +617,10 @@ program
     "With --session-journal/--workspace-journal: print only how many entries the filters and bounds keep — counts only, never entry contents (add --output json for a versioned record)",
   )
   .option(
+    "--by-kind",
+    "With --session-journal/--workspace-journal: print a per-kind tally of the entries the filters and bounds keep — tallies only, never entry contents (add --output json for a versioned record)",
+  )
+  .option(
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
@@ -1044,6 +1052,34 @@ program
         } catch (err) {
           process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
           process.exit(2);
+        }
+        if (opts.byKind === true) {
+          // Per-kind summary mode (Issue #644): the same pipeline, but the
+          // output carries tallies only — never entry contents. Aggregation
+          // is order-independent, so --newest-first has no effect here. The
+          // flag is --by-kind because --summary already names the unattended
+          // run-summary surface.
+          let summaryRecord;
+          try {
+            summaryRecord = buildWorkspaceJournalSummary(new SessionStore(), {
+              workspace: String(opts.workspace),
+              kinds,
+              window,
+              limit,
+              skip,
+            });
+          } catch {
+            process.stderr.write(
+              `Error: cannot journal workspace "${redactHomePath(String(opts.workspace))}": its identity cannot be canonicalized\n`,
+            );
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(summaryRecord) + "\n");
+          } else {
+            process.stdout.write(formatWorkspaceJournalSummary(summaryRecord).join("\n") + "\n");
+          }
+          process.exit(0);
         }
         if (opts.count === true) {
           // Counts-only mode (Issue #642): the same pipeline, but the output
@@ -1493,6 +1529,29 @@ program
         if (!resolved.ok) {
           process.stderr.write(`Cannot read journal: ${resolved.reason}\n`);
           process.exit(2);
+        }
+        if (opts.byKind === true) {
+          // Per-kind summary mode (Issue #644): the same pipeline and
+          // resolution semantics, but the output carries tallies only —
+          // never entry contents. Aggregation is order-independent, so
+          // --newest-first has no effect here. The flag is --by-kind because
+          // --summary already names the unattended run-summary surface.
+          const summarized = buildSessionJournalSummary(store, resolved.sessionId, {
+            kinds,
+            window,
+            limit,
+            skip,
+          });
+          if ("error" in summarized) {
+            process.stderr.write(`Cannot read journal: ${summarized.error}\n`);
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(summarized.summary) + "\n");
+          } else {
+            process.stdout.write(formatSessionJournalSummary(summarized.summary).join("\n") + "\n");
+          }
+          process.exit(0);
         }
         if (opts.count === true) {
           // Counts-only mode (Issue #642): the same pipeline and resolution
