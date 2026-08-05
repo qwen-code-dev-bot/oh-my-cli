@@ -507,3 +507,102 @@ export function formatSessionJournalSummary(record: SessionJournalSummaryRecord)
   );
   return [`${record.count} event(s): ${parts.join(", ")}.${elidedNote}${skippedNote}`];
 }
+
+/** One per-UTC-day bucket of journal entries (Issue #646). */
+export interface JournalDayBucket {
+  /** The UTC calendar day, YYYY-MM-DD. */
+  day: string;
+  /** Kept entries whose timestamp falls on that day. */
+  count: number;
+}
+
+/**
+ * Bucket journal entries by UTC calendar day (Issue #646): chronological
+ * (oldest day first), containing only days present in the given sequence.
+ * Shared by the per-session journal (#618) and the workspace journal merge
+ * (#630).
+ */
+export function bucketEntriesByDay<T extends { at: number }>(
+  entries: readonly T[],
+): JournalDayBucket[] {
+  const counts = new Map<string, number>();
+  for (const e of entries) {
+    const day = new Date(e.at).toISOString().slice(0, 10);
+    counts.set(day, (counts.get(day) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([day, count]) => ({ day, count }));
+}
+
+export const SESSION_JOURNAL_BY_DAY_SCHEMA = "oh-my-cli.session-journal-by-day" as const;
+export const SESSION_JOURNAL_BY_DAY_VERSION = 1 as const;
+
+/**
+ * Per-day grouping of one session's journal (Issue #646): when the kept set
+ * happened, never what it says — day buckets and counts only, for reading
+ * the rhythm of a history without rendering it.
+ */
+export interface SessionJournalByDayRecord {
+  schema: typeof SESSION_JOURNAL_BY_DAY_SCHEMA;
+  v: typeof SESSION_JOURNAL_BY_DAY_VERSION;
+  sessionId: string;
+  /** Transcript integrity at read time — honest context for the grouping. */
+  integrity: "ok" | "partial" | "corrupt" | "missing";
+  /** Per-UTC-day buckets of the kept set, chronological, present days only. */
+  byDay: JournalDayBucket[];
+  /** Entries kept after every filter and bound (sums with `byDay`). */
+  count: number;
+  /** Older entries dropped by --limit (Issue #636); 0 without it. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the per-day grouping record for one session (Issue #646). Semantics
+ * are exactly `buildSessionJournal`'s — same pipeline, same heal-free
+ * resolution, same error string for a missing session — but the result
+ * carries day buckets only, never entry contents. Bucketing fixes the
+ * order, so no newest-first option exists here.
+ */
+export function buildSessionJournalByDay(
+  store: SessionStore,
+  id: string,
+  opts: {
+    kinds?: ReadonlySet<SessionJournalKind>;
+    window?: JournalTimeWindow;
+    skip?: number;
+    limit?: number;
+  } = {},
+): { byDay: SessionJournalByDayRecord } | { error: string } {
+  const built = buildSessionJournal(store, id, opts);
+  if ("error" in built) return { error: built.error };
+  return {
+    byDay: {
+      schema: SESSION_JOURNAL_BY_DAY_SCHEMA,
+      v: SESSION_JOURNAL_BY_DAY_VERSION,
+      sessionId: built.journal.sessionId,
+      integrity: built.journal.integrity,
+      byDay: bucketEntriesByDay(built.journal.entries),
+      count: built.journal.entries.length,
+      elided: built.journal.elided,
+      skipped: built.journal.skipped,
+    },
+  };
+}
+
+export function formatSessionJournalByDay(record: SessionJournalByDayRecord): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  if (record.count === 0) {
+    return [`0 event(s).${elidedNote}${skippedNote}`];
+  }
+  const lines = [
+    `${record.count} event(s) across ${record.byDay.length} day(s).${elidedNote}${skippedNote}`,
+  ];
+  for (const b of record.byDay) {
+    lines.push(`  ${b.day} ×${b.count}`);
+  }
+  return lines;
+}
