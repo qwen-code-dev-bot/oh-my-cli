@@ -50,6 +50,76 @@ export function filterEntriesByKind<T extends { kind: SessionJournalKind }>(
   return entries.filter((e) => kinds.has(e.kind));
 }
 
+/** Inclusive epoch-millisecond bounds for a journal time window (#634). */
+export interface JournalTimeWindow {
+  /** Inclusive lower bound on entry `at`; undefined means unbounded. */
+  since?: number;
+  /** Inclusive upper bound on entry `at`; undefined means unbounded. */
+  until?: number;
+}
+
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+const MS_PER_DAY = 86_400_000;
+
+/**
+ * Parse one --since/--until value (Issue #634). Accepts an ISO-8601
+ * timestamp or a date-only value: a date-only --since means start of day
+ * UTC and a date-only --until means end of day UTC (23:59:59.999). Throws
+ * with a caller-ready message on anything unparseable so the CLI can fail
+ * closed before any output.
+ */
+export function parseJournalTimestamp(raw: string, bound: "since" | "until"): number {
+  const text = raw.trim();
+  if (text === "") {
+    throw new Error(`Error: --${bound} must not be blank`);
+  }
+  const dateOnly = DATE_ONLY.exec(text);
+  if (dateOnly !== null) {
+    const year = Number(dateOnly[1]);
+    const month = Number(dateOnly[2]);
+    const day = Number(dateOnly[3]);
+    const start = Date.UTC(year, month - 1, day);
+    // Date.UTC rolls impossible components into the next month; reject that.
+    const check = new Date(start);
+    if (check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) {
+      throw new Error(`Error: invalid --${bound} timestamp: "${raw}" (no such date)`);
+    }
+    return bound === "since" ? start : start + MS_PER_DAY - 1;
+  }
+  // Year-month alone would silently mean "only the first instant of the
+  // month's first day" for --until; the contract is full timestamps or
+  // whole dates, so fail closed instead.
+  if (/^\d{4}-\d{2}$/.test(text)) {
+    throw new Error(
+      `Error: invalid --${bound} timestamp: "${raw}" (expected an ISO-8601 timestamp or a date YYYY-MM-DD)`,
+    );
+  }
+  const parsed = Date.parse(text);
+  if (Number.isNaN(parsed)) {
+    throw new Error(
+      `Error: invalid --${bound} timestamp: "${raw}" (expected an ISO-8601 timestamp or a date YYYY-MM-DD)`,
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Filter journal entries to an inclusive time window (Issue #634). Undefined
+ * means "no window" (all entries, order preserved). Shared by the
+ * per-session journal (#618) and the workspace journal merge (#630).
+ */
+export function filterEntriesByWindow<T extends { at: number }>(
+  entries: readonly T[],
+  window: JournalTimeWindow | undefined,
+): T[] {
+  if (window === undefined) return [...entries];
+  return entries.filter(
+    (e) =>
+      (window.since === undefined || e.at >= window.since) &&
+      (window.until === undefined || e.at <= window.until),
+  );
+}
+
 export interface SessionJournalEntry {
   /** Epoch ms when the event happened. */
   at: number;
@@ -148,12 +218,13 @@ export function buildSessionJournalEntries(
  * Build the journal for one session. Returns an error string (not throwing)
  * when the session is missing so the CLI can map it to a meaningful exit
  * status. Reading never mutates the store. An optional kind set filters the
- * entries (Issue #632); without it the journal is unchanged.
+ * entries (Issue #632) and an optional inclusive time window bounds them
+ * (Issue #634); without either the journal is unchanged.
  */
 export function buildSessionJournal(
   store: SessionStore,
   id: string,
-  opts: { kinds?: ReadonlySet<SessionJournalKind> } = {},
+  opts: { kinds?: ReadonlySet<SessionJournalKind>; window?: JournalTimeWindow } = {},
 ): { journal: SessionJournalRecord } | { error: string } {
   const integrity = store.integrity(id);
   if (integrity.status === "missing") {
@@ -165,7 +236,10 @@ export function buildSessionJournal(
       v: SESSION_JOURNAL_VERSION,
       sessionId: id,
       integrity: integrity.status as SessionJournalRecord["integrity"],
-      entries: filterEntriesByKind(buildSessionJournalEntries(store, id), opts.kinds),
+      entries: filterEntriesByWindow(
+        filterEntriesByKind(buildSessionJournalEntries(store, id), opts.kinds),
+        opts.window,
+      ),
     },
   };
 }

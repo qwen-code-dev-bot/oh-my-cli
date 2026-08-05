@@ -20,8 +20,8 @@ import { shortSessionId } from "./session-picker.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { workspaceTrustKey } from "./folder-trust.js";
 import { buildSessionJournalEntries } from "./session-journal.js";
-import { filterEntriesByKind } from "./session-journal.js";
-import type { SessionJournalKind } from "./session-journal.js";
+import { filterEntriesByKind, filterEntriesByWindow } from "./session-journal.js";
+import type { JournalTimeWindow, SessionJournalKind } from "./session-journal.js";
 
 export const WORKSPACE_JOURNAL_SCHEMA = "oh-my-cli.workspace-journal" as const;
 export const WORKSPACE_JOURNAL_VERSION = 1 as const;
@@ -63,6 +63,8 @@ export interface WorkspaceJournalOptions {
   maxEntries?: number;
   /** Entry-kind filter (Issue #632); undefined means no filter. */
   kinds?: ReadonlySet<SessionJournalKind>;
+  /** Inclusive time window (Issue #634); undefined means no window. */
+  window?: JournalTimeWindow;
 }
 
 export function buildWorkspaceJournal(
@@ -117,9 +119,11 @@ export function buildWorkspaceJournal(
   );
 
   // Keep the newest entries; elide the older tail with a truthful count.
-  // The kind filter (Issue #632) applies before the bound, so elision counts
-  // reflect the filtered set.
-  const filtered = filterEntriesByKind(merged, opts.kinds);
+  // The time window (Issue #634) and the kind filter (Issue #632) apply
+  // before the bound, so elision counts reflect the filtered set. Scoping
+  // and archived-skipping already happened during the merge above.
+  const windowed = filterEntriesByWindow(merged, opts.window);
+  const filtered = filterEntriesByKind(windowed, opts.kinds);
   const elided = Math.max(0, filtered.length - maxEntries);
   const entries = filtered.slice(elided);
 

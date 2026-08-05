@@ -75,8 +75,8 @@ import {
 } from "./stale-sessions.js";
 import { buildWorkspaceJournal, formatWorkspaceJournal } from "./workspace-journal.js";
 import { buildSessionJournal, formatSessionJournal } from "./session-journal.js";
-import { JOURNAL_KINDS } from "./session-journal.js";
-import type { SessionJournalKind } from "./session-journal.js";
+import { JOURNAL_KINDS, parseJournalTimestamp } from "./session-journal.js";
+import type { JournalTimeWindow, SessionJournalKind } from "./session-journal.js";
 import { buildSessionDiff, formatSessionDiff } from "./session-diff.js";
 import { searchSessionNotes, formatSessionNotesSearch } from "./session-notes-search.js";
 import type { SessionNotesSearchScope } from "./session-notes-search.js";
@@ -320,6 +320,23 @@ function parseJournalKinds(raw: unknown): ReadonlySet<SessionJournalKind> | unde
   }
   return new Set(requested as SessionJournalKind[]);
 }
+
+// Parse the --since/--until journal time window (Issue #634). Undefined
+// when neither bound is given; blank, unparseable, or inverted bounds throw
+// so the call site can fail closed before any output.
+function parseJournalWindow(sinceRaw: unknown, untilRaw: unknown): JournalTimeWindow | undefined {
+  if (sinceRaw === undefined && untilRaw === undefined) return undefined;
+  const since =
+    sinceRaw === undefined ? undefined : parseJournalTimestamp(String(sinceRaw), "since");
+  const until =
+    untilRaw === undefined ? undefined : parseJournalTimestamp(String(untilRaw), "until");
+  if (since !== undefined && until !== undefined && since > until) {
+    throw new Error(
+      `Error: --since must not be after --until (${new Date(since).toISOString()} > ${new Date(until).toISOString()})`,
+    );
+  }
+  return { since, until };
+}
 process.on("SIGINT", defaultSigintHandler);
 
 // Resolve the one-shot fallback model override (Issue #590): the CLI flag
@@ -555,6 +572,14 @@ program
   .option(
     "--kind <kind...>",
     "With --session-journal/--workspace-journal: only show entries of these kinds (created, goal, note, pinned, archived, last-activity)",
+  )
+  .option(
+    "--since <iso>",
+    "With --session-journal/--workspace-journal: only show entries at or after this ISO-8601 timestamp (a bare date YYYY-MM-DD means start of day UTC)",
+  )
+  .option(
+    "--until <iso>",
+    "With --session-journal/--workspace-journal: only show entries at or before this ISO-8601 timestamp (a bare date YYYY-MM-DD means end of day UTC)",
   )
   .option(
     "--filter <text>",
@@ -968,11 +993,19 @@ program
           process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
           process.exit(2);
         }
+        let window: JournalTimeWindow | undefined;
+        try {
+          window = parseJournalWindow(opts.since, opts.until);
+        } catch (err) {
+          process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+          process.exit(2);
+        }
         let record;
         try {
           record = buildWorkspaceJournal(new SessionStore(), {
             workspace: String(opts.workspace),
             kinds,
+            window,
           });
         } catch {
           process.stderr.write(
@@ -1360,13 +1393,20 @@ program
           process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
           process.exit(2);
         }
+        let window: JournalTimeWindow | undefined;
+        try {
+          window = parseJournalWindow(opts.since, opts.until);
+        } catch (err) {
+          process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+          process.exit(2);
+        }
         const store = new SessionStore();
         const resolved = resolveArchiveTarget(String(opts.sessionJournal), store);
         if (!resolved.ok) {
           process.stderr.write(`Cannot read journal: ${resolved.reason}\n`);
           process.exit(2);
         }
-        const built = buildSessionJournal(store, resolved.sessionId, { kinds });
+        const built = buildSessionJournal(store, resolved.sessionId, { kinds, window });
         if ("error" in built) {
           process.stderr.write(`Cannot read journal: ${built.error}\n`);
           process.exit(2);
