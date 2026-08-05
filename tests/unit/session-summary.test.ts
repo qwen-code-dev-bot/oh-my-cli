@@ -354,6 +354,132 @@ describe("session summary: pickContinueSession (Issue #513)", () => {
   });
 });
 
+describe("session summary: pickContinueSession discovery semantics (Issue #616)", () => {
+  const mk = (over: Partial<SessionSummary>): SessionSummary => ({
+    id: "x",
+    messageCount: 0,
+    userTurns: 0,
+    assistantTurns: 0,
+    toolCalls: 0,
+    totalChars: 0,
+    approxTokens: 0,
+    model: "m",
+    workspace: "/w",
+    createdAt: 0,
+    lastModified: 0,
+    ageMs: 0,
+    corrupt: false,
+    archived: false,
+    pinned: false,
+    ...over,
+  });
+
+  const keyOf = (p: string): string => (p.startsWith("/ws-a") ? "key-a" : `key:${p}`);
+
+  it("never picks an archived session, even the newest match", () => {
+    const picked = pickContinueSession(
+      [
+        mk({ id: "archived-newest", workspace: "/ws-a/project", archived: true }),
+        mk({ id: "healthy-old", workspace: "/ws-a/project" }),
+      ],
+      "key-a",
+      keyOf,
+    );
+    expect(picked).toEqual({
+      ok: true,
+      sessionId: "healthy-old",
+      workspace: "/ws-a/project",
+      model: "m",
+    });
+  });
+
+  it("reports no-session when the only match is archived", () => {
+    const picked = pickContinueSession(
+      [mk({ id: "only-archived", workspace: "/ws-a/project", archived: true })],
+      "key-a",
+      keyOf,
+    );
+    expect(picked).toEqual({ ok: false, reason: "no-session" });
+  });
+
+  it("unarchiving restores eligibility", () => {
+    const archived = mk({ id: "s", workspace: "/ws-a/project", archived: true });
+    expect(pickContinueSession([archived], "key-a", keyOf).ok).toBe(false);
+    const restored = mk({ id: "s", workspace: "/ws-a/project", archived: false });
+    const picked = pickContinueSession([restored], "key-a", keyOf);
+    expect(picked.ok).toBe(true);
+    if (picked.ok) expect(picked.sessionId).toBe("s");
+  });
+
+  it("prefers a pinned older session over a newer unpinned one", () => {
+    const picked = pickContinueSession(
+      [
+        mk({ id: "newer-unpinned", workspace: "/ws-a/project" }),
+        mk({ id: "older-pinned", workspace: "/ws-a/project", pinned: true }),
+      ],
+      "key-a",
+      keyOf,
+    );
+    expect(picked.ok).toBe(true);
+    if (picked.ok) expect(picked.sessionId).toBe("older-pinned");
+  });
+
+  it("among several pinned candidates the most recently modified wins", () => {
+    const picked = pickContinueSession(
+      [
+        mk({ id: "pinned-newest", workspace: "/ws-a/project", pinned: true }),
+        mk({ id: "pinned-older", workspace: "/ws-a/project", pinned: true }),
+        mk({ id: "unpinned", workspace: "/ws-a/project" }),
+      ],
+      "key-a",
+      keyOf,
+    );
+    expect(picked.ok).toBe(true);
+    if (picked.ok) expect(picked.sessionId).toBe("pinned-newest");
+  });
+
+  it("unpinning restores pure recency", () => {
+    const summaries = [
+      mk({ id: "newer", workspace: "/ws-a/project" }),
+      mk({ id: "older", workspace: "/ws-a/project" }),
+    ];
+    const picked = pickContinueSession(summaries, "key-a", keyOf);
+    expect(picked.ok).toBe(true);
+    if (picked.ok) expect(picked.sessionId).toBe("newer");
+  });
+
+  it("archive prevails over pinning", () => {
+    const picked = pickContinueSession(
+      [
+        mk({ id: "pinned-but-archived", workspace: "/ws-a/project", pinned: true, archived: true }),
+        mk({ id: "plain", workspace: "/ws-a/project" }),
+      ],
+      "key-a",
+      keyOf,
+    );
+    expect(picked.ok).toBe(true);
+    if (picked.ok) expect(picked.sessionId).toBe("plain");
+  });
+
+  it("a corrupt-and-archived session counts toward neither pick nor only-corrupt", () => {
+    const picked = pickContinueSession(
+      [mk({ id: "corrupt-archived", workspace: "/ws-a/project", corrupt: true, archived: true })],
+      "key-a",
+      keyOf,
+    );
+    expect(picked).toEqual({ ok: false, reason: "no-session" });
+  });
+
+  it("pinning never overrides workspace scope", () => {
+    const picked = pickContinueSession(
+      [mk({ id: "foreign-pinned", workspace: "/srv/elsewhere", pinned: true })],
+      "key-a",
+      keyOf,
+    );
+    expect(picked).toEqual({ ok: false, reason: "no-session" });
+  });
+});
+
 describe("session summary: sessionListRecord (Issue #542)", () => {
   const mk = (over: Partial<SessionSummary>): SessionSummary => ({
     id: "01234567-89ab-cdef-0123-456789abcdef",

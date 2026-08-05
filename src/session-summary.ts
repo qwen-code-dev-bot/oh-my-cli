@@ -121,17 +121,24 @@ export type ContinuePickResult =
 // summary list (collectSessionSummaries guarantees the ordering). A session
 // matches when its declared workspace collapses to the same canonical workspace
 // identity as the current one (symlink aliases and linked git worktrees share
-// their parent's identity). Corrupt matches are skipped but remembered: when
-// nothing healthy matches, reporting "only corrupt" is more actionable than
-// "none found". Sessions without workspace metadata never match. `keyOf` is
-// injectable for deterministic tests; it defaults to the folder-trust workspace
-// key.
+// their parent's identity). Discovery semantics apply exactly as in the
+// listing surfaces (Issue #616, completing the #598/#610 story): archived
+// sessions are never picked (archive prevails over pinning), and pinned
+// sessions take precedence — the most recently modified pinned candidate wins
+// when any exists, otherwise the most recent unpinned candidate. Corrupt
+// matches are skipped but remembered: when nothing healthy matches, reporting
+// "only corrupt" is more actionable than "none found" (a corrupt-and-archived
+// session is fully retired from discovery, so it counts toward neither).
+// Sessions without workspace metadata never match. `keyOf` is injectable for
+// deterministic tests; it defaults to the folder-trust workspace key.
 export function pickContinueSession(
   summaries: readonly SessionSummary[],
   currentKey: string,
   keyOf: (workspacePath: string) => string = workspaceTrustKey,
 ): ContinuePickResult {
   let corruptMatch = false;
+  let pinnedPick: SessionSummary | null = null;
+  let recencyPick: SessionSummary | null = null;
   for (const s of summaries) {
     if (!s.workspace) continue;
     let key: string;
@@ -141,15 +148,27 @@ export function pickContinueSession(
       continue;
     }
     if (key !== currentKey) continue;
+    if (s.archived) continue;
     if (s.corrupt) {
       corruptMatch = true;
       continue;
     }
+    // Summaries arrive most-recent-first, so the first pinned candidate seen
+    // is the newest pinned one, and the first unpinned candidate is the
+    // plain recency pick.
+    if (s.pinned) {
+      if (pinnedPick === null) pinnedPick = s;
+    } else if (recencyPick === null) {
+      recencyPick = s;
+    }
+  }
+  const chosen = pinnedPick ?? recencyPick;
+  if (chosen !== null) {
     return {
       ok: true,
-      sessionId: s.id,
-      ...(s.workspace ? { workspace: s.workspace } : {}),
-      ...(s.model ? { model: s.model } : {}),
+      sessionId: chosen.id,
+      ...(chosen.workspace ? { workspace: chosen.workspace } : {}),
+      ...(chosen.model ? { model: chosen.model } : {}),
     };
   }
   return corruptMatch ? { ok: false, reason: "only-corrupt" } : { ok: false, reason: "no-session" };
