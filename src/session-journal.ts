@@ -37,6 +37,15 @@ export const JOURNAL_KINDS = [
 export type SessionJournalKind = (typeof JOURNAL_KINDS)[number];
 
 /**
+ * Reading direction for rendered journal entries (Issue #640). Journals
+ * default to oldest-first ("how did this session get here?"); newest-first
+ * is the explicit backward-reading mode.
+ */
+export const JOURNAL_ORDERS = ["oldest-first", "newest-first"] as const;
+
+export type JournalOrder = (typeof JOURNAL_ORDERS)[number];
+
+/**
  * Filter journal entries by kind (Issue #632). Undefined or an empty set
  * means "no filter" (all entries, order preserved); otherwise only entries
  * whose kind is in the set appear. Shared by the per-session journal (#618)
@@ -193,12 +202,17 @@ export interface SessionJournalRecord {
   sessionId: string;
   /** Transcript integrity at read time — honest context for the journal. */
   integrity: "ok" | "partial" | "corrupt" | "missing";
-  /** Oldest first; ties break deterministically by kind, then detail. */
+  /**
+   * Ordered per the record's `order` field; ties always broke
+   * deterministically by kind, then detail, before ordering.
+   */
   entries: SessionJournalEntry[];
   /** Older entries dropped by --limit (Issue #636); 0 without it. */
   elided: number;
   /** Newer entries set aside by --skip (Issue #638); 0 without it. */
   skipped: number;
+  /** Rendering direction (Issue #640); oldest-first unless --newest-first. */
+  order: JournalOrder;
 }
 
 function redact(text: string): string {
@@ -284,7 +298,9 @@ export function buildSessionJournalEntries(
  * entries (Issue #632), an optional inclusive time window bounds them
  * (Issue #634), an optional skip sets aside the newest entries, and an
  * optional limit keeps only the newest of what remains (Issue #636/#638);
- * without any of these the journal is unchanged.
+ * without any of these the journal is unchanged. An optional newest-first
+ * flag (Issue #640) flips the rendering direction of the final kept set
+ * only — every filter and bound applies exactly as in oldest-first mode.
  */
 export function buildSessionJournal(
   store: SessionStore,
@@ -294,6 +310,7 @@ export function buildSessionJournal(
     window?: JournalTimeWindow;
     skip?: number;
     limit?: number;
+    newestFirst?: boolean;
   } = {},
 ): { journal: SessionJournalRecord } | { error: string } {
   const integrity = store.integrity(id);
@@ -308,15 +325,17 @@ export function buildSessionJournal(
   // the remainder (Issue #636), so elision counts reflect the skip-remainder.
   const skippedAside = applyJournalSkip(filtered, opts.skip);
   const limited = applyJournalLimit(skippedAside.entries, opts.limit);
+  const order: JournalOrder = opts.newestFirst === true ? "newest-first" : "oldest-first";
   return {
     journal: {
       schema: SESSION_JOURNAL_SCHEMA,
       v: SESSION_JOURNAL_VERSION,
       sessionId: id,
       integrity: integrity.status as SessionJournalRecord["integrity"],
-      entries: limited.entries,
+      entries: order === "newest-first" ? [...limited.entries].reverse() : limited.entries,
       elided: limited.elided,
       skipped: skippedAside.skipped,
+      order,
     },
   };
 }
