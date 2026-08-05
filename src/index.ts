@@ -68,6 +68,7 @@ import {
   SESSION_NOTES_MAX,
 } from "./session-notes.js";
 import { buildSessionsOverviewRecord, formatSessionsOverview } from "./sessions-overview.js";
+import { buildSessionJournal, formatSessionJournal } from "./session-journal.js";
 import { searchSessionNotes, formatSessionNotesSearch } from "./session-notes-search.js";
 import { searchSessions, formatSessionSearch } from "./session-search.js";
 import type { SessionSearchScope } from "./session-search.js";
@@ -547,6 +548,10 @@ program
   .option(
     "--search-notes <text>",
     "Search every session's durable notes for the text (case-insensitive substring; read-only; corrupt sessions included, archived skipped; add --output json for a versioned record) and exit",
+  )
+  .option(
+    "--session-journal <id-or-name>",
+    "Show a session's read-only durable event journal (creation, goal transitions, notes, pin/archive markers, last activity; chronological; add --output json for a versioned record), by exact id or user-owned name, and exit",
   )
   .option("--turn-history <id-or-name>", "Show a read-only, per-turn change provenance view for a session from its durable turn checkpoints, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--memory-add <text>", "Record a durable workspace memory (manual; secrets redacted before persistence) and exit")
@@ -1215,6 +1220,37 @@ program
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
           process.stdout.write(formatSessionNotes(record).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Session-journal mode (Issue #618): one read-only chronological
+      // journal assembled from the durable state — creation, goal
+      // transitions, notes, pin/archive markers, and last transcript
+      // activity. Heal-free resolution: corrupt transcripts are journalable
+      // (markers and readable history appear); the store is never mutated.
+      // Exits 0 on success, 2 on resolution failure or a bad format.
+      if (opts.sessionJournal !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const resolved = resolveArchiveTarget(String(opts.sessionJournal), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Cannot read journal: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const built = buildSessionJournal(store, resolved.sessionId);
+        if ("error" in built) {
+          process.stderr.write(`Cannot read journal: ${built.error}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(built.journal) + "\n");
+        } else {
+          process.stdout.write(formatSessionJournal(built.journal).join("\n") + "\n");
         }
         process.exit(0);
       }
