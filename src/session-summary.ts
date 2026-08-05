@@ -11,6 +11,7 @@ import fs from "node:fs";
 import { redactSecrets } from "./permission-impact.js";
 import { workspaceTrustKey } from "./folder-trust.js";
 import type { SessionStore } from "./session.js";
+import { readSessionNotes } from "./session-notes.js";
 
 export interface SessionSummary {
   id: string;
@@ -36,6 +37,8 @@ export interface SessionSummary {
   pinned: boolean;
   /** Epoch ms when the session was pinned; present only when pinned. */
   pinnedAt?: number;
+  /** Durable notes entries (Issue #624); 0 when absent or unreadable. */
+  noteCount: number;
 }
 
 export interface SessionSummaryOptions {
@@ -105,6 +108,12 @@ function summarize(store: SessionStore, id: string, now: number): SessionSummary
     ...((): { pinned: boolean; pinnedAt?: number } => {
       const pinned = store.readPinned(id);
       return pinned !== null ? { pinned: true, pinnedAt: pinned.at } : { pinned: false };
+    })(),
+    // Durable notes presence (Issue #624): an unreadable sidecar contributes
+    // nothing (honest absence), matching the inspect/journal semantics.
+    ...((): { noteCount: number } => {
+      const notes = readSessionNotes(store, id);
+      return { noteCount: notes.corrupt ? 0 : notes.notes.length };
     })(),
   };
 }
@@ -206,6 +215,8 @@ export interface SessionListEntry {
   pinned?: boolean;
   /** Epoch ms when the session was pinned; present only when pinned. */
   pinnedAt?: number;
+  /** Durable notes count (Issue #624); present only when the session has notes. */
+  noteCount?: number;
 }
 
 export interface SessionListRecord {
@@ -336,6 +347,7 @@ export function sessionListRecord(
       ...(s.pinned
         ? { pinned: true, ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}) }
         : {}),
+      ...(s.noteCount > 0 ? { noteCount: s.noteCount } : {}),
     })),
     ...(scope !== undefined
       ? {
@@ -409,11 +421,14 @@ function formatSessionLines(s: SessionSummary): string[] {
   // Pinned sessions are flagged where they render (Issue #610); their
   // top-of-list position comes from orderSummariesPinnedFirst.
   const pinnedFlag = s.pinned ? "  (pinned)" : "";
+  // Durable notes presence (Issue #624): counts only, never content.
+  const notesFlag =
+    s.noteCount > 0 ? `  (${s.noteCount} note${s.noteCount === 1 ? "" : "s"})` : "";
   // The user-owned name (#249) renders next to the id (Issue #530), redacted
   // exactly like the picker renders it — so the discovery surface and the
   // resume surfaces agree.
   const namePart = s.name ? `  "${redact(s.name)}"` : "";
-  const head = `  ${symbol} ${s.id}${namePart}${flag}${archivedFlag}${pinnedFlag}`;
+  const head = `  ${symbol} ${s.id}${namePart}${flag}${archivedFlag}${pinnedFlag}${notesFlag}`;
   const provenance = `model ${redact(s.model)}  ·  repo ${redactPath(s.workspace)}`;
   const usage =
     `${s.messageCount} msgs, ${s.userTurns + s.assistantTurns} turns, ` +
