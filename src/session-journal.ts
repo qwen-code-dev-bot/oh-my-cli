@@ -421,3 +421,89 @@ export function formatSessionJournalCount(record: SessionJournalCountRecord): st
   const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
   return [`${record.count} event(s).${elidedNote}${skippedNote}`];
 }
+
+/**
+ * Tally journal entries by kind (Issue #644): a partial map over the closed
+ * taxonomy, in fixed taxonomy order, containing only kinds present in the
+ * given sequence. Shared by the per-session journal (#618) and the workspace
+ * journal merge (#630).
+ */
+export function tallyEntriesByKind<T extends { kind: SessionJournalKind }>(
+  entries: readonly T[],
+): Partial<Record<SessionJournalKind, number>> {
+  const byKind: Partial<Record<SessionJournalKind, number>> = {};
+  for (const kind of JOURNAL_KINDS) {
+    const n = entries.reduce((acc, e) => (e.kind === kind ? acc + 1 : acc), 0);
+    if (n > 0) byKind[kind] = n;
+  }
+  return byKind;
+}
+
+export const SESSION_JOURNAL_SUMMARY_SCHEMA = "oh-my-cli.session-journal-summary" as const;
+export const SESSION_JOURNAL_SUMMARY_VERSION = 1 as const;
+
+/**
+ * Per-kind summary of one session's journal (Issue #644): the shape of the
+ * kept set after every filter and bound, never entry contents — for reading
+ * what a history is made of without rendering it.
+ */
+export interface SessionJournalSummaryRecord {
+  schema: typeof SESSION_JOURNAL_SUMMARY_SCHEMA;
+  v: typeof SESSION_JOURNAL_SUMMARY_VERSION;
+  sessionId: string;
+  /** Transcript integrity at read time — honest context for the summary. */
+  integrity: "ok" | "partial" | "corrupt" | "missing";
+  /** Per-kind tallies of the kept set, taxonomy order, present kinds only. */
+  byKind: Partial<Record<SessionJournalKind, number>>;
+  /** Entries kept after every filter and bound (sums with `byKind`). */
+  count: number;
+  /** Older entries dropped by --limit (Issue #636); 0 without it. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the per-kind summary record for one session (Issue #644). Semantics
+ * are exactly `buildSessionJournal`'s — same pipeline, same heal-free
+ * resolution, same error string for a missing session — but the result
+ * carries tallies only, never entry contents. Aggregation is
+ * order-independent, so no newest-first option exists here.
+ */
+export function buildSessionJournalSummary(
+  store: SessionStore,
+  id: string,
+  opts: {
+    kinds?: ReadonlySet<SessionJournalKind>;
+    window?: JournalTimeWindow;
+    skip?: number;
+    limit?: number;
+  } = {},
+): { summary: SessionJournalSummaryRecord } | { error: string } {
+  const built = buildSessionJournal(store, id, opts);
+  if ("error" in built) return { error: built.error };
+  return {
+    summary: {
+      schema: SESSION_JOURNAL_SUMMARY_SCHEMA,
+      v: SESSION_JOURNAL_SUMMARY_VERSION,
+      sessionId: built.journal.sessionId,
+      integrity: built.journal.integrity,
+      byKind: tallyEntriesByKind(built.journal.entries),
+      count: built.journal.entries.length,
+      elided: built.journal.elided,
+      skipped: built.journal.skipped,
+    },
+  };
+}
+
+export function formatSessionJournalSummary(record: SessionJournalSummaryRecord): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  if (record.count === 0) {
+    return [`0 event(s).${elidedNote}${skippedNote}`];
+  }
+  const parts = JOURNAL_KINDS.filter((k) => record.byKind[k] !== undefined).map(
+    (k) => `${k} ×${record.byKind[k]}`,
+  );
+  return [`${record.count} event(s): ${parts.join(", ")}.${elidedNote}${skippedNote}`];
+}

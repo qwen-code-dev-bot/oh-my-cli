@@ -19,8 +19,13 @@ import type { SessionStore } from "./session.js";
 import { shortSessionId } from "./session-picker.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { workspaceTrustKey } from "./folder-trust.js";
-import { buildSessionJournalEntries } from "./session-journal.js";
-import { applyJournalSkip, filterEntriesByKind, filterEntriesByWindow } from "./session-journal.js";
+import { buildSessionJournalEntries, JOURNAL_KINDS } from "./session-journal.js";
+import {
+  applyJournalSkip,
+  filterEntriesByKind,
+  filterEntriesByWindow,
+  tallyEntriesByKind,
+} from "./session-journal.js";
 import type { JournalOrder, JournalTimeWindow, SessionJournalKind } from "./session-journal.js";
 
 export const WORKSPACE_JOURNAL_SCHEMA = "oh-my-cli.workspace-journal" as const;
@@ -247,4 +252,67 @@ export function formatWorkspaceJournalCount(record: WorkspaceJournalCountRecord)
   const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
   const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
   return [`${record.count} event(s).${elidedNote}${skippedNote}`];
+}
+
+export const WORKSPACE_JOURNAL_SUMMARY_SCHEMA = "oh-my-cli.workspace-journal-summary" as const;
+export const WORKSPACE_JOURNAL_SUMMARY_VERSION = 1 as const;
+
+/**
+ * Per-kind summary of the merged workspace journal (Issue #644): the shape
+ * of the kept set after scoping and every filter/bound, never entry contents
+ * — for reading what a workspace's recent history is made of.
+ */
+export interface WorkspaceJournalSummaryRecord {
+  schema: typeof WORKSPACE_JOURNAL_SUMMARY_SCHEMA;
+  v: typeof WORKSPACE_JOURNAL_SUMMARY_VERSION;
+  /** The workspace the summary is scoped to, redacted + home-collapsed. */
+  workspace: string;
+  /** Sessions whose journals were merged. */
+  sessionsScanned: number;
+  /** Workspace sessions skipped because they are archived. */
+  sessionsSkippedArchived: number;
+  /** Per-kind tallies of the kept set, taxonomy order, present kinds only. */
+  byKind: Partial<Record<SessionJournalKind, number>>;
+  /** Entries kept after every filter and bound (sums with `byKind`). */
+  count: number;
+  /** Older entries dropped by the bound. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the per-kind summary record for a workspace (Issue #644). Semantics
+ * are exactly `buildWorkspaceJournal`'s — same scoping, filters, and bounds —
+ * but the result carries tallies only, never entry contents. Aggregation is
+ * order-independent, so no newest-first option exists here.
+ */
+export function buildWorkspaceJournalSummary(
+  store: SessionStore,
+  opts: Omit<WorkspaceJournalOptions, "newestFirst">,
+): WorkspaceJournalSummaryRecord {
+  const journal = buildWorkspaceJournal(store, opts);
+  return {
+    schema: WORKSPACE_JOURNAL_SUMMARY_SCHEMA,
+    v: WORKSPACE_JOURNAL_SUMMARY_VERSION,
+    workspace: journal.workspace,
+    sessionsScanned: journal.sessionsScanned,
+    sessionsSkippedArchived: journal.sessionsSkippedArchived,
+    byKind: tallyEntriesByKind(journal.entries),
+    count: journal.entries.length,
+    elided: journal.elided,
+    skipped: journal.skipped,
+  };
+}
+
+export function formatWorkspaceJournalSummary(record: WorkspaceJournalSummaryRecord): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  if (record.count === 0) {
+    return [`0 event(s).${elidedNote}${skippedNote}`];
+  }
+  const parts = JOURNAL_KINDS.filter((k) => record.byKind[k] !== undefined).map(
+    (k) => `${k} ×${record.byKind[k]}`,
+  );
+  return [`${record.count} event(s): ${parts.join(", ")}.${elidedNote}${skippedNote}`];
 }
