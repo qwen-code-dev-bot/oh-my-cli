@@ -46,7 +46,7 @@ import { runPalette, defaultCommands } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
 import { runPreflight, formatPreflight, validateFallbackModel } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
-import { collectHealthInventory, formatHealthInventory, healthInventoryStrictExit } from "./health-inventory.js";
+import { collectHealthInventory, formatHealthInventory, healthInventoryRecord, healthInventoryStrictExit } from "./health-inventory.js";
 import {
   collectSessionSummaries,
   filterSessionSummaries,
@@ -3969,9 +3969,21 @@ program
       // misconfigured), 0 otherwise — disabled entries and an empty
       // inventory are honest zero states, never failures.
       if (opts.health) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
         const settingsPath = resolveSettingsPath(opts.settings);
         const inventory = await collectHealthInventory(settingsPath);
-        process.stdout.write(formatHealthInventory(inventory) + "\n");
+        if (format === "json") {
+          // Machine-readable record (Issue #694): the same facts as the
+          // text surface as stable, versioned fields. --strict composes —
+          // the output is identical, the exit code signals.
+          process.stdout.write(JSON.stringify(healthInventoryRecord(inventory)) + "\n");
+        } else {
+          process.stdout.write(formatHealthInventory(inventory) + "\n");
+        }
         process.exit(opts.strict === true ? healthInventoryStrictExit(inventory) : 0);
       }
 
