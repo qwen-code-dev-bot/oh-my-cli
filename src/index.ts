@@ -75,6 +75,7 @@ import {
 } from "./stale-sessions.js";
 import { buildSessionStorageReport, formatSessionStorageReport } from "./session-storage.js";
 import { buildSessionHealthReport, formatSessionHealthReport } from "./session-health.js";
+import { buildStoreDoctorReport, formatStoreDoctorReport } from "./store-doctor.js";
 import {
   buildWorkspaceJournal,
   buildWorkspaceJournalByDay,
@@ -618,6 +619,10 @@ program
     "Show a read-only session transcript health report — every session's integrity (ok/partial/corrupt) worst-first with per-status rollups; diagnostic only, never heals (add --output json for a versioned record) and exit",
   )
   .option(
+    "--store-doctor",
+    "Run a read-only consolidated store checkup composing health, sidecar, storage, and stale-session diagnostics into one summary with an overall verdict; diagnostic only, never heals (add --output json for a versioned record) and exit",
+  )
+  .option(
     "--workspace-journal",
     "Show a read-only merged chronology of every session declared for the --workspace (default cwd) identity (add --output json for a versioned record) and exit",
   )
@@ -1112,6 +1117,30 @@ program
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
           process.stdout.write(formatSessionHealthReport(record).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Store-doctor mode (Issue #670): a strictly read-only, diagnostic
+      // consolidated store checkup composing the existing health, sidecar,
+      // storage, and stale-session machineries into one sectioned summary
+      // with an honestly derived verdict. Never heals, never mutates. Exit
+      // 0 on a successful checkup regardless of findings (the checkup is a
+      // report, not a failure signal), 2 on a bad format. The flag is
+      // --store-doctor because --doctor already names the installation and
+      // platform readiness checks.
+      if (opts.storeDoctor === true) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const record = buildStoreDoctorReport(store);
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(formatStoreDoctorReport(record).join("\n") + "\n");
         }
         process.exit(0);
       }
