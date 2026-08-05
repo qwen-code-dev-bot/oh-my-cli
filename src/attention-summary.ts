@@ -5,7 +5,9 @@
 // session (#550 cancelled placeholders, #243 interrupted turns) — scoped by
 // the same canonical workspace identity as --continue and the #554 resume
 // guard. Pure read: never heals, quarantines, seals, approves, retries, or
-// mutates anything, and never treats a listed action as executed.
+// mutates anything, and never treats a listed action as executed. With
+// `--strict` (Issue #682) the exit code signals whether anything needs
+// action so automation can gate without parsing prose.
 
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { workspaceTrustKey } from "./folder-trust.js";
@@ -177,6 +179,18 @@ export function buildAttention(opts: BuildAttentionOptions): AttentionItem[] {
       a.sessionId.localeCompare(b.sessionId),
   );
   return items;
+}
+
+/**
+ * Map an attention summary to the `--strict` exit code (Issue #682): 1
+ * when at least one item needs action, 0 when the workspace is quiet —
+ * an empty summary is an honest zero state, never a failure. The total
+ * item count drives the gate, including overflow beyond the shown cap.
+ * Pure; the report output is unaffected — the exit code is the
+ * machine-readable signal.
+ */
+export function attentionStrictExit(items: readonly AttentionItem[]): number {
+  return items.length > 0 ? 1 : 0;
 }
 
 export interface AttentionRecord {
