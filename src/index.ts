@@ -76,6 +76,7 @@ import {
 import { buildSessionStorageReport, formatSessionStorageReport } from "./session-storage.js";
 import { buildSessionHealthReport, formatSessionHealthReport } from "./session-health.js";
 import { buildStoreDoctorReport, formatStoreDoctorReport } from "./store-doctor.js";
+import { renderReportLines } from "./ascii-output.js";
 import {
   buildWorkspaceJournal,
   buildWorkspaceJournalByDay,
@@ -623,6 +624,10 @@ program
     "Run a read-only consolidated store checkup composing health, sidecar, storage, and stale-session diagnostics into one summary with an overall verdict; diagnostic only, never heals (add --output json for a versioned record) and exit",
   )
   .option(
+    "--ascii",
+    "With the read-only report/journal surfaces: render text output ASCII-safe (decorative glyphs mapped to ASCII equivalents); JSON output is unchanged",
+  )
+  .option(
     "--workspace-journal",
     "Show a read-only merged chronology of every session declared for the --workspace (default cwd) identity (add --output json for a versioned record) and exit",
   )
@@ -1038,7 +1043,7 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
-          process.stdout.write(formatSessionsOverview(record).join("\n") + "\n");
+          process.stdout.write(renderReportLines(formatSessionsOverview(record), opts.ascii));
         }
         process.exit(0);
       }
@@ -1072,7 +1077,7 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
-          process.stdout.write(formatStaleSessions(record).join("\n") + "\n");
+          process.stdout.write(renderReportLines(formatStaleSessions(record), opts.ascii));
         }
         process.exit(0);
       }
@@ -1094,7 +1099,7 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
-          process.stdout.write(formatSessionStorageReport(record).join("\n") + "\n");
+          process.stdout.write(renderReportLines(formatSessionStorageReport(record), opts.ascii));
         }
         process.exit(0);
       }
@@ -1116,7 +1121,7 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
-          process.stdout.write(formatSessionHealthReport(record).join("\n") + "\n");
+          process.stdout.write(renderReportLines(formatSessionHealthReport(record), opts.ascii));
         }
         process.exit(0);
       }
@@ -1140,7 +1145,7 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
-          process.stdout.write(formatStoreDoctorReport(record).join("\n") + "\n");
+          process.stdout.write(renderReportLines(formatStoreDoctorReport(record), opts.ascii));
         }
         process.exit(0);
       }
@@ -1209,7 +1214,9 @@ program
           if (format === "json") {
             process.stdout.write(JSON.stringify(bySessionRecord) + "\n");
           } else {
-            process.stdout.write(formatWorkspaceJournalBySession(bySessionRecord).join("\n") + "\n");
+            process.stdout.write(
+              renderReportLines(formatWorkspaceJournalBySession(bySessionRecord), opts.ascii),
+            );
           }
           process.exit(0);
         }
@@ -1237,7 +1244,7 @@ program
             process.stdout.write(JSON.stringify(bySessionDayRecord) + "\n");
           } else {
             process.stdout.write(
-              formatWorkspaceJournalBySessionDay(bySessionDayRecord).join("\n") + "\n",
+              renderReportLines(formatWorkspaceJournalBySessionDay(bySessionDayRecord), opts.ascii),
             );
           }
           process.exit(0);
@@ -1264,7 +1271,9 @@ program
           if (format === "json") {
             process.stdout.write(JSON.stringify(byDayRecord) + "\n");
           } else {
-            process.stdout.write(formatWorkspaceJournalByDay(byDayRecord).join("\n") + "\n");
+            process.stdout.write(
+              renderReportLines(formatWorkspaceJournalByDay(byDayRecord), opts.ascii),
+            );
           }
           process.exit(0);
         }
@@ -1290,7 +1299,9 @@ program
           if (format === "json") {
             process.stdout.write(JSON.stringify(byHourRecord) + "\n");
           } else {
-            process.stdout.write(formatWorkspaceJournalByHour(byHourRecord).join("\n") + "\n");
+            process.stdout.write(
+              renderReportLines(formatWorkspaceJournalByHour(byHourRecord), opts.ascii),
+            );
           }
           process.exit(0);
         }
@@ -1316,7 +1327,9 @@ program
           if (format === "json") {
             process.stdout.write(JSON.stringify(byWeekRecord) + "\n");
           } else {
-            process.stdout.write(formatWorkspaceJournalByWeek(byWeekRecord).join("\n") + "\n");
+            process.stdout.write(
+              renderReportLines(formatWorkspaceJournalByWeek(byWeekRecord), opts.ascii),
+            );
           }
           process.exit(0);
         }
@@ -1343,7 +1356,9 @@ program
           if (format === "json") {
             process.stdout.write(JSON.stringify(byMonthRecord) + "\n");
           } else {
-            process.stdout.write(formatWorkspaceJournalByMonth(byMonthRecord).join("\n") + "\n");
+            process.stdout.write(
+              renderReportLines(formatWorkspaceJournalByMonth(byMonthRecord), opts.ascii),
+            );
           }
           process.exit(0);
         }
@@ -1371,7 +1386,9 @@ program
           if (format === "json") {
             process.stdout.write(JSON.stringify(summaryRecord) + "\n");
           } else {
-            process.stdout.write(formatWorkspaceJournalSummary(summaryRecord).join("\n") + "\n");
+            process.stdout.write(
+              renderReportLines(formatWorkspaceJournalSummary(summaryRecord), opts.ascii),
+            );
           }
           process.exit(0);
         }
@@ -1397,7 +1414,9 @@ program
           if (format === "json") {
             process.stdout.write(JSON.stringify(countRecord) + "\n");
           } else {
-            process.stdout.write(formatWorkspaceJournalCount(countRecord).join("\n") + "\n");
+            process.stdout.write(
+              renderReportLines(formatWorkspaceJournalCount(countRecord), opts.ascii),
+            );
           }
           process.exit(0);
         }
@@ -1421,7 +1440,10 @@ program
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
           process.stdout.write(
-            formatWorkspaceJournal(record, { relative: opts.relative === true }).join("\n") + "\n",
+            renderReportLines(
+              formatWorkspaceJournal(record, { relative: opts.relative === true }),
+              opts.ascii,
+            ),
           );
         }
         process.exit(0);
@@ -1844,7 +1866,9 @@ program
           if (format === "json") {
             process.stdout.write(JSON.stringify(grouped.byDay) + "\n");
           } else {
-            process.stdout.write(formatSessionJournalByDay(grouped.byDay).join("\n") + "\n");
+            process.stdout.write(
+              renderReportLines(formatSessionJournalByDay(grouped.byDay), opts.ascii),
+            );
           }
           process.exit(0);
         }
@@ -1866,7 +1890,9 @@ program
           if (format === "json") {
             process.stdout.write(JSON.stringify(grouped.byHour) + "\n");
           } else {
-            process.stdout.write(formatSessionJournalByHour(grouped.byHour).join("\n") + "\n");
+            process.stdout.write(
+              renderReportLines(formatSessionJournalByHour(grouped.byHour), opts.ascii),
+            );
           }
           process.exit(0);
         }
@@ -1888,7 +1914,9 @@ program
           if (format === "json") {
             process.stdout.write(JSON.stringify(grouped.byWeek) + "\n");
           } else {
-            process.stdout.write(formatSessionJournalByWeek(grouped.byWeek).join("\n") + "\n");
+            process.stdout.write(
+              renderReportLines(formatSessionJournalByWeek(grouped.byWeek), opts.ascii),
+            );
           }
           process.exit(0);
         }
@@ -1910,7 +1938,9 @@ program
           if (format === "json") {
             process.stdout.write(JSON.stringify(grouped.byMonth) + "\n");
           } else {
-            process.stdout.write(formatSessionJournalByMonth(grouped.byMonth).join("\n") + "\n");
+            process.stdout.write(
+              renderReportLines(formatSessionJournalByMonth(grouped.byMonth), opts.ascii),
+            );
           }
           process.exit(0);
         }
@@ -1933,7 +1963,9 @@ program
           if (format === "json") {
             process.stdout.write(JSON.stringify(summarized.summary) + "\n");
           } else {
-            process.stdout.write(formatSessionJournalSummary(summarized.summary).join("\n") + "\n");
+            process.stdout.write(
+              renderReportLines(formatSessionJournalSummary(summarized.summary), opts.ascii),
+            );
           }
           process.exit(0);
         }
@@ -1955,7 +1987,9 @@ program
           if (format === "json") {
             process.stdout.write(JSON.stringify(counted.count) + "\n");
           } else {
-            process.stdout.write(formatSessionJournalCount(counted.count).join("\n") + "\n");
+            process.stdout.write(
+              renderReportLines(formatSessionJournalCount(counted.count), opts.ascii),
+            );
           }
           process.exit(0);
         }
@@ -1974,8 +2008,10 @@ program
           process.stdout.write(JSON.stringify(built.journal) + "\n");
         } else {
           process.stdout.write(
-            formatSessionJournal(built.journal, { relative: opts.relative === true }).join("\n") +
-              "\n",
+            renderReportLines(
+              formatSessionJournal(built.journal, { relative: opts.relative === true }),
+              opts.ascii,
+            ),
           );
         }
         process.exit(0);
