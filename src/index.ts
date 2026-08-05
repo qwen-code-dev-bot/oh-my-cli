@@ -595,6 +595,10 @@ program
     "With --session-journal/--workspace-journal: set aside the newest <n> entries and show the ones before them (a positive integer; compose with --limit to page backward)",
   )
   .option(
+    "--newest-first",
+    "With --session-journal/--workspace-journal: render the kept entries newest-first instead of the default oldest-first (filters and bounds apply unchanged)",
+  )
+  .option(
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
@@ -1035,6 +1039,7 @@ program
             window,
             limit,
             skip,
+            newestFirst: opts.newestFirst === true,
           });
         } catch {
           process.stderr.write(
@@ -1449,7 +1454,13 @@ program
           process.stderr.write(`Cannot read journal: ${resolved.reason}\n`);
           process.exit(2);
         }
-        const built = buildSessionJournal(store, resolved.sessionId, { kinds, window, limit, skip });
+        const built = buildSessionJournal(store, resolved.sessionId, {
+          kinds,
+          window,
+          limit,
+          skip,
+          newestFirst: opts.newestFirst === true,
+        });
         if ("error" in built) {
           process.stderr.write(`Cannot read journal: ${built.error}\n`);
           process.exit(2);

@@ -21,7 +21,7 @@ import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { workspaceTrustKey } from "./folder-trust.js";
 import { buildSessionJournalEntries } from "./session-journal.js";
 import { applyJournalSkip, filterEntriesByKind, filterEntriesByWindow } from "./session-journal.js";
-import type { JournalTimeWindow, SessionJournalKind } from "./session-journal.js";
+import type { JournalOrder, JournalTimeWindow, SessionJournalKind } from "./session-journal.js";
 
 export const WORKSPACE_JOURNAL_SCHEMA = "oh-my-cli.workspace-journal" as const;
 export const WORKSPACE_JOURNAL_VERSION = 1 as const;
@@ -49,12 +49,14 @@ export interface WorkspaceJournalRecord {
   sessionsScanned: number;
   /** Workspace sessions skipped because they are archived. */
   sessionsSkippedArchived: number;
-  /** Newest entries kept, rendered oldest-first within the window. */
+  /** Newest entries kept; rendered per the record's `order` field. */
   entries: WorkspaceJournalEntry[];
   /** Older entries dropped by the bound. */
   elided: number;
   /** Newer entries set aside by --skip (Issue #638); 0 without it. */
   skipped: number;
+  /** Rendering direction (Issue #640); oldest-first unless --newest-first. */
+  order: JournalOrder;
 }
 
 export interface WorkspaceJournalOptions {
@@ -74,6 +76,11 @@ export interface WorkspaceJournalOptions {
   limit?: number;
   /** Set aside the newest entries before bounding (Issue #638). */
   skip?: number;
+  /**
+   * Render the final kept set newest-first (Issue #640). Applies strictly
+   * after scoping, window, kind, skip, and the bound.
+   */
+  newestFirst?: boolean;
 }
 
 export function buildWorkspaceJournal(
@@ -138,7 +145,9 @@ export function buildWorkspaceJournal(
   const filtered = filterEntriesByKind(windowed, opts.kinds);
   const skippedAside = applyJournalSkip(filtered, opts.skip);
   const elided = Math.max(0, skippedAside.entries.length - maxEntries);
-  const entries = skippedAside.entries.slice(elided);
+  const bounded = skippedAside.entries.slice(elided);
+  const order: JournalOrder = opts.newestFirst === true ? "newest-first" : "oldest-first";
+  const entries = order === "newest-first" ? [...bounded].reverse() : bounded;
 
   return {
     schema: WORKSPACE_JOURNAL_SCHEMA,
@@ -149,6 +158,7 @@ export function buildWorkspaceJournal(
     entries,
     elided,
     skipped: skippedAside.skipped,
+    order,
   };
 }
 
