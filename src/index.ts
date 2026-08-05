@@ -88,6 +88,7 @@ import {
   buildWorkspaceJournalByWeek,
   buildWorkspaceJournalCount,
   buildWorkspaceJournalSummary,
+  diffNewEntries,
   formatWorkspaceJournal,
   formatWorkspaceJournalByDay,
   formatWorkspaceJournalByHour,
@@ -97,7 +98,10 @@ import {
   formatWorkspaceJournalByWeek,
   formatWorkspaceJournalCount,
   formatWorkspaceJournalSummary,
+  journalEntryIdentity,
+  workspaceJournalEntryLine,
 } from "./workspace-journal.js";
+import type { WorkspaceJournalEntry, WorkspaceJournalRecord } from "./workspace-journal.js";
 import {
   buildSessionJournal,
   buildSessionJournalByDay,
@@ -115,8 +119,11 @@ import {
   formatSessionJournalSummary,
 } from "./session-journal.js";
 import {
+  JOURNAL_FOLLOW_DEFAULT_POLL_MS,
   JOURNAL_KINDS,
+  formatRelativeAge,
   parseJournalLimit,
+  parseJournalPollMs,
   parseJournalSkip,
   parseJournalTimestamp,
 } from "./session-journal.js";
@@ -697,6 +704,14 @@ program
     "With --session-journal/--workspace-journal: render entry timestamps as ages relative to read time in text output (JSON stays epoch-based)",
   )
   .option(
+    "--follow",
+    "With --workspace-journal: after printing the current chronology (text only), keep watching the store and emit newly appearing entries live until SIGINT/SIGTERM, which exit 0; read-only throughout",
+  )
+  .option(
+    "--poll-ms <n>",
+    "With --workspace-journal --follow: poll the store every <n> milliseconds (an integer of at least 50; default 1000)",
+  )
+  .option(
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
@@ -1205,6 +1220,110 @@ program
         } catch (err) {
           process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
           process.exit(2);
+        }
+        // Follow mode (Issue #684): print the current chronology exactly as
+        // the non-follow surface would, then keep watching the store and
+        // emit newly appearing entries live until SIGINT/SIGTERM exits 0.
+        // Text output only; --kind stays live while the window/pagination
+        // filters apply to the initial snapshot alone; the aggregation
+        // surfaces are incompatible. Strictly read-only throughout.
+        if (opts.follow === true) {
+          if (format === "json") {
+            process.stderr.write(
+              "Error: --follow requires text output; --output json is not supported with --follow\n",
+            );
+            process.exit(2);
+          }
+          const aggregations: Array<[string, boolean]> = [
+            ["--by-session", opts.bySession === true],
+            ["--by-session-day", opts.bySessionDay === true],
+            ["--by-kind", opts.byKind === true],
+            ["--by-day", opts.byDay === true],
+            ["--by-hour", opts.byHour === true],
+            ["--by-week", opts.byWeek === true],
+            ["--by-month", opts.byMonth === true],
+            ["--count", opts.count === true],
+          ];
+          const activeAggregations = aggregations.filter(([, on]) => on).map(([flag]) => flag);
+          if (activeAggregations.length > 0) {
+            process.stderr.write(
+              `Error: --follow cannot be combined with ${activeAggregations.join(", ")}\n`,
+            );
+            process.exit(2);
+          }
+          let pollMs = JOURNAL_FOLLOW_DEFAULT_POLL_MS;
+          if (opts.pollMs !== undefined) {
+            try {
+              pollMs = parseJournalPollMs(String(opts.pollMs));
+            } catch (err) {
+              process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+              process.exit(2);
+            }
+          }
+          const workspaceArg = String(opts.workspace);
+          const store = new SessionStore();
+          // Unbounded, kind-filtered, unwindowed rebuild: follow must see
+          // every entry (the snapshot cap would hide new arrivals), and
+          // --kind is the only filter that stays live after the snapshot.
+          const buildUnbounded = (): WorkspaceJournalRecord => {
+            try {
+              return buildWorkspaceJournal(store, {
+                workspace: workspaceArg,
+                kinds,
+                maxEntries: Number.MAX_SAFE_INTEGER,
+              });
+            } catch {
+              process.stderr.write(
+                `Error: cannot journal workspace "${redactHomePath(workspaceArg)}": its identity cannot be canonicalized\n`,
+              );
+              process.exit(2);
+            }
+          };
+          // Baseline: everything that exists right now is "already seen",
+          // including entries the bounded snapshot elided.
+          const seen = new Set<string>(buildUnbounded().entries.map(journalEntryIdentity));
+          // Initial snapshot: byte-identical to the non-follow surface.
+          let snapshot: WorkspaceJournalRecord;
+          try {
+            snapshot = buildWorkspaceJournal(store, {
+              workspace: workspaceArg,
+              kinds,
+              window,
+              limit,
+              skip,
+              newestFirst: opts.newestFirst === true,
+            });
+          } catch {
+            process.stderr.write(
+              `Error: cannot journal workspace "${redactHomePath(workspaceArg)}": its identity cannot be canonicalized\n`,
+            );
+            process.exit(2);
+          }
+          const relative = opts.relative === true;
+          process.stdout.write(
+            renderReportLines(formatWorkspaceJournal(snapshot, { relative }), opts.ascii),
+          );
+          const stamp = (at: number): string =>
+            relative ? formatRelativeAge(at, Date.now()) : new Date(at).toISOString();
+          const timer = setInterval(() => {
+            const fresh = diffNewEntries(seen, buildUnbounded().entries);
+            for (const entry of fresh) {
+              seen.add(journalEntryIdentity(entry));
+              process.stdout.write(
+                renderReportLines([workspaceJournalEntryLine(entry, stamp)], opts.ascii) + "\n",
+              );
+            }
+          }, pollMs);
+          const stop = (): void => {
+            clearInterval(timer);
+            process.exit(0);
+          };
+          // Follow owns Ctrl-C for its lifetime: the default handler exits
+          // 130 with a session-saved message that does not apply here.
+          process.removeListener("SIGINT", defaultSigintHandler);
+          process.on("SIGINT", stop);
+          process.on("SIGTERM", stop);
+          return;
         }
         if (opts.bySession === true) {
           // Per-session grouping mode (Issue #648): the same pipeline, but

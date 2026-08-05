@@ -190,6 +190,31 @@ export function parseJournalSkip(raw: string): number {
   return parsePositiveCount(raw, "--skip");
 }
 
+/** Default poll interval for workspace-journal follow mode (Issue #684). */
+export const JOURNAL_FOLLOW_DEFAULT_POLL_MS = 1000;
+
+/** Minimum poll interval for workspace-journal follow mode (Issue #684). */
+export const JOURNAL_FOLLOW_MIN_POLL_MS = 50;
+
+/**
+ * Parse the --poll-ms value (Issue #684): an integer number of
+ * milliseconds, at least the minimum poll interval. Throws with a
+ * caller-ready message on anything else so the CLI can fail closed before
+ * any output.
+ */
+export function parseJournalPollMs(raw: string): number {
+  const text = raw.trim();
+  const fail = (): never => {
+    throw new Error(
+      `Error: invalid --poll-ms value: "${raw}" (expected an integer of at least ${JOURNAL_FOLLOW_MIN_POLL_MS} milliseconds)`,
+    );
+  };
+  if (!/^\d+$/.test(text)) fail();
+  const value = Number(text);
+  if (!Number.isSafeInteger(value) || value < JOURNAL_FOLLOW_MIN_POLL_MS) fail();
+  return value;
+}
+
 /**
  * Keep only the newest `limit` entries of an oldest-first journal sequence
  * (Issue #636), reporting how many older entries were elided. Undefined
