@@ -6,7 +6,9 @@
 // a single request whose body is discarded, and an extension path is stat'd. This
 // distinguishes healthy / unavailable / misconfigured / disabled integrations
 // without running arbitrary code or echoing remote response bodies. Credentials
-// in URLs, env, and headers are never printed.
+// in URLs, env, and headers are never printed. With `--strict` (Issue #690)
+// the exit code signals whether any enabled integration is unhealthy so
+// automation can gate without parsing prose.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -298,6 +300,19 @@ function safeTarget(rec: IntegrationRecord): string {
   }
   if (rec.kind === "extension" && rec.path) return redactPath(rec.path);
   return "";
+}
+
+/**
+ * Map a health inventory to the `--strict` exit code (Issue #690): 1 when
+ * the settings cannot be parsed or any enabled integration is unhealthy
+ * (unavailable or misconfigured), 0 otherwise — disabled entries and an
+ * empty inventory are honest zero states, never failures. Pure; the
+ * report output is unaffected — the exit code is the machine-readable
+ * signal.
+ */
+export function healthInventoryStrictExit(inv: HealthInventory): number {
+  if (inv.parseError !== undefined) return 1;
+  return inv.integrations.some((i) => i.enabled && i.category !== "healthy") ? 1 : 0;
 }
 
 export function formatHealthInventory(inv: HealthInventory): string {
