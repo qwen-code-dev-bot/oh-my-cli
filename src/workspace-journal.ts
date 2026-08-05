@@ -65,6 +65,11 @@ export interface WorkspaceJournalOptions {
   kinds?: ReadonlySet<SessionJournalKind>;
   /** Inclusive time window (Issue #634); undefined means no window. */
   window?: JournalTimeWindow;
+  /**
+   * Caller-controlled newest-N bound (Issue #636). When set it replaces the
+   * default bound entirely (callers may tighten below or expand above it).
+   */
+  limit?: number;
 }
 
 export function buildWorkspaceJournal(
@@ -73,7 +78,9 @@ export function buildWorkspaceJournal(
 ): WorkspaceJournalRecord {
   const keyOf = opts.keyOf ?? workspaceTrustKey;
   const targetKey = keyOf(opts.workspace);
-  const maxEntries = opts.maxEntries ?? WORKSPACE_JOURNAL_MAX_ENTRIES;
+  // A caller-supplied --limit (Issue #636) replaces the default bound;
+  // otherwise fall back to the test override, then the default.
+  const maxEntries = opts.limit ?? opts.maxEntries ?? WORKSPACE_JOURNAL_MAX_ENTRIES;
 
   const merged: WorkspaceJournalEntry[] = [];
   let sessionsScanned = 0;
