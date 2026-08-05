@@ -340,7 +340,34 @@ export function buildSessionJournal(
   };
 }
 
-export function formatSessionJournal(record: SessionJournalRecord): string[] {
+/**
+ * Render one timestamp's age relative to a reference instant (Issue #650).
+ * Fixed honest buckets: `just now` (< 60s), `Nm ago` (< 60m), `Nh ago`
+ * (< 24h), `Nd ago` (< 30d), and the absolute UTC date YYYY-MM-DD for
+ * anything older. Future timestamps (clock drift) clamp to `just now` —
+ * never a negative age. Pure: the reference instant is injectable so every
+ * bucket boundary is deterministic under test. Shared by both journal
+ * surfaces.
+ */
+export function formatRelativeAge(at: number, now: number): string {
+  const delta = now - at;
+  if (delta < 60_000) return "just now";
+  const minutes = Math.floor(delta / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(delta / 3_600_000);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(delta / 86_400_000);
+  if (days < 30) return `${days}d ago`;
+  return new Date(at).toISOString().slice(0, 10);
+}
+
+export function formatSessionJournal(
+  record: SessionJournalRecord,
+  opts: { relative?: boolean; now?: number } = {},
+): string[] {
+  const now = opts.now ?? Date.now();
+  const stamp = (at: number): string =>
+    opts.relative === true ? formatRelativeAge(at, now) : new Date(at).toISOString();
   const lines: string[] = [];
   lines.push(`Session journal — ${shortSessionId(record.sessionId)} (${record.integrity})`);
   lines.push("─".repeat(40));
@@ -353,7 +380,7 @@ export function formatSessionJournal(record: SessionJournalRecord): string[] {
     return lines;
   }
   for (const e of record.entries) {
-    lines.push(`  ${new Date(e.at).toISOString()} · ${e.kind} · ${e.detail}`);
+    lines.push(`  ${stamp(e.at)} · ${e.kind} · ${e.detail}`);
   }
   lines.push("");
   const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";

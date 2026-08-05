@@ -25,6 +25,7 @@ import {
   bucketEntriesByDay,
   filterEntriesByKind,
   filterEntriesByWindow,
+  formatRelativeAge,
   tallyEntriesByKind,
 } from "./session-journal.js";
 import type {
@@ -173,7 +174,13 @@ export function buildWorkspaceJournal(
   };
 }
 
-export function formatWorkspaceJournal(record: WorkspaceJournalRecord): string[] {
+export function formatWorkspaceJournal(
+  record: WorkspaceJournalRecord,
+  opts: { relative?: boolean; now?: number } = {},
+): string[] {
+  const now = opts.now ?? Date.now();
+  const stamp = (at: number): string =>
+    opts.relative === true ? formatRelativeAge(at, now) : new Date(at).toISOString();
   const lines: string[] = [];
   lines.push(`Workspace journal — ${record.workspace}`);
   lines.push("─".repeat(40));
@@ -196,7 +203,7 @@ export function formatWorkspaceJournal(record: WorkspaceJournalRecord): string[]
   for (const e of record.entries) {
     const verdict = e.integrity !== undefined ? ` (${e.integrity})` : "";
     lines.push(
-      `  ${new Date(e.at).toISOString()} · ${e.shortId}${verdict} · ${e.kind} · ${e.detail}`,
+      `  ${stamp(e.at)} · ${e.shortId}${verdict} · ${e.kind} · ${e.detail}`,
     );
   }
   lines.push("");
