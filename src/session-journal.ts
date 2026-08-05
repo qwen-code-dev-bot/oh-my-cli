@@ -55,19 +55,16 @@ function redact(text: string): string {
 }
 
 /**
- * Build the journal for one session. Returns an error string (not throwing)
- * when the session is missing so the CLI can map it to a meaningful exit
- * status. Reading never mutates the store.
+ * Build one session's journal entries, chronological oldest-first with
+ * deterministic tie-breaks (kind, then detail). Shared by the per-session
+ * journal surface (#618) and the workspace-level merge (#630). Reading never
+ * mutates the store; corrupt transcripts contribute their readable durable
+ * state exactly as the per-session journal does.
  */
-export function buildSessionJournal(
+export function buildSessionJournalEntries(
   store: SessionStore,
   id: string,
-): { journal: SessionJournalRecord } | { error: string } {
-  const integrity = store.integrity(id);
-  if (integrity.status === "missing") {
-    return { error: `no such session "${id}"` };
-  }
-
+): SessionJournalEntry[] {
   const entries: SessionJournalEntry[] = [];
   const diag = store.loadWithDiagnostics(id);
 
@@ -126,13 +123,29 @@ export function buildSessionJournal(
     (a, b) => a.at - b.at || a.kind.localeCompare(b.kind) || a.detail.localeCompare(b.detail),
   );
 
+  return entries;
+}
+
+/**
+ * Build the journal for one session. Returns an error string (not throwing)
+ * when the session is missing so the CLI can map it to a meaningful exit
+ * status. Reading never mutates the store.
+ */
+export function buildSessionJournal(
+  store: SessionStore,
+  id: string,
+): { journal: SessionJournalRecord } | { error: string } {
+  const integrity = store.integrity(id);
+  if (integrity.status === "missing") {
+    return { error: `no such session "${id}"` };
+  }
   return {
     journal: {
       schema: SESSION_JOURNAL_SCHEMA,
       v: SESSION_JOURNAL_VERSION,
       sessionId: id,
       integrity: integrity.status as SessionJournalRecord["integrity"],
-      entries,
+      entries: buildSessionJournalEntries(store, id),
     },
   };
 }

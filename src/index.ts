@@ -73,6 +73,7 @@ import {
   formatStaleSessions,
   STALE_DEFAULT_DAYS,
 } from "./stale-sessions.js";
+import { buildWorkspaceJournal, formatWorkspaceJournal } from "./workspace-journal.js";
 import { buildSessionJournal, formatSessionJournal } from "./session-journal.js";
 import { buildSessionDiff, formatSessionDiff } from "./session-diff.js";
 import { searchSessionNotes, formatSessionNotesSearch } from "./session-notes-search.js";
@@ -530,6 +531,10 @@ program
     "Show a read-only, advisory retention report: sessions older than the threshold (default 30 days) that are neither pinned nor archived are archive candidates (add --output json for a versioned record) and exit",
   )
   .option(
+    "--workspace-journal",
+    "Show a read-only merged chronology of every session declared for the --workspace (default cwd) identity (add --output json for a versioned record) and exit",
+  )
+  .option(
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
@@ -916,6 +921,39 @@ program
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
           process.stdout.write(formatStaleSessions(record).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Workspace-journal mode (Issue #630): a read-only merged chronology of
+      // every session declared for the --workspace (default cwd) canonical
+      // identity — per-session durable journals (#618) merged chronologically
+      // and tagged per session. Archived sessions are skipped; corrupt
+      // sessions contribute their readable state with their verdict. Bounded
+      // rendering with a truthful elided count; the store is never mutated.
+      // Exits 0 on a successful report (empty is honest), 2 on an
+      // uncanonicalizable workspace or a bad format.
+      if (opts.workspaceJournal) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let record;
+        try {
+          record = buildWorkspaceJournal(new SessionStore(), {
+            workspace: String(opts.workspace),
+          });
+        } catch {
+          process.stderr.write(
+            `Error: cannot journal workspace "${redactHomePath(String(opts.workspace))}": its identity cannot be canonicalized\n`,
+          );
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(formatWorkspaceJournal(record).join("\n") + "\n");
         }
         process.exit(0);
       }
