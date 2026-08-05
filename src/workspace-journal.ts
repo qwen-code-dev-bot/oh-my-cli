@@ -194,3 +194,57 @@ export function formatWorkspaceJournal(record: WorkspaceJournalRecord): string[]
   lines.push(`${record.entries.length} event(s) shown.${elidedNote}${skippedNote}`);
   return lines;
 }
+
+export const WORKSPACE_JOURNAL_COUNT_SCHEMA = "oh-my-cli.workspace-journal-count" as const;
+export const WORKSPACE_JOURNAL_COUNT_VERSION = 1 as const;
+
+/**
+ * Counts-only view of the merged workspace journal (Issue #642): the size of
+ * the kept set after scoping and every filter/bound, never entry contents —
+ * for scripts that only need to know how many events match.
+ */
+export interface WorkspaceJournalCountRecord {
+  schema: typeof WORKSPACE_JOURNAL_COUNT_SCHEMA;
+  v: typeof WORKSPACE_JOURNAL_COUNT_VERSION;
+  /** The workspace the count is scoped to, redacted + home-collapsed. */
+  workspace: string;
+  /** Sessions whose journals were merged. */
+  sessionsScanned: number;
+  /** Workspace sessions skipped because they are archived. */
+  sessionsSkippedArchived: number;
+  /** Entries kept after every filter and bound. */
+  count: number;
+  /** Older entries dropped by the bound. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the counts-only workspace journal record (Issue #642). Semantics are
+ * exactly `buildWorkspaceJournal`'s — same scoping, filters, and bounds —
+ * but the result carries counts only, never entry contents. Rendering
+ * direction is meaningless for a size, so no newest-first option exists here.
+ */
+export function buildWorkspaceJournalCount(
+  store: SessionStore,
+  opts: Omit<WorkspaceJournalOptions, "newestFirst">,
+): WorkspaceJournalCountRecord {
+  const journal = buildWorkspaceJournal(store, opts);
+  return {
+    schema: WORKSPACE_JOURNAL_COUNT_SCHEMA,
+    v: WORKSPACE_JOURNAL_COUNT_VERSION,
+    workspace: journal.workspace,
+    sessionsScanned: journal.sessionsScanned,
+    sessionsSkippedArchived: journal.sessionsSkippedArchived,
+    count: journal.entries.length,
+    elided: journal.elided,
+    skipped: journal.skipped,
+  };
+}
+
+export function formatWorkspaceJournalCount(record: WorkspaceJournalCountRecord): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  return [`${record.count} event(s).${elidedNote}${skippedNote}`];
+}
