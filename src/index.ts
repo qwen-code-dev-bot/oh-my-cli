@@ -73,8 +73,18 @@ import {
   formatStaleSessions,
   STALE_DEFAULT_DAYS,
 } from "./stale-sessions.js";
-import { buildWorkspaceJournal, formatWorkspaceJournal } from "./workspace-journal.js";
-import { buildSessionJournal, formatSessionJournal } from "./session-journal.js";
+import {
+  buildWorkspaceJournal,
+  buildWorkspaceJournalCount,
+  formatWorkspaceJournal,
+  formatWorkspaceJournalCount,
+} from "./workspace-journal.js";
+import {
+  buildSessionJournal,
+  buildSessionJournalCount,
+  formatSessionJournal,
+  formatSessionJournalCount,
+} from "./session-journal.js";
 import {
   JOURNAL_KINDS,
   parseJournalLimit,
@@ -599,6 +609,10 @@ program
     "With --session-journal/--workspace-journal: render the kept entries newest-first instead of the default oldest-first (filters and bounds apply unchanged)",
   )
   .option(
+    "--count",
+    "With --session-journal/--workspace-journal: print only how many entries the filters and bounds keep — counts only, never entry contents (add --output json for a versioned record)",
+  )
+  .option(
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
@@ -1031,6 +1045,32 @@ program
           process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
           process.exit(2);
         }
+        if (opts.count === true) {
+          // Counts-only mode (Issue #642): the same pipeline, but the output
+          // carries counts only — never entry contents. Direction is
+          // meaningless for a size, so --newest-first has no effect here.
+          let countRecord;
+          try {
+            countRecord = buildWorkspaceJournalCount(new SessionStore(), {
+              workspace: String(opts.workspace),
+              kinds,
+              window,
+              limit,
+              skip,
+            });
+          } catch {
+            process.stderr.write(
+              `Error: cannot journal workspace "${redactHomePath(String(opts.workspace))}": its identity cannot be canonicalized\n`,
+            );
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(countRecord) + "\n");
+          } else {
+            process.stdout.write(formatWorkspaceJournalCount(countRecord).join("\n") + "\n");
+          }
+          process.exit(0);
+        }
         let record;
         try {
           record = buildWorkspaceJournal(new SessionStore(), {
@@ -1453,6 +1493,28 @@ program
         if (!resolved.ok) {
           process.stderr.write(`Cannot read journal: ${resolved.reason}\n`);
           process.exit(2);
+        }
+        if (opts.count === true) {
+          // Counts-only mode (Issue #642): the same pipeline and resolution
+          // semantics, but the output carries counts only — never entry
+          // contents. Direction is meaningless for a size, so --newest-first
+          // has no effect here.
+          const counted = buildSessionJournalCount(store, resolved.sessionId, {
+            kinds,
+            window,
+            limit,
+            skip,
+          });
+          if ("error" in counted) {
+            process.stderr.write(`Cannot read journal: ${counted.error}\n`);
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(counted.count) + "\n");
+          } else {
+            process.stdout.write(formatSessionJournalCount(counted.count).join("\n") + "\n");
+          }
+          process.exit(0);
         }
         const built = buildSessionJournal(store, resolved.sessionId, {
           kinds,

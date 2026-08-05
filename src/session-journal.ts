@@ -361,3 +361,63 @@ export function formatSessionJournal(record: SessionJournalRecord): string[] {
   lines.push(`${record.entries.length} event(s).${elidedNote}${skippedNote}`);
   return lines;
 }
+
+export const SESSION_JOURNAL_COUNT_SCHEMA = "oh-my-cli.session-journal-count" as const;
+export const SESSION_JOURNAL_COUNT_VERSION = 1 as const;
+
+/**
+ * Counts-only view of one session's journal (Issue #642): the size of the
+ * kept set after every filter and bound, never entry contents — for scripts
+ * that only need to know how many events match.
+ */
+export interface SessionJournalCountRecord {
+  schema: typeof SESSION_JOURNAL_COUNT_SCHEMA;
+  v: typeof SESSION_JOURNAL_COUNT_VERSION;
+  sessionId: string;
+  /** Transcript integrity at read time — honest context for the count. */
+  integrity: "ok" | "partial" | "corrupt" | "missing";
+  /** Entries kept after every filter and bound. */
+  count: number;
+  /** Older entries dropped by --limit (Issue #636); 0 without it. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the counts-only journal record for one session (Issue #642).
+ * Semantics are exactly `buildSessionJournal`'s — same pipeline, same
+ * heal-free resolution, same error string for a missing session — but the
+ * result carries counts only, never entry contents. Rendering direction is
+ * meaningless for a size, so no newest-first option exists here.
+ */
+export function buildSessionJournalCount(
+  store: SessionStore,
+  id: string,
+  opts: {
+    kinds?: ReadonlySet<SessionJournalKind>;
+    window?: JournalTimeWindow;
+    skip?: number;
+    limit?: number;
+  } = {},
+): { count: SessionJournalCountRecord } | { error: string } {
+  const built = buildSessionJournal(store, id, opts);
+  if ("error" in built) return { error: built.error };
+  return {
+    count: {
+      schema: SESSION_JOURNAL_COUNT_SCHEMA,
+      v: SESSION_JOURNAL_COUNT_VERSION,
+      sessionId: built.journal.sessionId,
+      integrity: built.journal.integrity,
+      count: built.journal.entries.length,
+      elided: built.journal.elided,
+      skipped: built.journal.skipped,
+    },
+  };
+}
+
+export function formatSessionJournalCount(record: SessionJournalCountRecord): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  return [`${record.count} event(s).${elidedNote}${skippedNote}`];
+}
