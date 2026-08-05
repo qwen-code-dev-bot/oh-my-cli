@@ -25,6 +25,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { redactSecrets } from "./permission-impact.js";
 import type { SessionStore, SessionMessage } from "./session.js";
+import { readSessionNotes } from "./session-notes.js";
 
 export const SESSION_EXPORT_SCHEMA = "oh-my-cli.session-export" as const;
 export const SESSION_EXPORT_VERSION = 1 as const;
@@ -59,6 +60,24 @@ export interface SessionExportCounts {
   attachments: number;
 }
 
+// The durable Goal checkpoint (Issue #578 family), redacted; null when the
+// session has no valid goal (unset or unreadable sidecar).
+export interface SessionExportGoal {
+  status: "active" | "paused" | "achieved";
+  /** Redacted objective text. */
+  objective: string;
+  /** Redacted concise title (#586); null when unset. */
+  title: string | null;
+  revision: number;
+  historyCount: number;
+}
+
+// One durable note (#602): epoch-ms timestamp plus redacted text.
+export interface SessionExportNote {
+  at: number;
+  text: string;
+}
+
 export interface SessionExportManifest {
   schema: typeof SESSION_EXPORT_SCHEMA;
   v: typeof SESSION_EXPORT_VERSION;
@@ -79,6 +98,14 @@ export interface SessionExportManifest {
   tools: SessionExportToolStat[];
   /** Attachment references (never embedded), ordered by name. */
   attachments: SessionExportAttachmentRef[];
+  /** The durable Goal checkpoint (redacted), or null when none is valid (#614). */
+  goal: SessionExportGoal | null;
+  /** The durable notes ledger (redacted, stored newest-first) (#614). */
+  notes: SessionExportNote[];
+  /** Archive marker (#598) timestamp, epoch ms; null when not archived (#614). */
+  archivedAt: number | null;
+  /** Pin marker (#610) timestamp, epoch ms; null when not pinned (#614). */
+  pinnedAt: number | null;
   /** sha256 of the raw source session file — the evidence reference. */
   digest: string;
 }
@@ -237,6 +264,31 @@ export function buildSessionManifest(
   const tools = [...toolByName.values()].sort((a, b) => a.name.localeCompare(b.name));
   attachments.sort((a, b) => a.name.localeCompare(b.name));
 
+  // Durable state beyond the transcript (Issue #614). All members are
+  // integrity-agnostic sidecars, so a corrupt session still exports exactly
+  // what its inspect card reports. Redaction runs on every free-form value;
+  // timestamps come from the stored sidecars, keeping output deterministic.
+  const goalCheckpoint = store.readGoal(id);
+  const goal: SessionExportGoal | null =
+    goalCheckpoint.goal !== null
+      ? {
+          status: goalCheckpoint.goal.status,
+          objective: redact(goalCheckpoint.goal.objective),
+          title:
+            goalCheckpoint.goal.title !== undefined
+              ? redact(goalCheckpoint.goal.title)
+              : null,
+          revision: goalCheckpoint.revision,
+          historyCount: goalCheckpoint.history?.length ?? 0,
+        }
+      : null;
+  const notesLoad = readSessionNotes(store, id);
+  const notes: SessionExportNote[] = notesLoad.corrupt
+    ? []
+    : notesLoad.notes.map((n) => ({ at: n.at, text: redact(n.text) }));
+  const archived = store.readArchived(id);
+  const pinned = store.readPinned(id);
+
   const manifest: SessionExportManifest = {
     schema: SESSION_EXPORT_SCHEMA,
     v: SESSION_EXPORT_VERSION,
@@ -253,6 +305,10 @@ export function buildSessionManifest(
     counts,
     tools,
     attachments,
+    goal,
+    notes,
+    archivedAt: archived !== null ? archived.at : null,
+    pinnedAt: pinned !== null ? pinned.at : null,
     digest: sha256(raw),
   };
 
@@ -304,6 +360,40 @@ export function renderSessionMarkdown(
     lines.push("");
     for (const a of manifest.attachments) {
       lines.push(`- ${a.name} (${a.mediaType}, ${a.bytes} bytes)`);
+    }
+  }
+
+  // Durable state beyond the transcript (Issue #614): goal, notes, and the
+  // lifecycle markers. Sections render only when state exists; absence is
+  // honest silence, matching the manifest's nulls/empty lists.
+  if (manifest.goal !== null) {
+    const g = manifest.goal;
+    lines.push("");
+    lines.push("### Goal");
+    lines.push("");
+    lines.push(`- Status: ${g.status}${g.title !== null ? ` · Title: ${g.title}` : ""}`);
+    lines.push(`- Objective: ${g.objective}`);
+    lines.push(`- Revision: ${g.revision} · History entries: ${g.historyCount}`);
+  }
+
+  if (manifest.notes.length > 0) {
+    lines.push("");
+    lines.push("### Notes");
+    lines.push("");
+    for (const n of manifest.notes) {
+      lines.push(`- ${new Date(n.at).toISOString()} · ${n.text}`);
+    }
+  }
+
+  if (manifest.archivedAt !== null || manifest.pinnedAt !== null) {
+    lines.push("");
+    lines.push("### Lifecycle markers");
+    lines.push("");
+    if (manifest.archivedAt !== null) {
+      lines.push(`- Archived: ${new Date(manifest.archivedAt).toISOString()}`);
+    }
+    if (manifest.pinnedAt !== null) {
+      lines.push(`- Pinned: ${new Date(manifest.pinnedAt).toISOString()}`);
     }
   }
 

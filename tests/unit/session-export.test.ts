@@ -14,6 +14,7 @@ import {
 } from "../../src/session-export.js";
 import { SessionStore } from "../../src/session.js";
 import type { SessionMessage, SessionMeta } from "../../src/session.js";
+import { appendSessionNote } from "../../src/session-notes.js";
 
 const tmpDirs: string[] = [];
 function tmp(): string {
@@ -270,5 +271,141 @@ describe("formatSessionExport", () => {
     expect(text).toContain(id);
     expect(text).toContain(result.markdownPath);
     expect(text).toContain(result.manifest.digest);
+  });
+});
+
+describe("durable state in the export (Issue #614)", () => {
+  const ARCHIVED_AT = 1_700_000_500_000;
+  const PINNED_AT = 1_700_000_600_000;
+  const NOTE_AT = 1_700_000_700_000;
+
+  function equip(s: SessionStore, id: string): void {
+    s.writeGoal(id, {
+      revision: 2,
+      goal: {
+        objective: "migrate the storage layer",
+        status: "active",
+        createdAt: 10,
+        updatedAt: 20,
+        title: "Storage migration",
+      },
+      history: [
+        { revision: 1, kind: "set", objective: "migrate the storage layer", status: "active", at: 10 },
+        { revision: 2, kind: "title", objective: "Storage migration", status: "active", at: 20 },
+      ],
+    });
+    expect(appendSessionNote(s, id, "first note", NOTE_AT - 1000).ok).toBe(true);
+    expect(appendSessionNote(s, id, "second note", NOTE_AT).ok).toBe(true);
+    s.writeArchived(id, ARCHIVED_AT);
+    s.writePinned(id, PINNED_AT);
+  }
+
+  it("includes goal, notes, and lifecycle markers for an equipped session", () => {
+    const { store: s } = store();
+    const id = "sess-equipped";
+    seed(s, id, [{ role: "user", content: "hi" }]);
+    equip(s, id);
+
+    const built = buildSessionManifest(s, id);
+    if ("error" in built) throw new Error(built.error);
+    const m = built.manifest;
+    expect(m.goal).toEqual({
+      status: "active",
+      objective: "migrate the storage layer",
+      title: "Storage migration",
+      revision: 2,
+      historyCount: 2,
+    });
+    // Notes keep the ledger's newest-first order.
+    expect(m.notes).toEqual([
+      { at: NOTE_AT, text: "second note" },
+      { at: NOTE_AT - 1000, text: "first note" },
+    ]);
+    expect(m.archivedAt).toBe(ARCHIVED_AT);
+    expect(m.pinnedAt).toBe(PINNED_AT);
+
+    const md = renderSessionMarkdown(m, built.messages);
+    expect(md).toContain("### Goal");
+    expect(md).toContain("Status: active · Title: Storage migration");
+    expect(md).toContain("Objective: migrate the storage layer");
+    expect(md).toContain("Revision: 2 · History entries: 2");
+    expect(md).toContain("### Notes");
+    expect(md).toContain("second note");
+    expect(md).toContain("first note");
+    expect(md).toContain("### Lifecycle markers");
+    expect(md).toContain(`Archived: ${new Date(ARCHIVED_AT).toISOString()}`);
+    expect(md).toContain(`Pinned: ${new Date(PINNED_AT).toISOString()}`);
+    // Goal/notes sections render before the transcript.
+    expect(md.indexOf("### Goal")).toBeLessThan(md.indexOf("## Transcript"));
+  });
+
+  it("renders honest absence for a bare session", () => {
+    const { store: s } = store();
+    const id = "sess-bare";
+    seed(s, id, [{ role: "user", content: "hi" }]);
+    const built = buildSessionManifest(s, id);
+    if ("error" in built) throw new Error(built.error);
+    expect(built.manifest.goal).toBeNull();
+    expect(built.manifest.notes).toEqual([]);
+    expect(built.manifest.archivedAt).toBeNull();
+    expect(built.manifest.pinnedAt).toBeNull();
+    const md = renderSessionMarkdown(built.manifest, built.messages);
+    expect(md).not.toContain("### Goal");
+    expect(md).not.toContain("### Notes");
+    expect(md).not.toContain("### Lifecycle markers");
+  });
+
+  it("redacts secret-shaped goal and note text in both outputs", () => {
+    const { store: s } = store();
+    const id = "sess-durable-redact";
+    const secretGoal = `deploy with ${SECRET} tonight`;
+    seed(s, id, [{ role: "user", content: "hi" }]);
+    s.writeGoal(id, {
+      revision: 1,
+      goal: { objective: secretGoal, status: "active", createdAt: 1, updatedAt: 2 },
+    });
+    expect(appendSessionNote(s, id, `note carrying ${SECRET}`, NOTE_AT).ok).toBe(true);
+
+    const built = buildSessionManifest(s, id);
+    if ("error" in built) throw new Error(built.error);
+    const md = renderSessionMarkdown(built.manifest, built.messages);
+    expect(md).not.toContain(SECRET);
+    expect(md).toContain("[REDACTED]");
+    expect(JSON.stringify(built.manifest)).not.toContain(SECRET);
+    expect(built.manifest.goal?.objective).toContain("[REDACTED]");
+    expect(built.manifest.notes[0].text).toContain("[REDACTED]");
+  });
+
+  it("includes markers and notes for a corrupt session with the corrupt verdict", () => {
+    const { store: s, dir } = store();
+    const id = "sess-corrupt-durable";
+    fs.writeFileSync(
+      path.join(dir, `${id}.jsonl`),
+      `${JSON.stringify(meta)}\n{not json}\n${JSON.stringify({ role: "user", content: "hi" })}\n`,
+    );
+    expect(appendSessionNote(s, id, "note on corrupt", NOTE_AT).ok).toBe(true);
+    s.writePinned(id, PINNED_AT);
+
+    const built = buildSessionManifest(s, id);
+    if ("error" in built) throw new Error(built.error);
+    expect(built.manifest.integrity).toBe("corrupt");
+    expect(built.manifest.notes).toEqual([{ at: NOTE_AT, text: "note on corrupt" }]);
+    expect(built.manifest.pinnedAt).toBe(PINNED_AT);
+    expect(built.manifest.archivedAt).toBeNull();
+  });
+
+  it("keeps every sidecar byte-identical through an export", () => {
+    const { store: s, dir } = store();
+    const id = "sess-durable-readonly";
+    seed(s, id, [{ role: "user", content: "hi" }]);
+    equip(s, id);
+    const snapshot = new Map<string, string>();
+    for (const f of fs.readdirSync(dir)) {
+      snapshot.set(f, fs.readFileSync(path.join(dir, f), "utf-8"));
+    }
+    exportSession(s, id, { outDir: tmp() });
+    for (const [f, content] of snapshot) {
+      expect(fs.readFileSync(path.join(dir, f), "utf-8")).toBe(content);
+    }
   });
 });
