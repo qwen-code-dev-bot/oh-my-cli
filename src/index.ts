@@ -346,15 +346,18 @@ function parseJournalKinds(raw: unknown): ReadonlySet<SessionJournalKind> | unde
   return new Set(requested as SessionJournalKind[]);
 }
 
-// Parse the --since/--until journal time window (Issue #634). Undefined
-// when neither bound is given; blank, unparseable, or inverted bounds throw
-// so the call site can fail closed before any output.
+// Parse the --since/--until journal time window (Issue #634, relative specs
+// #652). Undefined when neither bound is given; blank, unparseable, or
+// inverted bounds throw so the call site can fail closed before any output.
+// Both bounds resolve relative specs against the same captured read-time
+// reference so the window is internally consistent.
 function parseJournalWindow(sinceRaw: unknown, untilRaw: unknown): JournalTimeWindow | undefined {
   if (sinceRaw === undefined && untilRaw === undefined) return undefined;
+  const reference = Date.now();
   const since =
-    sinceRaw === undefined ? undefined : parseJournalTimestamp(String(sinceRaw), "since");
+    sinceRaw === undefined ? undefined : parseJournalTimestamp(String(sinceRaw), "since", reference);
   const until =
-    untilRaw === undefined ? undefined : parseJournalTimestamp(String(untilRaw), "until");
+    untilRaw === undefined ? undefined : parseJournalTimestamp(String(untilRaw), "until", reference);
   if (since !== undefined && until !== undefined && since > until) {
     throw new Error(
       `Error: --since must not be after --until (${new Date(since).toISOString()} > ${new Date(until).toISOString()})`,
@@ -599,12 +602,12 @@ program
     "With --session-journal/--workspace-journal: only show entries of these kinds (created, goal, note, pinned, archived, last-activity)",
   )
   .option(
-    "--since <iso>",
-    "With --session-journal/--workspace-journal: only show entries at or after this ISO-8601 timestamp (a bare date YYYY-MM-DD means start of day UTC)",
+    "--since <when>",
+    "With --session-journal/--workspace-journal: only show entries at or after this time — an ISO-8601 timestamp, a bare date YYYY-MM-DD (start of day UTC), or a relative offset that long ago (30s/45m/6h/2d/1w, or now)",
   )
   .option(
-    "--until <iso>",
-    "With --session-journal/--workspace-journal: only show entries at or before this ISO-8601 timestamp (a bare date YYYY-MM-DD means end of day UTC)",
+    "--until <when>",
+    "With --session-journal/--workspace-journal: only show entries at or before this time — an ISO-8601 timestamp, a bare date YYYY-MM-DD (end of day UTC), or a relative offset that long ago (30s/45m/6h/2d/1w, or now)",
   )
   .option(
     "--limit <n>",

@@ -69,18 +69,44 @@ export interface JournalTimeWindow {
 
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 const MS_PER_DAY = 86_400_000;
+const RELATIVE_OFFSET = /^(\d+)([smhdw])$/;
+const RELATIVE_UNIT_MS: Record<"s" | "m" | "h" | "d" | "w", number> = {
+  s: 1_000,
+  m: 60_000,
+  h: 3_600_000,
+  d: MS_PER_DAY,
+  w: 7 * MS_PER_DAY,
+};
 
 /**
- * Parse one --since/--until value (Issue #634). Accepts an ISO-8601
- * timestamp or a date-only value: a date-only --since means start of day
- * UTC and a date-only --until means end of day UTC (23:59:59.999). Throws
- * with a caller-ready message on anything unparseable so the CLI can fail
- * closed before any output.
+ * Parse one --since/--until value (Issue #634, extended by #652). Accepts
+ * an ISO-8601 timestamp, a date-only value (a date-only --since means start
+ * of day UTC and a date-only --until means end of day UTC 23:59:59.999), or
+ * a relative spec resolved against the reference instant (read time):
+ * `now`, or `<N><unit>` with units s/m/h/d/w meaning "N units ago"
+ * (e.g. `2d` = two days before the reference). The reference instant is
+ * injectable so relative resolution is deterministic under test. Throws with
+ * a caller-ready message on anything unparseable so the CLI can fail closed
+ * before any output.
  */
-export function parseJournalTimestamp(raw: string, bound: "since" | "until"): number {
+export function parseJournalTimestamp(
+  raw: string,
+  bound: "since" | "until",
+  now?: number,
+): number {
+  const reference = now ?? Date.now();
   const text = raw.trim();
   if (text === "") {
     throw new Error(`Error: --${bound} must not be blank`);
+  }
+  if (text === "now") {
+    return reference;
+  }
+  const relative = RELATIVE_OFFSET.exec(text);
+  if (relative !== null) {
+    const count = Number(relative[1]);
+    const unit = relative[2] as "s" | "m" | "h" | "d" | "w";
+    return reference - count * RELATIVE_UNIT_MS[unit];
   }
   const dateOnly = DATE_ONLY.exec(text);
   if (dateOnly !== null) {
@@ -100,13 +126,13 @@ export function parseJournalTimestamp(raw: string, bound: "since" | "until"): nu
   // whole dates, so fail closed instead.
   if (/^\d{4}-\d{2}$/.test(text)) {
     throw new Error(
-      `Error: invalid --${bound} timestamp: "${raw}" (expected an ISO-8601 timestamp or a date YYYY-MM-DD)`,
+      `Error: invalid --${bound} timestamp: "${raw}" (expected an ISO-8601 timestamp, a date YYYY-MM-DD, or a relative offset like 30s/45m/6h/2d/1w/now)`,
     );
   }
   const parsed = Date.parse(text);
   if (Number.isNaN(parsed)) {
     throw new Error(
-      `Error: invalid --${bound} timestamp: "${raw}" (expected an ISO-8601 timestamp or a date YYYY-MM-DD)`,
+      `Error: invalid --${bound} timestamp: "${raw}" (expected an ISO-8601 timestamp, a date YYYY-MM-DD, or a relative offset like 30s/45m/6h/2d/1w/now)`,
     );
   }
   return parsed;
