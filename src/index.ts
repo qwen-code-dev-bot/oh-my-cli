@@ -127,8 +127,12 @@ import {
   parseJournalPollMs,
   parseJournalSkip,
   parseJournalTimestamp,
+  sessionDiffNewEntries,
+  sessionJournalEntryIdentity,
+  sessionJournalEntryJsonLine,
+  sessionJournalEntryLine,
 } from "./session-journal.js";
-import type { JournalTimeWindow, SessionJournalKind } from "./session-journal.js";
+import type { JournalTimeWindow, SessionJournalKind, SessionJournalRecord } from "./session-journal.js";
 import { buildSessionDiff, formatSessionDiff } from "./session-diff.js";
 import { searchSessionNotes, formatSessionNotesSearch } from "./session-notes-search.js";
 import type { SessionNotesSearchScope } from "./session-notes-search.js";
@@ -1966,8 +1970,16 @@ program
       // Exits 0 on success, 2 on resolution failure or a bad format.
       if (opts.sessionJournal !== undefined) {
         const format = String(opts.output ?? "text");
-        if (format !== "text" && format !== "json") {
+        if (format !== "text" && format !== "json" && format !== "jsonl") {
           process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        // JSON-lines streaming is the follow-mode shape (Issue #688); the
+        // aggregated snapshot record keeps --output json.
+        if (format === "jsonl" && opts.follow !== true) {
+          process.stderr.write(
+            "Error: --output jsonl requires --follow (snapshots use --output json)\n",
+          );
           process.exit(2);
         }
         let kinds: ReadonlySet<SessionJournalKind> | undefined;
@@ -2003,6 +2015,116 @@ program
         if (!resolved.ok) {
           process.stderr.write(`Cannot read journal: ${resolved.reason}\n`);
           process.exit(2);
+        }
+        // Follow mode (Issue #688): print the current journal exactly as the
+        // non-follow surface would, then keep watching the store and emit
+        // newly appearing entries live until SIGINT/SIGTERM exits 0 — text
+        // lines by default, --output jsonl for the machine-readable stream.
+        // --kind stays live; window/pagination apply to the initial snapshot
+        // alone; the aggregation surfaces are incompatible. Read-only.
+        if (opts.follow === true) {
+          if (format === "json") {
+            process.stderr.write(
+              "Error: --follow requires text or jsonl output; --output json is not supported with --follow\n",
+            );
+            process.exit(2);
+          }
+          const aggregations: Array<[string, boolean]> = [
+            ["--by-session-day", opts.bySessionDay === true],
+            ["--by-kind", opts.byKind === true],
+            ["--by-day", opts.byDay === true],
+            ["--by-hour", opts.byHour === true],
+            ["--by-week", opts.byWeek === true],
+            ["--by-month", opts.byMonth === true],
+            ["--count", opts.count === true],
+          ];
+          const activeAggregations = aggregations.filter(([, on]) => on).map(([flag]) => flag);
+          if (activeAggregations.length > 0) {
+            process.stderr.write(
+              `Error: --follow cannot be combined with ${activeAggregations.join(", ")}\n`,
+            );
+            process.exit(2);
+          }
+          let pollMs = JOURNAL_FOLLOW_DEFAULT_POLL_MS;
+          if (opts.pollMs !== undefined) {
+            try {
+              pollMs = parseJournalPollMs(String(opts.pollMs));
+            } catch (err) {
+              process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+              process.exit(2);
+            }
+          }
+          const sessionId = resolved.sessionId;
+          // Unbounded, kind-filtered rebuild: follow must see every entry
+          // (the snapshot cap would hide new arrivals), and --kind is the
+          // only filter that stays live after the snapshot.
+          const buildUnbounded = (): SessionJournalRecord => {
+            const built = buildSessionJournal(store, sessionId, { kinds });
+            if ("error" in built) {
+              process.stderr.write(`Error: ${built.error}\n`);
+              process.exit(2);
+            }
+            return built.journal;
+          };
+          const liveIntegrity = (r: SessionJournalRecord): "partial" | "corrupt" | undefined =>
+            r.integrity === "partial" || r.integrity === "corrupt" ? r.integrity : undefined;
+          // Baseline: everything that exists right now is "already seen",
+          // including entries the bounded snapshot elided.
+          const seen = new Set<string>(buildUnbounded().entries.map(sessionJournalEntryIdentity));
+          // Initial snapshot: byte-identical to the non-follow surface.
+          const snapshotBuilt = buildSessionJournal(store, sessionId, {
+            kinds,
+            window,
+            limit,
+            skip,
+            newestFirst: opts.newestFirst === true,
+          });
+          if ("error" in snapshotBuilt) {
+            process.stderr.write(`Error: ${snapshotBuilt.error}\n`);
+            process.exit(2);
+          }
+          if (format === "jsonl") {
+            for (const entry of snapshotBuilt.journal.entries) {
+              process.stdout.write(
+                sessionJournalEntryJsonLine(entry, {
+                  sessionId,
+                  integrity: liveIntegrity(snapshotBuilt.journal),
+                }) + "\n",
+              );
+            }
+          } else {
+            const relative = opts.relative === true;
+            process.stdout.write(
+              renderReportLines(formatSessionJournal(snapshotBuilt.journal, { relative }), opts.ascii),
+            );
+          }
+          const stamp = (at: number): string =>
+            opts.relative === true ? formatRelativeAge(at, Date.now()) : new Date(at).toISOString();
+          const timer = setInterval(() => {
+            const current = buildUnbounded();
+            const fresh = sessionDiffNewEntries(seen, current.entries);
+            for (const entry of fresh) {
+              seen.add(sessionJournalEntryIdentity(entry));
+              process.stdout.write(
+                format === "jsonl"
+                  ? sessionJournalEntryJsonLine(entry, {
+                      sessionId,
+                      integrity: liveIntegrity(current),
+                    }) + "\n"
+                  : renderReportLines([sessionJournalEntryLine(entry, stamp)], opts.ascii) + "\n",
+              );
+            }
+          }, pollMs);
+          const stop = (): void => {
+            clearInterval(timer);
+            process.exit(0);
+          };
+          // Follow owns Ctrl-C for its lifetime: the default handler exits
+          // 130 with a session-saved message that does not apply here.
+          process.removeListener("SIGINT", defaultSigintHandler);
+          process.on("SIGINT", stop);
+          process.on("SIGTERM", stop);
+          return;
         }
         if (opts.byDay === true) {
           // Per-day grouping mode (Issue #646): the same pipeline and
