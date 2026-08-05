@@ -68,6 +68,11 @@ import {
   SESSION_NOTES_MAX,
 } from "./session-notes.js";
 import { buildSessionsOverviewRecord, formatSessionsOverview } from "./sessions-overview.js";
+import {
+  buildStaleSessionsReport,
+  formatStaleSessions,
+  STALE_DEFAULT_DAYS,
+} from "./stale-sessions.js";
 import { buildSessionJournal, formatSessionJournal } from "./session-journal.js";
 import { buildSessionDiff, formatSessionDiff } from "./session-diff.js";
 import { searchSessionNotes, formatSessionNotesSearch } from "./session-notes-search.js";
@@ -520,6 +525,10 @@ program
     "Show a read-only aggregate health census of the whole session store (integrity, sidecar presence, workspace breakdown, newest activity; add --output json for a versioned record) and exit",
   )
   .option(
+    "--stale-sessions [days]",
+    "Show a read-only, advisory retention report: sessions older than the threshold (default 30 days) that are neither pinned nor archived are archive candidates (add --output json for a versioned record) and exit",
+  )
+  .option(
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
@@ -872,6 +881,40 @@ program
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
           process.stdout.write(formatSessionsOverview(record).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Stale-sessions mode (Issue #626): a read-only, strictly advisory
+      // retention report — sessions older than the threshold that carry
+      // neither keep signal (pin/archive) are archive candidates, ordered
+      // oldest first; pinned/archived older sessions count as protected.
+      // Nothing is ever archived by this surface; the store is never mutated.
+      // Exits 0 on a successful report (empty is honest), 2 on a bad
+      // threshold or a bad format.
+      if (opts.staleSessions !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let thresholdDays = STALE_DEFAULT_DAYS;
+        if (typeof opts.staleSessions === "string") {
+          const parsed = Number(opts.staleSessions);
+          if (!Number.isInteger(parsed) || parsed <= 0) {
+            process.stderr.write(
+              `Error: --stale-sessions days must be a positive integer (got "${opts.staleSessions}")\n`,
+            );
+            process.exit(2);
+          }
+          thresholdDays = parsed;
+        }
+        const store = new SessionStore();
+        const record = buildStaleSessionsReport(store, { thresholdDays });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(record) + "\n");
+        } else {
+          process.stdout.write(formatStaleSessions(record).join("\n") + "\n");
         }
         process.exit(0);
       }
