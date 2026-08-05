@@ -98,6 +98,15 @@ export function buildStoreDoctorReport(
   };
 }
 
+/**
+ * Map a checkup verdict to the `--strict` exit code (Issue #676): 0 when
+ * the store is healthy, 1 when it needs attention. Pure; output is
+ * unaffected — the exit code is the machine-readable signal.
+ */
+export function storeDoctorStrictExit(verdict: StoreDoctorVerdict): number {
+  return verdict === "healthy" ? 0 : 1;
+}
+
 export function formatStoreDoctorReport(record: StoreDoctorRecord): string[] {
   const lines: string[] = [];
   lines.push("Store doctor");

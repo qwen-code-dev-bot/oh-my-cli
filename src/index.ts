@@ -75,7 +75,7 @@ import {
 } from "./stale-sessions.js";
 import { buildSessionStorageReport, formatSessionStorageReport } from "./session-storage.js";
 import { buildSessionHealthReport, formatSessionHealthReport } from "./session-health.js";
-import { buildStoreDoctorReport, formatStoreDoctorReport } from "./store-doctor.js";
+import { buildStoreDoctorReport, formatStoreDoctorReport, storeDoctorStrictExit } from "./store-doctor.js";
 import { renderReportLines } from "./ascii-output.js";
 import {
   buildWorkspaceJournal,
@@ -624,6 +624,10 @@ program
     "Run a read-only consolidated store checkup composing health, sidecar, storage, and stale-session diagnostics into one summary with an overall verdict; diagnostic only, never heals (add --output json for a versioned record) and exit",
   )
   .option(
+    "--strict",
+    "With --store-doctor: exit 1 when the checkup verdict is attention-needed (0 when healthy) so automation can gate on store health; output is unchanged",
+  )
+  .option(
     "--ascii",
     "With the read-only report/journal/session surfaces: render text output ASCII-safe (decorative and semantic glyphs mapped to ASCII equivalents); JSON output is unchanged",
   )
@@ -1131,9 +1135,11 @@ program
       // storage, and stale-session machineries into one sectioned summary
       // with an honestly derived verdict. Never heals, never mutates. Exit
       // 0 on a successful checkup regardless of findings (the checkup is a
-      // report, not a failure signal), 2 on a bad format. The flag is
-      // --store-doctor because --doctor already names the installation and
-      // platform readiness checks.
+      // report, not a failure signal), 2 on a bad format. With --strict
+      // (Issue #676) the exit code signals the verdict for automation: 1
+      // when attention-needed, 0 when healthy. The flag is --store-doctor
+      // because --doctor already names the installation and platform
+      // readiness checks.
       if (opts.storeDoctor === true) {
         const format = String(opts.output ?? "text");
         if (format !== "text" && format !== "json") {
@@ -1147,7 +1153,7 @@ program
         } else {
           process.stdout.write(renderReportLines(formatStoreDoctorReport(record), opts.ascii));
         }
-        process.exit(0);
+        process.exit(opts.strict === true ? storeDoctorStrictExit(record.verdict) : 0);
       }
 
       // Workspace-journal mode (Issue #630): a read-only merged chronology of
