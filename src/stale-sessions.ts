@@ -10,7 +10,9 @@
 // protected, never listed as candidates.
 //
 // Strictly read-only and strictly advisory: the store is never mutated and
-// nothing is ever archived by this surface.
+// nothing is ever archived by this surface. With `--strict` (Issue #680)
+// the exit code signals whether archive candidates exist so retention
+// automation can gate without parsing prose.
 
 import type { SessionStore } from "./session.js";
 import { collectSessionSummaries, formatSessionAge } from "./session-summary.js";
@@ -95,6 +97,17 @@ export function buildStaleSessionsReport(
     protectedPinned,
     protectedArchived,
   };
+}
+
+/**
+ * Map a stale-sessions report to the `--strict` exit code (Issue #680):
+ * 1 when at least one archive candidate exists, 0 otherwise — protected
+ * pinned/archived sessions and fresh or empty stores never fail. Pure;
+ * the report output is unaffected — the exit code is the machine-readable
+ * signal.
+ */
+export function staleSessionsStrictExit(record: StaleSessionsRecord): number {
+  return record.candidates.length > 0 ? 1 : 0;
 }
 
 export function formatStaleSessions(record: StaleSessionsRecord): string[] {
