@@ -17,8 +17,9 @@
 import fs from "node:fs";
 import type { SessionStore } from "./session.js";
 import { shortSessionId } from "./session-picker.js";
-import { redactSecrets } from "./permission-impact.js";
+import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { readSessionNotes, notesPath } from "./session-notes.js";
+import { workspaceTrustKey } from "./folder-trust.js";
 
 export const SESSION_NOTES_SEARCH_SCHEMA = "oh-my-cli.session-notes-search" as const;
 export const SESSION_NOTES_SEARCH_VERSION = 1 as const;
@@ -49,16 +50,38 @@ export interface SessionNotesSearchRecord {
   elidedPerSession: number;
   /** Matches dropped by the overall bound. */
   elidedTotal: number;
+  /** Present only when a workspace scope was active (Issue #628); redacted. */
+  scopedWorkspace?: string;
+}
+
+// An active workspace scope for the scan (Issue #628, mirroring transcript
+// search's #596 scope shape): ledgers are scanned only for sessions whose
+// declared workspace collapses to `workspaceKey`. `keyOf` is injectable for
+// deterministic tests; it defaults to the folder-trust workspace key.
+export interface SessionNotesSearchScope {
+  workspaceKey: string;
+  workspacePath: string;
+  keyOf?: (workspacePath: string) => string;
+}
+
+function redactWorkspacePath(p: string): string {
+  return redactSecrets(redactHomePath(p)).text;
 }
 
 // Scan the store for a case-insensitive substring across every session's
 // notes ledger. Deterministic order: sessions by id, notes newest-first (the
-// ledger's own order). Read-only — the store is never mutated.
+// ledger's own order). Read-only — the store is never mutated. With a scope
+// (Issue #628), only ledgers of sessions whose declared workspace collapses
+// to the scoped canonical identity are scanned; sessions without workspace
+// metadata (or an uncanonicalizable one) belong to no workspace and are
+// skipped.
 export function searchSessionNotes(
   store: SessionStore,
   query: string,
+  scope?: SessionNotesSearchScope,
 ): SessionNotesSearchRecord {
   const needle = query.trim().toLowerCase();
+  const keyOf = scope?.keyOf ?? workspaceTrustKey;
   const matches: SessionNotesSearchMatch[] = [];
   let ledgersScanned = 0;
   let elidedPerSession = 0;
@@ -67,8 +90,19 @@ export function searchSessionNotes(
   if (needle !== "") {
     for (const id of [...store.listIds()].sort()) {
       // Archived sessions are retired from discovery (Issue #598); note
-      // search stays consistent with that semantics.
+      // search stays consistent with that semantics in both modes.
       if (store.readArchived(id) !== null) continue;
+      if (scope !== undefined) {
+        const declared = store.readMeta(id)?.workspace;
+        if (declared === undefined || declared === "") continue;
+        let key: string;
+        try {
+          key = keyOf(declared);
+        } catch {
+          continue;
+        }
+        if (key !== scope.workspaceKey) continue;
+      }
       if (!fs.existsSync(notesPath(store, id))) continue;
       ledgersScanned++;
       const name = store.readName(id);
@@ -103,12 +137,16 @@ export function searchSessionNotes(
     matches,
     elidedPerSession,
     elidedTotal,
+    ...(scope !== undefined ? { scopedWorkspace: redactWorkspacePath(scope.workspacePath) } : {}),
   };
 }
 
 export function formatSessionNotesSearch(record: SessionNotesSearchRecord): string[] {
   const lines: string[] = [];
   lines.push(`Session notes search — "${record.query}"`);
+  if (record.scopedWorkspace !== undefined) {
+    lines.push(`Scoped to workspace: ${record.scopedWorkspace}`);
+  }
   lines.push("─".repeat(40));
   lines.push("");
   lines.push(`Scanned ${record.ledgersScanned} note ledger(s).`);

@@ -76,6 +76,7 @@ import {
 import { buildSessionJournal, formatSessionJournal } from "./session-journal.js";
 import { buildSessionDiff, formatSessionDiff } from "./session-diff.js";
 import { searchSessionNotes, formatSessionNotesSearch } from "./session-notes-search.js";
+import type { SessionNotesSearchScope } from "./session-notes-search.js";
 import { searchSessions, formatSessionSearch } from "./session-search.js";
 import type { SessionSearchScope } from "./session-search.js";
 import { forkSession, resolveForkTarget, SESSION_FORK_SCHEMA, SESSION_FORK_VERSION } from "./session-fork.js";
@@ -1362,7 +1363,24 @@ program
           process.exit(2);
         }
         const store = new SessionStore();
-        const record = searchSessionNotes(store, String(opts.searchNotes));
+        // --workspace-scoped (Issue #628): mirror transcript search's #596
+        // scoping — scan only ledgers of sessions declared for the scoped
+        // workspace's canonical identity; an uncanonicalizable target fails
+        // closed before any output.
+        let notesScope: SessionNotesSearchScope | undefined;
+        if (opts.workspaceScoped) {
+          let targetKey: string;
+          try {
+            targetKey = workspaceTrustKey(String(opts.workspace));
+          } catch {
+            process.stderr.write(
+              `Error: cannot scope to workspace "${redactHomePath(String(opts.workspace))}": its identity cannot be canonicalized\n`,
+            );
+            process.exit(2);
+          }
+          notesScope = { workspaceKey: targetKey, workspacePath: String(opts.workspace) };
+        }
+        const record = searchSessionNotes(store, String(opts.searchNotes), notesScope);
         if (format === "json") {
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
