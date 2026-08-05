@@ -75,6 +75,8 @@ import {
 } from "./stale-sessions.js";
 import { buildWorkspaceJournal, formatWorkspaceJournal } from "./workspace-journal.js";
 import { buildSessionJournal, formatSessionJournal } from "./session-journal.js";
+import { JOURNAL_KINDS } from "./session-journal.js";
+import type { SessionJournalKind } from "./session-journal.js";
 import { buildSessionDiff, formatSessionDiff } from "./session-diff.js";
 import { searchSessionNotes, formatSessionNotesSearch } from "./session-notes-search.js";
 import type { SessionNotesSearchScope } from "./session-notes-search.js";
@@ -301,6 +303,22 @@ import fs from "node:fs";
 function defaultSigintHandler(): void {
   process.stderr.write("\nInterrupted. Session saved.\n");
   process.exit(130);
+}
+
+// Parse the repeatable --kind <kind...> journal filter (Issue #632).
+// Undefined means "no filter"; unknown kinds throw listing the valid
+// taxonomy so the call site can fail closed before any output.
+function parseJournalKinds(raw: unknown): ReadonlySet<SessionJournalKind> | undefined {
+  if (raw === undefined) return undefined;
+  const requested = (raw as unknown[]).map(String);
+  if (requested.length === 0) return undefined;
+  const invalid = requested.filter((k) => !(JOURNAL_KINDS as readonly string[]).includes(k));
+  if (invalid.length > 0) {
+    throw new Error(
+      `Error: unknown journal kind(s): ${invalid.join(", ")} (valid: ${JOURNAL_KINDS.join(", ")})`,
+    );
+  }
+  return new Set(requested as SessionJournalKind[]);
 }
 process.on("SIGINT", defaultSigintHandler);
 
@@ -533,6 +551,10 @@ program
   .option(
     "--workspace-journal",
     "Show a read-only merged chronology of every session declared for the --workspace (default cwd) identity (add --output json for a versioned record) and exit",
+  )
+  .option(
+    "--kind <kind...>",
+    "With --session-journal/--workspace-journal: only show entries of these kinds (created, goal, note, pinned, archived, last-activity)",
   )
   .option(
     "--filter <text>",
@@ -939,10 +961,18 @@ program
           process.stderr.write(`Error: invalid output format "${format}"\n`);
           process.exit(2);
         }
+        let kinds: ReadonlySet<SessionJournalKind> | undefined;
+        try {
+          kinds = parseJournalKinds(opts.kind);
+        } catch (err) {
+          process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+          process.exit(2);
+        }
         let record;
         try {
           record = buildWorkspaceJournal(new SessionStore(), {
             workspace: String(opts.workspace),
+            kinds,
           });
         } catch {
           process.stderr.write(
@@ -1323,13 +1353,20 @@ program
           process.stderr.write(`Error: invalid output format "${format}"\n`);
           process.exit(2);
         }
+        let kinds: ReadonlySet<SessionJournalKind> | undefined;
+        try {
+          kinds = parseJournalKinds(opts.kind);
+        } catch (err) {
+          process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+          process.exit(2);
+        }
         const store = new SessionStore();
         const resolved = resolveArchiveTarget(String(opts.sessionJournal), store);
         if (!resolved.ok) {
           process.stderr.write(`Cannot read journal: ${resolved.reason}\n`);
           process.exit(2);
         }
-        const built = buildSessionJournal(store, resolved.sessionId);
+        const built = buildSessionJournal(store, resolved.sessionId, { kinds });
         if ("error" in built) {
           process.stderr.write(`Cannot read journal: ${built.error}\n`);
           process.exit(2);

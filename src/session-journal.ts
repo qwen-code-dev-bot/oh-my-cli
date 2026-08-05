@@ -24,13 +24,31 @@ import { readSessionNotes } from "./session-notes.js";
 export const SESSION_JOURNAL_SCHEMA = "oh-my-cli.session-journal" as const;
 export const SESSION_JOURNAL_VERSION = 1 as const;
 
-export type SessionJournalKind =
-  | "created"
-  | "goal"
-  | "note"
-  | "pinned"
-  | "archived"
-  | "last-activity";
+/** The closed entry-kind taxonomy shared by both journal surfaces (#632). */
+export const JOURNAL_KINDS = [
+  "created",
+  "goal",
+  "note",
+  "pinned",
+  "archived",
+  "last-activity",
+] as const;
+
+export type SessionJournalKind = (typeof JOURNAL_KINDS)[number];
+
+/**
+ * Filter journal entries by kind (Issue #632). Undefined or an empty set
+ * means "no filter" (all entries, order preserved); otherwise only entries
+ * whose kind is in the set appear. Shared by the per-session journal (#618)
+ * and the workspace journal merge (#630).
+ */
+export function filterEntriesByKind<T extends { kind: SessionJournalKind }>(
+  entries: readonly T[],
+  kinds: ReadonlySet<SessionJournalKind> | undefined,
+): T[] {
+  if (kinds === undefined || kinds.size === 0) return [...entries];
+  return entries.filter((e) => kinds.has(e.kind));
+}
 
 export interface SessionJournalEntry {
   /** Epoch ms when the event happened. */
@@ -129,11 +147,13 @@ export function buildSessionJournalEntries(
 /**
  * Build the journal for one session. Returns an error string (not throwing)
  * when the session is missing so the CLI can map it to a meaningful exit
- * status. Reading never mutates the store.
+ * status. Reading never mutates the store. An optional kind set filters the
+ * entries (Issue #632); without it the journal is unchanged.
  */
 export function buildSessionJournal(
   store: SessionStore,
   id: string,
+  opts: { kinds?: ReadonlySet<SessionJournalKind> } = {},
 ): { journal: SessionJournalRecord } | { error: string } {
   const integrity = store.integrity(id);
   if (integrity.status === "missing") {
@@ -145,7 +165,7 @@ export function buildSessionJournal(
       v: SESSION_JOURNAL_VERSION,
       sessionId: id,
       integrity: integrity.status as SessionJournalRecord["integrity"],
-      entries: buildSessionJournalEntries(store, id),
+      entries: filterEntriesByKind(buildSessionJournalEntries(store, id), opts.kinds),
     },
   };
 }
