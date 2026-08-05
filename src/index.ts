@@ -76,11 +76,13 @@ import {
 import {
   buildWorkspaceJournal,
   buildWorkspaceJournalByDay,
+  buildWorkspaceJournalByHour,
   buildWorkspaceJournalBySession,
   buildWorkspaceJournalCount,
   buildWorkspaceJournalSummary,
   formatWorkspaceJournal,
   formatWorkspaceJournalByDay,
+  formatWorkspaceJournalByHour,
   formatWorkspaceJournalBySession,
   formatWorkspaceJournalCount,
   formatWorkspaceJournalSummary,
@@ -88,10 +90,12 @@ import {
 import {
   buildSessionJournal,
   buildSessionJournalByDay,
+  buildSessionJournalByHour,
   buildSessionJournalCount,
   buildSessionJournalSummary,
   formatSessionJournal,
   formatSessionJournalByDay,
+  formatSessionJournalByHour,
   formatSessionJournalCount,
   formatSessionJournalSummary,
 } from "./session-journal.js";
@@ -634,6 +638,10 @@ program
     "With --session-journal/--workspace-journal: group the entries the filters and bounds keep by UTC day — day buckets and counts only, never entry contents (add --output json for a versioned record)",
   )
   .option(
+    "--by-hour",
+    "With --session-journal/--workspace-journal: group the entries the filters and bounds keep by UTC hour — hour buckets and counts only, never entry contents (add --output json for a versioned record)",
+  )
+  .option(
     "--by-session",
     "With --workspace-journal: group the entries the filters and bounds keep by contributing session — session ids and counts only, never entry contents (add --output json for a versioned record)",
   )
@@ -1123,6 +1131,32 @@ program
             process.stdout.write(JSON.stringify(byDayRecord) + "\n");
           } else {
             process.stdout.write(formatWorkspaceJournalByDay(byDayRecord).join("\n") + "\n");
+          }
+          process.exit(0);
+        }
+        if (opts.byHour === true) {
+          // Per-hour grouping mode (Issue #656): the same pipeline, but the
+          // output carries UTC hour buckets only — never entry contents.
+          // Bucketing fixes the order, so --newest-first has no effect here.
+          let byHourRecord;
+          try {
+            byHourRecord = buildWorkspaceJournalByHour(new SessionStore(), {
+              workspace: String(opts.workspace),
+              kinds,
+              window,
+              limit,
+              skip,
+            });
+          } catch {
+            process.stderr.write(
+              `Error: cannot journal workspace "${redactHomePath(String(opts.workspace))}": its identity cannot be canonicalized\n`,
+            );
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(byHourRecord) + "\n");
+          } else {
+            process.stdout.write(formatWorkspaceJournalByHour(byHourRecord).join("\n") + "\n");
           }
           process.exit(0);
         }
@@ -1624,6 +1658,28 @@ program
             process.stdout.write(JSON.stringify(grouped.byDay) + "\n");
           } else {
             process.stdout.write(formatSessionJournalByDay(grouped.byDay).join("\n") + "\n");
+          }
+          process.exit(0);
+        }
+        if (opts.byHour === true) {
+          // Per-hour grouping mode (Issue #656): the same pipeline and
+          // resolution semantics, but the output carries UTC hour buckets
+          // only — never entry contents. Bucketing fixes the order, so
+          // --newest-first has no effect here.
+          const grouped = buildSessionJournalByHour(store, resolved.sessionId, {
+            kinds,
+            window,
+            limit,
+            skip,
+          });
+          if ("error" in grouped) {
+            process.stderr.write(`Cannot read journal: ${grouped.error}\n`);
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(grouped.byHour) + "\n");
+          } else {
+            process.stdout.write(formatSessionJournalByHour(grouped.byHour).join("\n") + "\n");
           }
           process.exit(0);
         }
