@@ -76,10 +76,12 @@ import {
 import {
   buildWorkspaceJournal,
   buildWorkspaceJournalByDay,
+  buildWorkspaceJournalBySession,
   buildWorkspaceJournalCount,
   buildWorkspaceJournalSummary,
   formatWorkspaceJournal,
   formatWorkspaceJournalByDay,
+  formatWorkspaceJournalBySession,
   formatWorkspaceJournalCount,
   formatWorkspaceJournalSummary,
 } from "./workspace-journal.js";
@@ -629,6 +631,10 @@ program
     "With --session-journal/--workspace-journal: group the entries the filters and bounds keep by UTC day — day buckets and counts only, never entry contents (add --output json for a versioned record)",
   )
   .option(
+    "--by-session",
+    "With --workspace-journal: group the entries the filters and bounds keep by contributing session — session ids and counts only, never entry contents (add --output json for a versioned record)",
+  )
+  .option(
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
@@ -1060,6 +1066,32 @@ program
         } catch (err) {
           process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
           process.exit(2);
+        }
+        if (opts.bySession === true) {
+          // Per-session grouping mode (Issue #648): the same pipeline, but
+          // the output carries session buckets only — never entry contents.
+          // Bucketing fixes the order, so --newest-first has no effect here.
+          let bySessionRecord;
+          try {
+            bySessionRecord = buildWorkspaceJournalBySession(new SessionStore(), {
+              workspace: String(opts.workspace),
+              kinds,
+              window,
+              limit,
+              skip,
+            });
+          } catch {
+            process.stderr.write(
+              `Error: cannot journal workspace "${redactHomePath(String(opts.workspace))}": its identity cannot be canonicalized\n`,
+            );
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(bySessionRecord) + "\n");
+          } else {
+            process.stdout.write(formatWorkspaceJournalBySession(bySessionRecord).join("\n") + "\n");
+          }
+          process.exit(0);
         }
         if (opts.byDay === true) {
           // Per-day grouping mode (Issue #646): the same pipeline, but the

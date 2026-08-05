@@ -388,3 +388,104 @@ export function formatWorkspaceJournalByDay(record: WorkspaceJournalByDayRecord)
   }
   return lines;
 }
+
+/** One contributing-session bucket of the merged workspace journal (#648). */
+export interface WorkspaceSessionBucket {
+  /** Short display id of the contributing session. */
+  shortId: string;
+  /** Full id of the contributing session. */
+  sessionId: string;
+  /** Kept entries contributed by that session. */
+  count: number;
+}
+
+/**
+ * Bucket merged workspace journal entries by contributing session
+ * (Issue #648): count descending, ties broken by full session id ascending
+ * so identical stores always yield identical output. Contains only sessions
+ * present in the given sequence.
+ */
+export function bucketWorkspaceEntriesBySession(
+  entries: readonly WorkspaceJournalEntry[],
+): WorkspaceSessionBucket[] {
+  const counts = new Map<string, { shortId: string; count: number }>();
+  for (const e of entries) {
+    const bucket = counts.get(e.sessionId);
+    if (bucket === undefined) {
+      counts.set(e.sessionId, { shortId: e.shortId, count: 1 });
+    } else {
+      bucket.count += 1;
+    }
+  }
+  return [...counts.entries()]
+    .map(([sessionId, b]) => ({ sessionId, shortId: b.shortId, count: b.count }))
+    .sort((a, b) => b.count - a.count || a.sessionId.localeCompare(b.sessionId));
+}
+
+export const WORKSPACE_JOURNAL_BY_SESSION_SCHEMA = "oh-my-cli.workspace-journal-by-session" as const;
+export const WORKSPACE_JOURNAL_BY_SESSION_VERSION = 1 as const;
+
+/**
+ * Per-session grouping of the merged workspace journal (Issue #648): which
+ * sessions the kept set came from, never what it says — session identifiers
+ * and counts only. Grouping a single-session journal by session is
+ * meaningless, so this is a workspace-surface mode.
+ */
+export interface WorkspaceJournalBySessionRecord {
+  schema: typeof WORKSPACE_JOURNAL_BY_SESSION_SCHEMA;
+  v: typeof WORKSPACE_JOURNAL_BY_SESSION_VERSION;
+  /** The workspace the grouping is scoped to, redacted + home-collapsed. */
+  workspace: string;
+  /** Sessions whose journals were merged. */
+  sessionsScanned: number;
+  /** Workspace sessions skipped because they are archived. */
+  sessionsSkippedArchived: number;
+  /** Per-session buckets of the kept set, count desc, sessionId tie-break. */
+  bySession: WorkspaceSessionBucket[];
+  /** Entries kept after every filter and bound (sums with `bySession`). */
+  count: number;
+  /** Older entries dropped by the bound. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the per-session grouping record for a workspace (Issue #648).
+ * Semantics are exactly `buildWorkspaceJournal`'s — same scoping, filters,
+ * and bounds — but the result carries session buckets only, never entry
+ * contents. Bucketing fixes the order, so no newest-first option exists
+ * here.
+ */
+export function buildWorkspaceJournalBySession(
+  store: SessionStore,
+  opts: Omit<WorkspaceJournalOptions, "newestFirst">,
+): WorkspaceJournalBySessionRecord {
+  const journal = buildWorkspaceJournal(store, opts);
+  return {
+    schema: WORKSPACE_JOURNAL_BY_SESSION_SCHEMA,
+    v: WORKSPACE_JOURNAL_BY_SESSION_VERSION,
+    workspace: journal.workspace,
+    sessionsScanned: journal.sessionsScanned,
+    sessionsSkippedArchived: journal.sessionsSkippedArchived,
+    bySession: bucketWorkspaceEntriesBySession(journal.entries),
+    count: journal.entries.length,
+    elided: journal.elided,
+    skipped: journal.skipped,
+  };
+}
+
+export function formatWorkspaceJournalBySession(record: WorkspaceJournalBySessionRecord): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  if (record.count === 0) {
+    return [`0 event(s).${elidedNote}${skippedNote}`];
+  }
+  const lines = [
+    `${record.count} event(s) across ${record.bySession.length} session(s).${elidedNote}${skippedNote}`,
+  ];
+  for (const b of record.bySession) {
+    lines.push(`  ${b.shortId} ×${b.count}`);
+  }
+  return lines;
+}
