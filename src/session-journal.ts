@@ -886,3 +886,104 @@ export function formatSessionJournalByWeek(record: SessionJournalByWeekRecord): 
   }
   return lines;
 }
+
+/** One per-calendar-month bucket of journal entries (Issue #660). */
+export interface JournalMonthBucket {
+  /** The UTC calendar month, YYYY-MM. */
+  month: string;
+  /** Kept entries whose timestamp falls in that month. */
+  count: number;
+}
+
+/**
+ * Bucket journal entries by UTC calendar month (Issue #660): chronological
+ * (oldest month first — month keys sort chronologically, including across
+ * year boundaries), containing only months present in the given sequence.
+ * Shared by the per-session journal (#618) and the workspace journal merge
+ * (#630).
+ */
+export function bucketEntriesByMonth<T extends { at: number }>(
+  entries: readonly T[],
+): JournalMonthBucket[] {
+  const counts = new Map<string, number>();
+  for (const e of entries) {
+    const month = new Date(e.at).toISOString().slice(0, 7);
+    counts.set(month, (counts.get(month) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([month, count]) => ({ month, count }));
+}
+
+export const SESSION_JOURNAL_BY_MONTH_SCHEMA = "oh-my-cli.session-journal-by-month" as const;
+export const SESSION_JOURNAL_BY_MONTH_VERSION = 1 as const;
+
+/**
+ * Per-month grouping of one session's journal (Issue #660): when the kept
+ * set happened at calendar-month granularity, never what it says — month
+ * buckets and counts only. Same shape as the per-day grouping (#646), at
+ * the coarsest level of the time-bucket series.
+ */
+export interface SessionJournalByMonthRecord {
+  schema: typeof SESSION_JOURNAL_BY_MONTH_SCHEMA;
+  v: typeof SESSION_JOURNAL_BY_MONTH_VERSION;
+  sessionId: string;
+  /** Transcript integrity at read time — honest context for the grouping. */
+  integrity: "ok" | "partial" | "corrupt" | "missing";
+  /** Per-month buckets of the kept set, chronological, present months only. */
+  byMonth: JournalMonthBucket[];
+  /** Entries kept after every filter and bound (sums with `byMonth`). */
+  count: number;
+  /** Older entries dropped by --limit (Issue #636); 0 without it. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the per-month grouping record for one session (Issue #660).
+ * Semantics are exactly `buildSessionJournal`'s — same pipeline, same
+ * heal-free resolution, same error string for a missing session — but the
+ * result carries month buckets only, never entry contents. Bucketing fixes
+ * the order, so no newest-first option exists here.
+ */
+export function buildSessionJournalByMonth(
+  store: SessionStore,
+  id: string,
+  opts: {
+    kinds?: ReadonlySet<SessionJournalKind>;
+    window?: JournalTimeWindow;
+    skip?: number;
+    limit?: number;
+  } = {},
+): { byMonth: SessionJournalByMonthRecord } | { error: string } {
+  const built = buildSessionJournal(store, id, opts);
+  if ("error" in built) return { error: built.error };
+  return {
+    byMonth: {
+      schema: SESSION_JOURNAL_BY_MONTH_SCHEMA,
+      v: SESSION_JOURNAL_BY_MONTH_VERSION,
+      sessionId: built.journal.sessionId,
+      integrity: built.journal.integrity,
+      byMonth: bucketEntriesByMonth(built.journal.entries),
+      count: built.journal.entries.length,
+      elided: built.journal.elided,
+      skipped: built.journal.skipped,
+    },
+  };
+}
+
+export function formatSessionJournalByMonth(record: SessionJournalByMonthRecord): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  if (record.count === 0) {
+    return [`0 event(s).${elidedNote}${skippedNote}`];
+  }
+  const lines = [
+    `${record.count} event(s) across ${record.byMonth.length} month(s).${elidedNote}${skippedNote}`,
+  ];
+  for (const b of record.byMonth) {
+    lines.push(`  ${b.month} ×${b.count}`);
+  }
+  return lines;
+}

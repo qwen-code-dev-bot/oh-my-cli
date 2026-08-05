@@ -24,6 +24,7 @@ import {
   applyJournalSkip,
   bucketEntriesByDay,
   bucketEntriesByHour,
+  bucketEntriesByMonth,
   bucketEntriesByWeek,
   filterEntriesByKind,
   filterEntriesByWindow,
@@ -33,6 +34,7 @@ import {
 import type {
   JournalDayBucket,
   JournalHourBucket,
+  JournalMonthBucket,
   JournalOrder,
   JournalTimeWindow,
   JournalWeekBucket,
@@ -532,6 +534,74 @@ export function formatWorkspaceJournalByWeek(record: WorkspaceJournalByWeekRecor
   ];
   for (const b of record.byWeek) {
     lines.push(`  ${b.week} ×${b.count}`);
+  }
+  return lines;
+}
+
+export const WORKSPACE_JOURNAL_BY_MONTH_SCHEMA = "oh-my-cli.workspace-journal-by-month" as const;
+export const WORKSPACE_JOURNAL_BY_MONTH_VERSION = 1 as const;
+
+/**
+ * Per-month grouping of the merged workspace journal (Issue #660): when the
+ * kept set happened at calendar-month granularity, never what it says —
+ * month buckets and counts only. Same shape as the per-day grouping (#646),
+ * at the coarsest level of the time-bucket series.
+ */
+export interface WorkspaceJournalByMonthRecord {
+  schema: typeof WORKSPACE_JOURNAL_BY_MONTH_SCHEMA;
+  v: typeof WORKSPACE_JOURNAL_BY_MONTH_VERSION;
+  /** The workspace the grouping is scoped to, redacted + home-collapsed. */
+  workspace: string;
+  /** Sessions whose journals were merged. */
+  sessionsScanned: number;
+  /** Workspace sessions skipped because they are archived. */
+  sessionsSkippedArchived: number;
+  /** Per-month buckets of the kept set, chronological, present months only. */
+  byMonth: JournalMonthBucket[];
+  /** Entries kept after every filter and bound (sums with `byMonth`). */
+  count: number;
+  /** Older entries dropped by the bound. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the per-month grouping record for a workspace (Issue #660).
+ * Semantics are exactly `buildWorkspaceJournal`'s — same scoping, filters,
+ * and bounds — but the result carries month buckets only, never entry
+ * contents. Bucketing fixes the order, so no newest-first option exists
+ * here.
+ */
+export function buildWorkspaceJournalByMonth(
+  store: SessionStore,
+  opts: Omit<WorkspaceJournalOptions, "newestFirst">,
+): WorkspaceJournalByMonthRecord {
+  const journal = buildWorkspaceJournal(store, opts);
+  return {
+    schema: WORKSPACE_JOURNAL_BY_MONTH_SCHEMA,
+    v: WORKSPACE_JOURNAL_BY_MONTH_VERSION,
+    workspace: journal.workspace,
+    sessionsScanned: journal.sessionsScanned,
+    sessionsSkippedArchived: journal.sessionsSkippedArchived,
+    byMonth: bucketEntriesByMonth(journal.entries),
+    count: journal.entries.length,
+    elided: journal.elided,
+    skipped: journal.skipped,
+  };
+}
+
+export function formatWorkspaceJournalByMonth(record: WorkspaceJournalByMonthRecord): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  if (record.count === 0) {
+    return [`0 event(s).${elidedNote}${skippedNote}`];
+  }
+  const lines = [
+    `${record.count} event(s) across ${record.byMonth.length} month(s).${elidedNote}${skippedNote}`,
+  ];
+  for (const b of record.byMonth) {
+    lines.push(`  ${b.month} ×${b.count}`);
   }
   return lines;
 }
