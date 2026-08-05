@@ -75,17 +75,21 @@ import {
 } from "./stale-sessions.js";
 import {
   buildWorkspaceJournal,
+  buildWorkspaceJournalByDay,
   buildWorkspaceJournalCount,
   buildWorkspaceJournalSummary,
   formatWorkspaceJournal,
+  formatWorkspaceJournalByDay,
   formatWorkspaceJournalCount,
   formatWorkspaceJournalSummary,
 } from "./workspace-journal.js";
 import {
   buildSessionJournal,
+  buildSessionJournalByDay,
   buildSessionJournalCount,
   buildSessionJournalSummary,
   formatSessionJournal,
+  formatSessionJournalByDay,
   formatSessionJournalCount,
   formatSessionJournalSummary,
 } from "./session-journal.js";
@@ -621,6 +625,10 @@ program
     "With --session-journal/--workspace-journal: print a per-kind tally of the entries the filters and bounds keep — tallies only, never entry contents (add --output json for a versioned record)",
   )
   .option(
+    "--by-day",
+    "With --session-journal/--workspace-journal: group the entries the filters and bounds keep by UTC day — day buckets and counts only, never entry contents (add --output json for a versioned record)",
+  )
+  .option(
     "--filter <text>",
     "With --list-sessions: keep only sessions whose id, name, model, or workspace contains the text (case-insensitive substring)",
   )
@@ -1052,6 +1060,32 @@ program
         } catch (err) {
           process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
           process.exit(2);
+        }
+        if (opts.byDay === true) {
+          // Per-day grouping mode (Issue #646): the same pipeline, but the
+          // output carries UTC day buckets only — never entry contents.
+          // Bucketing fixes the order, so --newest-first has no effect here.
+          let byDayRecord;
+          try {
+            byDayRecord = buildWorkspaceJournalByDay(new SessionStore(), {
+              workspace: String(opts.workspace),
+              kinds,
+              window,
+              limit,
+              skip,
+            });
+          } catch {
+            process.stderr.write(
+              `Error: cannot journal workspace "${redactHomePath(String(opts.workspace))}": its identity cannot be canonicalized\n`,
+            );
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(byDayRecord) + "\n");
+          } else {
+            process.stdout.write(formatWorkspaceJournalByDay(byDayRecord).join("\n") + "\n");
+          }
+          process.exit(0);
         }
         if (opts.byKind === true) {
           // Per-kind summary mode (Issue #644): the same pipeline, but the
@@ -1529,6 +1563,28 @@ program
         if (!resolved.ok) {
           process.stderr.write(`Cannot read journal: ${resolved.reason}\n`);
           process.exit(2);
+        }
+        if (opts.byDay === true) {
+          // Per-day grouping mode (Issue #646): the same pipeline and
+          // resolution semantics, but the output carries UTC day buckets
+          // only — never entry contents. Bucketing fixes the order, so
+          // --newest-first has no effect here.
+          const grouped = buildSessionJournalByDay(store, resolved.sessionId, {
+            kinds,
+            window,
+            limit,
+            skip,
+          });
+          if ("error" in grouped) {
+            process.stderr.write(`Cannot read journal: ${grouped.error}\n`);
+            process.exit(2);
+          }
+          if (format === "json") {
+            process.stdout.write(JSON.stringify(grouped.byDay) + "\n");
+          } else {
+            process.stdout.write(formatSessionJournalByDay(grouped.byDay).join("\n") + "\n");
+          }
+          process.exit(0);
         }
         if (opts.byKind === true) {
           // Per-kind summary mode (Issue #644): the same pipeline and

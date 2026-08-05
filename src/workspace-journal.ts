@@ -22,11 +22,17 @@ import { workspaceTrustKey } from "./folder-trust.js";
 import { buildSessionJournalEntries, JOURNAL_KINDS } from "./session-journal.js";
 import {
   applyJournalSkip,
+  bucketEntriesByDay,
   filterEntriesByKind,
   filterEntriesByWindow,
   tallyEntriesByKind,
 } from "./session-journal.js";
-import type { JournalOrder, JournalTimeWindow, SessionJournalKind } from "./session-journal.js";
+import type {
+  JournalDayBucket,
+  JournalOrder,
+  JournalTimeWindow,
+  SessionJournalKind,
+} from "./session-journal.js";
 
 export const WORKSPACE_JOURNAL_SCHEMA = "oh-my-cli.workspace-journal" as const;
 export const WORKSPACE_JOURNAL_VERSION = 1 as const;
@@ -315,4 +321,70 @@ export function formatWorkspaceJournalSummary(record: WorkspaceJournalSummaryRec
     (k) => `${k} ×${record.byKind[k]}`,
   );
   return [`${record.count} event(s): ${parts.join(", ")}.${elidedNote}${skippedNote}`];
+}
+
+export const WORKSPACE_JOURNAL_BY_DAY_SCHEMA = "oh-my-cli.workspace-journal-by-day" as const;
+export const WORKSPACE_JOURNAL_BY_DAY_VERSION = 1 as const;
+
+/**
+ * Per-day grouping of the merged workspace journal (Issue #646): when the
+ * kept set happened, never what it says — day buckets and counts only, for
+ * reading the rhythm of a workspace's recent history.
+ */
+export interface WorkspaceJournalByDayRecord {
+  schema: typeof WORKSPACE_JOURNAL_BY_DAY_SCHEMA;
+  v: typeof WORKSPACE_JOURNAL_BY_DAY_VERSION;
+  /** The workspace the grouping is scoped to, redacted + home-collapsed. */
+  workspace: string;
+  /** Sessions whose journals were merged. */
+  sessionsScanned: number;
+  /** Workspace sessions skipped because they are archived. */
+  sessionsSkippedArchived: number;
+  /** Per-UTC-day buckets of the kept set, chronological, present days only. */
+  byDay: JournalDayBucket[];
+  /** Entries kept after every filter and bound (sums with `byDay`). */
+  count: number;
+  /** Older entries dropped by the bound. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the per-day grouping record for a workspace (Issue #646). Semantics
+ * are exactly `buildWorkspaceJournal`'s — same scoping, filters, and bounds —
+ * but the result carries day buckets only, never entry contents. Bucketing
+ * fixes the order, so no newest-first option exists here.
+ */
+export function buildWorkspaceJournalByDay(
+  store: SessionStore,
+  opts: Omit<WorkspaceJournalOptions, "newestFirst">,
+): WorkspaceJournalByDayRecord {
+  const journal = buildWorkspaceJournal(store, opts);
+  return {
+    schema: WORKSPACE_JOURNAL_BY_DAY_SCHEMA,
+    v: WORKSPACE_JOURNAL_BY_DAY_VERSION,
+    workspace: journal.workspace,
+    sessionsScanned: journal.sessionsScanned,
+    sessionsSkippedArchived: journal.sessionsSkippedArchived,
+    byDay: bucketEntriesByDay(journal.entries),
+    count: journal.entries.length,
+    elided: journal.elided,
+    skipped: journal.skipped,
+  };
+}
+
+export function formatWorkspaceJournalByDay(record: WorkspaceJournalByDayRecord): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  if (record.count === 0) {
+    return [`0 event(s).${elidedNote}${skippedNote}`];
+  }
+  const lines = [
+    `${record.count} event(s) across ${record.byDay.length} day(s).${elidedNote}${skippedNote}`,
+  ];
+  for (const b of record.byDay) {
+    lines.push(`  ${b.day} ×${b.count}`);
+  }
+  return lines;
 }
