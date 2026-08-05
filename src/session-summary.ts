@@ -32,6 +32,10 @@ export interface SessionSummary {
   corrupt: boolean;
   // Archived out of discovery (Issue #598); resumable by exact id/name.
   archived: boolean;
+  // Pinned to the top of discovery (Issue #610), independent of recency.
+  pinned: boolean;
+  /** Epoch ms when the session was pinned; present only when pinned. */
+  pinnedAt?: number;
 }
 
 export interface SessionSummaryOptions {
@@ -97,6 +101,11 @@ function summarize(store: SessionStore, id: string, now: number): SessionSummary
     // The archive marker is integrity-agnostic metadata (Issue #598), exactly
     // like the name sidecar read above.
     archived: store.readArchived(id) !== null,
+    // The pin marker follows the same conventions (Issue #610).
+    ...((): { pinned: boolean; pinnedAt?: number } => {
+      const pinned = store.readPinned(id);
+      return pinned !== null ? { pinned: true, pinnedAt: pinned.at } : { pinned: false };
+    })(),
   };
 }
 
@@ -174,6 +183,10 @@ export interface SessionListEntry {
   corrupt: boolean;
   /** True when the entry is archived and shown via --include-archived (#598). */
   archived?: boolean;
+  /** True when the entry is pinned (listed first, Issue #610). */
+  pinned?: boolean;
+  /** Epoch ms when the session was pinned; present only when pinned. */
+  pinnedAt?: number;
 }
 
 export interface SessionListRecord {
@@ -182,6 +195,8 @@ export interface SessionListRecord {
   total: number;
   resumable: number;
   corrupt: number;
+  /** Pinned entries among the listed sessions (Issue #610). */
+  pinned: number;
   sessions: SessionListEntry[];
   // Workspace scoping (Issue #596): present only when --workspace-scoped was
   // active. Names the redacted scope target and counts the sessions excluded
@@ -216,6 +231,19 @@ export function filterSessionSummaries(
     const haystacks = [s.id, s.name ?? "", s.model ?? "", s.workspace ?? ""];
     return haystacks.some((h) => h.toLowerCase().includes(needle));
   });
+}
+
+// Pin-first ordering for session listing (Issue #610): the pinned block comes
+// first, and recency order (the input order from collectSessionSummaries) is
+// preserved within each block. Applied only by the listing surface — continue
+// selection and the picker keep pure recency semantics for now.
+export function orderSummariesPinnedFirst(
+  summaries: SessionSummary[],
+): SessionSummary[] {
+  return [
+    ...summaries.filter((s) => s.pinned),
+    ...summaries.filter((s) => !s.pinned),
+  ];
 }
 
 // The outcome of workspace scoping for session enumeration (Issue #596).
@@ -270,6 +298,7 @@ export function sessionListRecord(
     total: summaries.length,
     resumable: summaries.length - corrupt,
     corrupt,
+    pinned: summaries.filter((s) => s.pinned).length,
     sessions: summaries.map((s) => ({
       id: s.id,
       ...(s.name ? { name: redact(s.name) } : {}),
@@ -285,6 +314,9 @@ export function sessionListRecord(
       ageMs: s.ageMs,
       corrupt: s.corrupt,
       ...(s.archived ? { archived: true } : {}),
+      ...(s.pinned
+        ? { pinned: true, ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}) }
+        : {}),
     })),
     ...(scope !== undefined
       ? {
@@ -355,11 +387,14 @@ function formatSessionLines(s: SessionSummary): string[] {
   // Archived sessions are shown only via --include-archived (Issue #598);
   // flag them so the inclusion is never mistaken for active discovery.
   const archivedFlag = s.archived ? "  (archived)" : "";
+  // Pinned sessions are flagged where they render (Issue #610); their
+  // top-of-list position comes from orderSummariesPinnedFirst.
+  const pinnedFlag = s.pinned ? "  (pinned)" : "";
   // The user-owned name (#249) renders next to the id (Issue #530), redacted
   // exactly like the picker renders it — so the discovery surface and the
   // resume surfaces agree.
   const namePart = s.name ? `  "${redact(s.name)}"` : "";
-  const head = `  ${symbol} ${s.id}${namePart}${flag}${archivedFlag}`;
+  const head = `  ${symbol} ${s.id}${namePart}${flag}${archivedFlag}${pinnedFlag}`;
   const provenance = `model ${redact(s.model)}  ·  repo ${redactPath(s.workspace)}`;
   const usage =
     `${s.messageCount} msgs, ${s.userTurns + s.assistantTurns} turns, ` +

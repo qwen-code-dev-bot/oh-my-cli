@@ -100,7 +100,7 @@ describe("Integration: sessions overview (--sessions-overview, Issue #604)", () 
     const record = JSON.parse(json.stdout.trim());
     expect(record.schema).toBe("oh-my-cli.sessions-overview");
     expect(record.totals).toEqual({ sessions: 5, ok: 4, partial: 0, corrupt: 1 });
-    expect(record.metadata).toEqual({ archived: 0, named: 0, withGoal: 0, withNotes: 0 });
+    expect(record.metadata).toEqual({ archived: 0, named: 0, withGoal: 0, withNotes: 0, pinned: 0 });
     // Counts agree between the two modes.
     expect(text.stdout).toContain(`${record.totals.sessions} session(s)`);
     // Workspace breakdown: wsOne 2, wsTwo 2 (healthy + corrupt both declare it).
@@ -125,7 +125,7 @@ describe("Integration: sessions overview (--sessions-overview, Issue #604)", () 
     const json = await runCli(["--sessions-overview", "--output", "json"], baseEnv);
     expect(json.code).toBe(0);
     const record = JSON.parse(json.stdout.trim());
-    expect(record.metadata).toEqual({ archived: 1, named: 1, withGoal: 1, withNotes: 0 });
+    expect(record.metadata).toEqual({ archived: 1, named: 1, withGoal: 1, withNotes: 0, pinned: 0 });
     const text = await runCli(["--sessions-overview"], baseEnv);
     expect(text.stdout).toContain("1 archived · 1 named · 1 with goal · 0 with notes");
   });

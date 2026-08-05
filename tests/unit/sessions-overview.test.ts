@@ -78,7 +78,7 @@ describe("buildSessionsOverviewRecord (Issue #604)", () => {
     expect(record.schema).toBe(SESSIONS_OVERVIEW_SCHEMA);
     expect(record.v).toBe(SESSIONS_OVERVIEW_VERSION);
     expect(record.totals).toEqual({ sessions: 6, ok: 4, partial: 1, corrupt: 1 });
-    expect(record.metadata).toEqual({ archived: 1, named: 1, withGoal: 1, withNotes: 1 });
+    expect(record.metadata).toEqual({ archived: 1, named: 1, withGoal: 1, withNotes: 1, pinned: 0 });
     // Workspace grouping: alpha has 2, beta has 1; partial/corrupt declared no
     // workspace here, and one healthy session is legacy.
     expect(record.workspaces).toEqual([
