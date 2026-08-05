@@ -136,6 +136,36 @@ export function collectSessionPickerRows(
   return orderSessionRows(rows);
 }
 
+// Toggle a session's pin marker (Issue #620): the exact --pin-session /
+// --unpin-session semantics on the same marker — pinned → marker removed,
+// unpinned → marker written with a fresh timestamp. Metadata-only: nothing
+// else in the store is touched. Returns the outcome so a caller can confirm
+// or surface a failure; a write error is caught and reported, never thrown.
+export interface ToggleSessionPinResult {
+  ok: boolean;
+  /** The new pin state when ok. */
+  pinned?: boolean;
+  reason?: string;
+}
+
+export function toggleSessionPin(
+  store: SessionStore,
+  id: string,
+  now: number = Date.now(),
+): ToggleSessionPinResult {
+  try {
+    if (store.readPinned(id) !== null) {
+      store.clearPinned(id);
+      return { ok: true, pinned: false };
+    }
+    store.writePinned(id, now);
+    return { ok: true, pinned: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: msg };
+  }
+}
+
 // Pinned sessions first (Issue #612, completing #610's discovery story),
 // then most recently active, with the id as a stable tiebreaker so the order
 // is identical across restarts even when two sessions share a mtime.
@@ -364,6 +394,8 @@ export interface SessionPickerRenderState {
   selected: number;
   maxVisible?: number;
   error?: string | null;
+  /** Brief confirmation line (e.g. a pin toggle), rendered until displaced. */
+  note?: string | null;
 }
 
 export interface SessionPickerStyle {
@@ -401,13 +433,18 @@ export function renderSessionPickerLines(
   const maxVisible = state.maxVisible ?? 8;
   const lines: string[] = [];
   lines.push(
-    `${bold}Sessions${reset}  ${dim}↑↓ navigate · type to search · Enter resume · Esc cancel${reset}`,
+    `${bold}Sessions${reset}  ${dim}↑↓ navigate · type to search · Ctrl-P pin · Enter resume · Esc cancel${reset}`,
   );
   lines.push(`  ${dim}> ${reset}${state.query}${clearLine}`);
   if (state.error) {
     lines.push(`  ${danger}${state.error}${reset}${clearLine}`);
+  } else if (state.note) {
+    lines.push(`  ${dim}${state.note}${reset}${clearLine}`);
   }
-  lines.push("");
+  // The blank separator still carries the clear suffix: re-renders can place
+  // it over previously non-blank content (a toggle note shifts every line),
+  // and a bare "" would leave that stale content visible (Issue #620).
+  lines.push(clearLine);
 
   if (rows.length === 0) {
     lines.push(`  ${dim}${state.query ? "No matching sessions" : "No resumable sessions"}${reset}`);
@@ -472,15 +509,16 @@ export async function runSessionPicker(
       danger: color ? `${ESC}31m` : "",
       clearLine: CLEAR_LINE,
     };
-    const allRows = collectSessionPickerRows(store);
+    let allRows = collectSessionPickerRows(store);
     let query = "";
     let selected = 0;
     let error: string | null = null;
+    let note: string | null = null;
     let rows = filterSessionRows(allRows, query);
     let renderedLines = 0;
 
     function render() {
-      const lines = renderSessionPickerLines(rows, { query, selected, error }, style);
+      const lines = renderSessionPickerLines(rows, { query, selected, error, note }, style);
       const totalLines = lines.length;
       stdout.write(`${MOVE_UP(renderedLines)}${lines.join("\n")}\n`);
       // When the block shrinks (the query filter narrows the rows), clear the
@@ -541,12 +579,40 @@ export async function runSessionPicker(
       if (key === "\x1b[A" || key === "\x1bOA") {
         if (selected > 0) selected--;
         error = null;
+        note = null;
         render();
         return;
       }
       if (key === "\x1b[B" || key === "\x1bOB") {
         if (selected < rows.length - 1) selected++;
         error = null;
+        note = null;
+        render();
+        return;
+      }
+
+      // Ctrl-P: toggle the pin on the highlighted row (Issue #620). The
+      // control chord keeps plain characters free for search queries. The
+      // marker write uses the exact --pin-session/--unpin-session semantics;
+      // a failure shows an actionable error and keeps the picker open.
+      if (key === "\x10") {
+        if (rows.length === 0 || selected >= rows.length) return;
+        const row = rows[selected];
+        const result = toggleSessionPin(store, row.id);
+        if (!result.ok) {
+          error = `Cannot toggle pin: ${result.reason}`;
+          note = null;
+          render();
+          return;
+        }
+        // Re-enumerate so the row re-sorts into (or out of) the pinned
+        // block, then follow the toggled row under the active query.
+        allRows = collectSessionPickerRows(store);
+        rows = filterSessionRows(allRows, query);
+        const idx = rows.findIndex((r) => r.id === row.id);
+        selected = idx >= 0 ? idx : 0;
+        error = null;
+        note = `${result.pinned ? "Pinned" : "Unpinned"} ${row.shortId}`;
         render();
         return;
       }
@@ -569,6 +635,7 @@ export async function runSessionPicker(
         rows = filterSessionRows(allRows, query);
         selected = 0;
         error = null;
+        note = null;
         render();
       }
     }
