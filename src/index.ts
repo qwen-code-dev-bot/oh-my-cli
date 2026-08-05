@@ -138,7 +138,7 @@ import {
   shortSessionId,
 } from "./session-picker.js";
 import { openComposerDraftStore } from "./composer-draft.js";
-import { buildAttention, attentionRecord, formatAttention } from "./attention-summary.js";
+import { buildAttention, attentionRecord, formatAttention, attentionStrictExit } from "./attention-summary.js";
 import type { AttentionItem } from "./attention-summary.js";
 import { normalizeSessionName } from "./session-name.js";
 import {
@@ -626,7 +626,7 @@ program
   )
   .option(
     "--strict",
-    "With --store-doctor, --health-report, or --stale-sessions: exit 1 when the checkup verdict is attention-needed, the health report finds a corrupt transcript or damaged sidecar, or stale archive candidates exist (0 otherwise — healthy, partial-only, or no candidates) so automation can gate on store health; output is unchanged",
+    "With --store-doctor, --health-report, --stale-sessions, or --attention: exit 1 when the checkup verdict is attention-needed, the health report finds a corrupt transcript or damaged sidecar, stale archive candidates exist, or the workspace attention summary lists any item (0 otherwise — healthy, partial-only, no candidates, or a quiet workspace) so automation can gate on store health; output is unchanged",
   )
   .option(
     "--ascii",
@@ -1513,7 +1513,11 @@ program
       // derived purely from durable state. Never heals, mutates, approves, or
       // executes; every listed action is a hint for the user to run. Scoped by
       // the canonical workspace identity, so other workspaces' sessions never
-      // appear. Exits 0 on a successful read, 2 on a bad format.
+      // appear. Exits 0 on a successful read, 2 on a bad format. With
+      // --strict (Issue #682) the exit code signals the findings for
+      // automation: 1 when the summary lists at least one item, 0 when the
+      // workspace is quiet — an empty summary is an honest zero state, never
+      // a failure.
       if (opts.attention) {
         const format = String(opts.output ?? "text");
         if (format !== "text" && format !== "json") {
@@ -1534,7 +1538,7 @@ program
         } else {
           process.stdout.write(formatAttention(items, String(opts.workspace)) + "\n");
         }
-        process.exit(0);
+        process.exit(opts.strict === true ? attentionStrictExit(items) : 0);
       }
 
       // Session-stats mode (Issue #201): render a read-only, deterministic
