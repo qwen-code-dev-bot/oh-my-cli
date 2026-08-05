@@ -69,6 +69,7 @@ import {
 } from "./session-notes.js";
 import { buildSessionsOverviewRecord, formatSessionsOverview } from "./sessions-overview.js";
 import { buildSessionJournal, formatSessionJournal } from "./session-journal.js";
+import { buildSessionDiff, formatSessionDiff } from "./session-diff.js";
 import { searchSessionNotes, formatSessionNotesSearch } from "./session-notes-search.js";
 import { searchSessions, formatSessionSearch } from "./session-search.js";
 import type { SessionSearchScope } from "./session-search.js";
@@ -552,6 +553,10 @@ program
   .option(
     "--session-journal <id-or-name>",
     "Show a session's read-only durable event journal (creation, goal transitions, notes, pin/archive markers, last activity; chronological; add --output json for a versioned record), by exact id or user-owned name, and exit",
+  )
+  .option(
+    "--diff-sessions <ids...>",
+    "Compare two sessions by exact id or user-owned name (read-only; shared prefix, divergence, fork provenance; add --output json for a versioned record) and exit",
   )
   .option("--turn-history <id-or-name>", "Show a read-only, per-turn change provenance view for a session from its durable turn checkpoints, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--memory-add <text>", "Record a durable workspace memory (manual; secrets redacted before persistence) and exit")
@@ -1251,6 +1256,47 @@ program
           process.stdout.write(JSON.stringify(built.journal) + "\n");
         } else {
           process.stdout.write(formatSessionJournal(built.journal).join("\n") + "\n");
+        }
+        process.exit(0);
+      }
+
+      // Session-diff mode (Issue #622): read-only comparison of two sessions
+      // — per-side facts, shared leading prefix, divergence counts, fork
+      // provenance, and redacted bounded first-divergence snippets. Heal-free
+      // resolution: corrupt sessions compare via recoverable messages. Exits
+      // 0 on success, 2 on resolution failure, wrong arity, or a bad format.
+      if (opts.diffSessions !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const targets = (opts.diffSessions as unknown[]).map((t) => String(t));
+        if (targets.length !== 2) {
+          process.stderr.write(
+            "Error: --diff-sessions requires exactly two session ids or names\n",
+          );
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const resolvedIds: string[] = [];
+        for (const target of targets) {
+          const resolved = resolveArchiveTarget(target, store);
+          if (!resolved.ok) {
+            process.stderr.write(`Cannot diff: ${resolved.reason}\n`);
+            process.exit(2);
+          }
+          resolvedIds.push(resolved.sessionId);
+        }
+        const built = buildSessionDiff(store, resolvedIds[0], resolvedIds[1]);
+        if ("error" in built) {
+          process.stderr.write(`Cannot diff: ${built.error}\n`);
+          process.exit(2);
+        }
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(built.diff) + "\n");
+        } else {
+          process.stdout.write(formatSessionDiff(built.diff).join("\n") + "\n");
         }
         process.exit(0);
       }
