@@ -20,6 +20,7 @@ import { shortSessionId } from "./session-picker.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { workspaceTrustKey } from "./folder-trust.js";
 import { buildSessionJournalEntries } from "./session-journal.js";
+import { filterEntriesByKind } from "./session-journal.js";
 import type { SessionJournalKind } from "./session-journal.js";
 
 export const WORKSPACE_JOURNAL_SCHEMA = "oh-my-cli.workspace-journal" as const;
@@ -60,6 +61,8 @@ export interface WorkspaceJournalOptions {
   keyOf?: (workspacePath: string) => string;
   /** Bound override for tests. */
   maxEntries?: number;
+  /** Entry-kind filter (Issue #632); undefined means no filter. */
+  kinds?: ReadonlySet<SessionJournalKind>;
 }
 
 export function buildWorkspaceJournal(
@@ -114,8 +117,11 @@ export function buildWorkspaceJournal(
   );
 
   // Keep the newest entries; elide the older tail with a truthful count.
-  const elided = Math.max(0, merged.length - maxEntries);
-  const entries = merged.slice(elided);
+  // The kind filter (Issue #632) applies before the bound, so elision counts
+  // reflect the filtered set.
+  const filtered = filterEntriesByKind(merged, opts.kinds);
+  const elided = Math.max(0, filtered.length - maxEntries);
+  const entries = filtered.slice(elided);
 
   return {
     schema: WORKSPACE_JOURNAL_SCHEMA,
