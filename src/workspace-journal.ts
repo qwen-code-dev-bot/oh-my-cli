@@ -13,7 +13,9 @@
 // verdict, redaction on every free-form value, deterministic ordering, and
 // zero mutation of the store. Rendering is bounded: the newest entries are
 // kept (rendered oldest-first within the kept window) with a truthful
-// elided count for the older tail.
+// elided count for the older tail. With `--follow` (Issue #684) the same
+// chronology is watched live: the builder is re-run on a poll and pure
+// identity helpers decide what newly appeared.
 
 import type { SessionStore } from "./session.js";
 import { shortSessionId } from "./session-picker.js";
@@ -75,6 +77,42 @@ export interface WorkspaceJournalRecord {
   skipped: number;
   /** Rendering direction (Issue #640); oldest-first unless --newest-first. */
   order: JournalOrder;
+}
+
+/**
+ * Stable identity for a merged workspace-journal entry (Issue #684): a
+ * tuple of the contributing session, the entry instant, its kind, and its
+ * detail — exactly the fields that distinguish durable journal facts.
+ * Pure: identical input always yields the identical identity.
+ */
+export function journalEntryIdentity(e: WorkspaceJournalEntry): string {
+  return `${e.sessionId}\u0000${e.at}\u0000${e.kind}\u0000${e.detail}`;
+}
+
+/**
+ * Diff a freshly rebuilt merged chronology against the identities already
+ * seen (Issue #684): returns only the entries that newly appeared, in the
+ * builder's chronological order. Vanished entries produce nothing —
+ * follow mode never re-emits. Pure.
+ */
+export function diffNewEntries(
+  seen: ReadonlySet<string>,
+  current: readonly WorkspaceJournalEntry[],
+): WorkspaceJournalEntry[] {
+  return current.filter((e) => !seen.has(journalEntryIdentity(e)));
+}
+
+/**
+ * One merged-chronology line in the journal's canonical format (Issue
+ * #684), shared by the snapshot renderer and the live follow emitter so
+ * both render byte-identically.
+ */
+export function workspaceJournalEntryLine(
+  e: WorkspaceJournalEntry,
+  stamp: (at: number) => string,
+): string {
+  const integrity = e.integrity !== undefined ? ` (${e.integrity})` : "";
+  return `  ${stamp(e.at)} · ${e.shortId}${integrity} · ${e.kind} · ${e.detail}`;
 }
 
 export interface WorkspaceJournalOptions {
