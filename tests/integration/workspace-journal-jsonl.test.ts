@@ -116,6 +116,10 @@ describe("Integration: workspace journal jsonl follow (--output jsonl, Issue #68
       expect(typeof parsed.sessionId).toBe("string");
       expect(typeof parsed.shortId).toBe("string");
     }
+    // Let the follow loop settle on a slow runner before signaling, and
+    // surface any child error before asserting the clean stop.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(follow.stderr()).toBe("");
     follow.proc.kill("SIGTERM");
     expect(await follow.exitCode()).toBe(0);
   });
