@@ -15,7 +15,9 @@
 // kept (rendered oldest-first within the kept window) with a truthful
 // elided count for the older tail. With `--follow` (Issue #684) the same
 // chronology is watched live: the builder is re-run on a poll and pure
-// identity helpers decide what newly appeared.
+// identity helpers decide what newly appeared. With `--output jsonl`
+// (Issue #686) the follow stream is machine-readable: one self-describing
+// JSON object per entry, flushed per record.
 
 import type { SessionStore } from "./session.js";
 import { shortSessionId } from "./session-picker.js";
@@ -113,6 +115,27 @@ export function workspaceJournalEntryLine(
 ): string {
   const integrity = e.integrity !== undefined ? ` (${e.integrity})` : "";
   return `  ${stamp(e.at)} · ${e.shortId}${integrity} · ${e.kind} · ${e.detail}`;
+}
+
+/**
+ * One merged-chronology entry as a self-describing JSON line (Issue #686):
+ * the workspace-journal schema/version identity plus the entry fields,
+ * with `integrity` only when present. Pure: identical input always yields
+ * the identical line; one complete JSON value per line for record-at-a-time
+ * consumers.
+ */
+export function workspaceJournalEntryJsonLine(e: WorkspaceJournalEntry): string {
+  const line: Record<string, unknown> = {
+    schema: WORKSPACE_JOURNAL_SCHEMA,
+    v: WORKSPACE_JOURNAL_VERSION,
+    at: e.at,
+    kind: e.kind,
+    detail: e.detail,
+    sessionId: e.sessionId,
+    shortId: e.shortId,
+  };
+  if (e.integrity !== undefined) line.integrity = e.integrity;
+  return JSON.stringify(line);
 }
 
 export interface WorkspaceJournalOptions {
