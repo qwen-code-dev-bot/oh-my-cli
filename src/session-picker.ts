@@ -40,6 +40,8 @@ export interface SessionPickerRow {
   ageLabel: string; // "5m ago"
   lastModified: number; // deterministic sort key
   state: SessionPickerState;
+  /** True when the session is pinned (listed first, Issue #610/#612). */
+  pinned?: boolean;
 }
 
 export interface SessionPickerRowOptions {
@@ -100,6 +102,7 @@ export function projectSessionRow(
     ageLabel: formatSessionAge(summary.ageMs),
     lastModified: summary.lastModified,
     state: opts.state,
+    ...(summary.pinned ? { pinned: true } : {}),
   };
 }
 
@@ -133,11 +136,15 @@ export function collectSessionPickerRows(
   return orderSessionRows(rows);
 }
 
-// Most recently active first, with the id as a stable tiebreaker so the order
+// Pinned sessions first (Issue #612, completing #610's discovery story),
+// then most recently active, with the id as a stable tiebreaker so the order
 // is identical across restarts even when two sessions share a mtime.
 export function orderSessionRows(rows: SessionPickerRow[]): SessionPickerRow[] {
   return [...rows].sort(
-    (a, b) => b.lastModified - a.lastModified || a.id.localeCompare(b.id),
+    (a, b) =>
+      Number(b.pinned === true) - Number(a.pinned === true) ||
+      b.lastModified - a.lastModified ||
+      a.id.localeCompare(b.id),
   );
 }
 
@@ -413,9 +420,12 @@ export function renderSessionPickerLines(
     const row = rows[i];
     const isSelected = i === state.selected;
     const marker = isSelected ? `${bold}◆ ` : "  ";
+    // Pinned rows carry a visible flag so the elevation is never invisible
+    // (Issue #612); the pinned-first position comes from orderSessionRows.
+    const pinnedText = row.pinned ? `  ${dim}(pinned)${reset}` : "";
     const note = STATE_NOTE[row.state];
     const noteText = note ? `  ${dim}(${note})${reset}` : "";
-    lines.push(`${marker}${isSelected ? bold : ""}${row.title}${reset}${noteText}${clearLine}`);
+    lines.push(`${marker}${isSelected ? bold : ""}${row.title}${reset}${pinnedText}${noteText}${clearLine}`);
     const meta =
       `${STATE_SYMBOL[row.state]} ${row.shortId}  ·  ` +
       `${row.workspace}  ·  ${row.model}  ·  ${row.ageLabel}`;
@@ -430,7 +440,12 @@ export function renderSessionPickerLines(
 const ESC = "\x1b[";
 const HIDE_CURSOR = `${ESC}?25l`;
 const SHOW_CURSOR = `${ESC}?25h`;
-const CLEAR_LINE = `${ESC}2K`;
+// Erase-to-end-of-line (mode 0), NOT erase-entire-line (2K): the suffix is
+// appended after each rendered line's content, so it must clear stale
+// leftovers from a previously longer render without erasing the content just
+// written. A 2K suffix self-erases the line it follows (discovered in the
+// #612 E2E: every content line vanished, leaving only the header).
+const CLEAR_LINE = `${ESC}K`;
 const MOVE_UP = (n: number) => `${ESC}${n}A`;
 
 export interface SessionPickerSelection {
@@ -468,6 +483,17 @@ export async function runSessionPicker(
       const lines = renderSessionPickerLines(rows, { query, selected, error }, style);
       const totalLines = lines.length;
       stdout.write(`${MOVE_UP(renderedLines)}${lines.join("\n")}\n`);
+      // When the block shrinks (the query filter narrows the rows), clear the
+      // leftover lines from the previous taller render so no ghost content
+      // lingers below the new block; park the cursor just under the block,
+      // where a full-height render would leave it.
+      if (totalLines < renderedLines) {
+        const leftover = renderedLines - totalLines;
+        for (let i = 0; i < leftover; i++) {
+          stdout.write(`${CLEAR_LINE}\n`);
+        }
+        stdout.write(MOVE_UP(leftover));
+      }
       renderedLines = totalLines;
     }
 
@@ -525,24 +551,25 @@ export async function runSessionPicker(
         return;
       }
 
-      // Backspace.
-      if (key === "\x7f" || key === "\b") {
-        query = query.slice(0, -1);
-        rows = filterSessionRows(allRows, query);
-        selected = 0;
-        error = null;
-        render();
-        return;
+      // Backspace and printable characters. Fast typing and terminal pastes
+      // arrive as multi-character chunks, so process every character of the
+      // chunk rather than dropping all but single-key events (discovered in
+      // the #612 E2E: a string sent in one chunk never reached the query).
+      let changed = false;
+      for (const ch of key) {
+        if (ch === "\x7f" || ch === "\b") {
+          query = query.slice(0, -1);
+          changed = true;
+        } else if (ch.charCodeAt(0) >= 32 && ch.charCodeAt(0) < 127) {
+          query += ch;
+          changed = true;
+        }
       }
-
-      // Printable character.
-      if (key.length === 1 && key.charCodeAt(0) >= 32 && key.charCodeAt(0) < 127) {
-        query += key;
+      if (changed) {
         rows = filterSessionRows(allRows, query);
         selected = 0;
         error = null;
         render();
-        return;
       }
     }
 
