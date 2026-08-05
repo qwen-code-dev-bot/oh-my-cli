@@ -706,3 +706,110 @@ export function formatWorkspaceJournalBySession(record: WorkspaceJournalBySessio
   }
   return lines;
 }
+
+/** One (UTC day × session) pair bucket of the merged journal (Issue #662). */
+export interface WorkspaceSessionDayBucket {
+  /** The UTC day, YYYY-MM-DD. */
+  day: string;
+  /** Full id of the contributing session. */
+  sessionId: string;
+  /** Short display id of the contributing session. */
+  shortId: string;
+  /** Kept entries contributed by that session on that day. */
+  count: number;
+}
+
+/**
+ * Bucket merged workspace journal entries by (UTC day × session) pairs
+ * (Issue #662): day ascending, then full session id ascending within a day
+ * (time first, deterministic within a day), containing only pairs present.
+ */
+export function bucketWorkspaceEntriesBySessionDay(
+  entries: readonly WorkspaceJournalEntry[],
+): WorkspaceSessionDayBucket[] {
+  const counts = new Map<string, WorkspaceSessionDayBucket>();
+  for (const e of entries) {
+    const day = new Date(e.at).toISOString().slice(0, 10);
+    const key = `${day}|${e.sessionId}`;
+    const bucket = counts.get(key);
+    if (bucket === undefined) {
+      counts.set(key, { day, sessionId: e.sessionId, shortId: e.shortId, count: 1 });
+    } else {
+      bucket.count += 1;
+    }
+  }
+  return [...counts.values()].sort(
+    (a, b) => a.day.localeCompare(b.day) || a.sessionId.localeCompare(b.sessionId),
+  );
+}
+
+export const WORKSPACE_JOURNAL_BY_SESSION_DAY_SCHEMA =
+  "oh-my-cli.workspace-journal-by-session-day" as const;
+export const WORKSPACE_JOURNAL_BY_SESSION_DAY_VERSION = 1 as const;
+
+/**
+ * Session × day cross-tabulation of the merged workspace journal
+ * (Issue #662): which session was active on which day, never what was said
+ * — day/session identifiers and counts only. Cross-product of the
+ * per-session (#648) and per-day (#646) groupings.
+ */
+export interface WorkspaceJournalBySessionDayRecord {
+  schema: typeof WORKSPACE_JOURNAL_BY_SESSION_DAY_SCHEMA;
+  v: typeof WORKSPACE_JOURNAL_BY_SESSION_DAY_VERSION;
+  /** The workspace the cross-tab is scoped to, redacted + home-collapsed. */
+  workspace: string;
+  /** Sessions whose journals were merged. */
+  sessionsScanned: number;
+  /** Workspace sessions skipped because they are archived. */
+  sessionsSkippedArchived: number;
+  /** (Day × session) buckets of the kept set, present pairs only. */
+  bySessionDay: WorkspaceSessionDayBucket[];
+  /** Entries kept after every filter and bound (sums with `bySessionDay`). */
+  count: number;
+  /** Older entries dropped by the bound. */
+  elided: number;
+  /** Newer entries set aside by --skip (Issue #638); 0 without it. */
+  skipped: number;
+}
+
+/**
+ * Build the session × day cross-tabulation record for a workspace
+ * (Issue #662). Semantics are exactly `buildWorkspaceJournal`'s — same
+ * scoping, filters, and bounds — but the result carries pair buckets only,
+ * never entry contents. Bucketing fixes the order, so no newest-first
+ * option exists here.
+ */
+export function buildWorkspaceJournalBySessionDay(
+  store: SessionStore,
+  opts: Omit<WorkspaceJournalOptions, "newestFirst">,
+): WorkspaceJournalBySessionDayRecord {
+  const journal = buildWorkspaceJournal(store, opts);
+  return {
+    schema: WORKSPACE_JOURNAL_BY_SESSION_DAY_SCHEMA,
+    v: WORKSPACE_JOURNAL_BY_SESSION_DAY_VERSION,
+    workspace: journal.workspace,
+    sessionsScanned: journal.sessionsScanned,
+    sessionsSkippedArchived: journal.sessionsSkippedArchived,
+    bySessionDay: bucketWorkspaceEntriesBySessionDay(journal.entries),
+    count: journal.entries.length,
+    elided: journal.elided,
+    skipped: journal.skipped,
+  };
+}
+
+export function formatWorkspaceJournalBySessionDay(
+  record: WorkspaceJournalBySessionDayRecord,
+): string[] {
+  const elidedNote = record.elided > 0 ? ` (+${record.elided} older event(s) not shown)` : "";
+  const skippedNote = record.skipped > 0 ? ` (+${record.skipped} newer event(s) skipped)` : "";
+  if (record.count === 0) {
+    return [`0 event(s).${elidedNote}${skippedNote}`];
+  }
+  const lines = [
+    `${record.count} event(s) across ${record.bySessionDay.length} session-day pair(s).${elidedNote}${skippedNote}`,
+  ];
+  for (const b of record.bySessionDay) {
+    lines.push(`  ${b.day} · ${b.shortId} ×${b.count}`);
+  }
+  return lines;
+}
