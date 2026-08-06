@@ -155,3 +155,63 @@ export function restoreSessionBundle(
   }
   return { sessionId };
 }
+
+export const STORE_BUNDLE_SCHEMA = "oh-my-cli.store-bundle" as const;
+export const STORE_BUNDLE_VERSION = 1 as const;
+
+export interface StoreBundle {
+  schema: typeof STORE_BUNDLE_SCHEMA;
+  v: typeof STORE_BUNDLE_VERSION;
+  bundledAt: number;
+  sessionCount: number;
+  /** Session bundles ordered by ascending source session id. */
+  sessions: SessionBundle[];
+}
+
+/**
+ * Build a lossless whole-store bundle (Issue #706): every session in the
+ * store, each exactly the #704 session bundle, in deterministic
+ * session-id order. Strictly read-only.
+ */
+export function bundleStore(store: SessionStore, bundledAt: number): StoreBundle {
+  const ids = [...store.listIds()].sort((a, b) => a.localeCompare(b));
+  const sessions = ids.map((id) => bundleSession(store, id, bundledAt));
+  return {
+    schema: STORE_BUNDLE_SCHEMA,
+    v: STORE_BUNDLE_VERSION,
+    bundledAt,
+    sessionCount: sessions.length,
+    sessions,
+  };
+}
+
+/**
+ * Validate an unknown value as a store bundle (Issue #706). Fail-closed:
+ * the schema, version, session count, and every contained session entry
+ * must all check out.
+ */
+export function isStoreBundle(value: unknown): value is StoreBundle {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.schema !== STORE_BUNDLE_SCHEMA) return false;
+  if (candidate.v !== STORE_BUNDLE_VERSION) return false;
+  if (!Array.isArray(candidate.sessions)) return false;
+  if (candidate.sessionCount !== candidate.sessions.length) return false;
+  return candidate.sessions.every(isSessionBundle);
+}
+
+/**
+ * Restore a validated store bundle (Issue #706): every contained session
+ * is materialized as a NEW id via restoreSessionBundle — existing sessions
+ * are never touched. Callers must validate with isStoreBundle first.
+ */
+export function restoreStoreBundle(
+  store: SessionStore,
+  bundle: StoreBundle,
+): { sessionIds: string[] } {
+  const sessionIds: string[] = [];
+  for (const session of bundle.sessions) {
+    sessionIds.push(restoreSessionBundle(store, session).sessionId);
+  }
+  return { sessionIds };
+}
