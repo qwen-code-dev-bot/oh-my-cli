@@ -215,3 +215,93 @@ export function restoreStoreBundle(
   }
   return { sessionIds };
 }
+
+export const BUNDLE_VERIFY_SCHEMA = "oh-my-cli.bundle-verify" as const;
+export const BUNDLE_VERIFY_VERSION = 1 as const;
+
+/** Integrity findings for one session bundle (Issue #708). */
+export interface SessionBundleVerify {
+  sourceSessionId: string;
+  transcriptLines: number;
+  tornTranscriptLines: number;
+  /** Sidecars carried as raw text — torn at bundle time — by name. */
+  tornSidecars: string[];
+  healthy: boolean;
+}
+
+/**
+ * Verify one session bundle (Issue #708). Strictly pure and read-only:
+ * every transcript line must parse as JSON (torn lines are counted), and
+ * a sidecar carried as raw text (rather than a JSON value) is reported
+ * torn by name. Structural validation is the caller's job (isSessionBundle);
+ * this assumes a validated bundle and inspects its content.
+ */
+export function verifySessionBundle(bundle: SessionBundle): SessionBundleVerify {
+  let tornTranscriptLines = 0;
+  for (const line of bundle.transcriptLines) {
+    try {
+      JSON.parse(line);
+    } catch {
+      tornTranscriptLines += 1;
+    }
+  }
+  const tornSidecars: string[] = [];
+  for (const [name, value] of Object.entries(bundle.sidecars)) {
+    if (typeof value === "string") tornSidecars.push(name);
+  }
+  return {
+    sourceSessionId: bundle.sourceSessionId,
+    transcriptLines: bundle.transcriptLines.length,
+    tornTranscriptLines,
+    tornSidecars,
+    healthy: tornTranscriptLines === 0 && tornSidecars.length === 0,
+  };
+}
+
+export interface StoreBundleVerify {
+  sessions: SessionBundleVerify[];
+  healthy: boolean;
+}
+
+/**
+ * Verify a store bundle (Issue #708): every contained session bundle is
+ * checked with the session semantics; the store is healthy only when all
+ * of them are.
+ */
+export function verifyStoreBundle(bundle: StoreBundle): StoreBundleVerify {
+  const sessions = bundle.sessions.map(verifySessionBundle);
+  return { sessions, healthy: sessions.every((s) => s.healthy) };
+}
+
+/**
+ * Render bundle-verify findings as lines (Issue #708).
+ */
+export function formatBundleVerify(record: {
+  kind: "session" | "store";
+  sessions: SessionBundleVerify[];
+  healthy: boolean;
+}): string[] {
+  const lines: string[] = [];
+  lines.push("Bundle verify");
+  lines.push("─".repeat(40));
+  lines.push("");
+  lines.push(`Bundle kind: ${record.kind}; ${record.sessions.length} session(s) checked.`);
+  for (const session of record.sessions) {
+    if (session.healthy) continue;
+    const problems: string[] = [];
+    if (session.tornTranscriptLines > 0) {
+      problems.push(`${session.tornTranscriptLines} torn transcript line(s)`);
+    }
+    if (session.tornSidecars.length > 0) {
+      problems.push(`torn sidecars: ${session.tornSidecars.join(", ")}`);
+    }
+    lines.push(`  ${shortIdOf(session.sourceSessionId)} — damaged (${problems.join("; ")})`);
+  }
+  lines.push("");
+  lines.push(`Verdict: ${record.healthy ? "healthy" : "damaged"}.`);
+  return lines;
+}
+
+function shortIdOf(sessionId: string): string {
+  return sessionId.length > 8 ? sessionId.slice(0, 8) : sessionId;
+}
