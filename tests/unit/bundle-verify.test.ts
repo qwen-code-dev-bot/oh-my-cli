@@ -72,6 +72,19 @@ describe("verifySessionBundle (Issue #708)", () => {
     expect(result.healthy).toBe(false);
   });
 
+  it("treats sidecars carried as parseable raw text as healthy (byte-fidelity carriage)", () => {
+    // The bundle format carries EVERY sidecar as raw stored text (#704);
+    // only content that fails to parse is torn. Regression for the
+    // false-positive caught by post-merge dogfood on the real store.
+    const result = verifySessionBundle(
+      sessionBundle({
+        sidecars: { goal: '{"objective":"x"}', notes: '[{"text":"n"}]', turn: '{"checkpoints":[]}' },
+      }),
+    );
+    expect(result.tornSidecars).toEqual([]);
+    expect(result.healthy).toBe(true);
+  });
+
   it("treats empty transcript and parsed sidecars as healthy", () => {
     const result = verifySessionBundle(
       sessionBundle({ transcriptLines: [], sidecars: { goal: { ok: 1 }, turn: [] } }),

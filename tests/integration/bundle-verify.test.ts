@@ -88,6 +88,31 @@ describe("Integration: bundle verification (--verify-bundle, Issue #708)", () =>
     expect(res.stdout).toContain("torn sidecars: goal");
   });
 
+  it("verifies a healthy session with every sidecar present (raw carriage is not torn)", async () => {
+    // Regression for the dogfood false positive: sidecars ride as raw
+    // stored text by construction; parseable raw text is healthy.
+    const { appendSessionNote } = await import("../../src/session-notes.js");
+    const { appendCheckpoint } = await import("../../src/turn-checkpoint.js");
+    appendSessionNote(store, sessionId, "a note", CREATED_AT + 1000);
+    store.writePinned(sessionId, CREATED_AT + 2000);
+    appendCheckpoint(store, sessionId, {
+      schema: "oh-my-cli.turn-checkpoint",
+      v: 1,
+      sessionId,
+      turnIndex: 0,
+      head: null,
+      messageCountBefore: 0,
+      messageCountAfter: 1,
+      messages: [{ role: "user", content: "fixture" }],
+      files: [],
+      digest: "0".repeat(64),
+    });
+    await runCli(["--bundle-session", sessionId, "--bundle-file", bundlePath], env);
+    const res = await runCli(["--verify-bundle", bundlePath], env);
+    expect(res.code).toBe(0);
+    expect(res.stdout).toContain("Verdict: healthy.");
+  });
+
   it("verifies store bundles per session", async () => {
     const second = store.newId();
     store.checkpoint(second, [{ role: "user", content: "second" }], {
