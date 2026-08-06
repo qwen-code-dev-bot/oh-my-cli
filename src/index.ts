@@ -1784,7 +1784,7 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(record) + "\n");
         } else {
-          process.stdout.write(formatTurnHistory(record).join("\n") + "\n");
+          process.stdout.write(renderReportLines(formatTurnHistory(record), opts.ascii));
         }
         process.exit(0);
       }
