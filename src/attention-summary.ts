@@ -237,7 +237,12 @@ export function attentionRecord(items: AttentionItem[], workspacePath: string): 
   };
 }
 
-export function formatAttention(items: AttentionItem[], workspacePath: string): string {
+/**
+ * Render the attention summary as lines (Issue #698 joins the family
+ * convention): the caller joins them for stdout, applying the ASCII glyph
+ * map when requested. Byte-identical to the pre-refactor joined text.
+ */
+export function formatAttention(items: AttentionItem[], workspacePath: string): string[] {
   const lines: string[] = [];
   lines.push(`Attention — workspace ${redactPath(workspacePath)}`);
   lines.push("─".repeat(40));
@@ -245,7 +250,7 @@ export function formatAttention(items: AttentionItem[], workspacePath: string): 
 
   if (items.length === 0) {
     lines.push("Nothing needs attention in this workspace.");
-    return lines.join("\n");
+    return lines;
   }
 
   const shown = items.slice(0, ATTENTION_MAX_ITEMS);
@@ -263,7 +268,7 @@ export function formatAttention(items: AttentionItem[], workspacePath: string): 
       ? `; ${items.length - ATTENTION_MAX_ITEMS} more not shown (see --list-sessions)`
       : "";
   lines.push(`${items.length} item(s)${overflow}. Read-only: nothing here executes or approves anything.`);
-  return lines.join("\n");
+  return lines;
 }
 
 function redact(value: string | undefined): string {

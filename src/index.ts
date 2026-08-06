@@ -1712,7 +1712,7 @@ program
         if (format === "json") {
           process.stdout.write(JSON.stringify(attentionRecord(items, String(opts.workspace))) + "\n");
         } else {
-          process.stdout.write(formatAttention(items, String(opts.workspace)) + "\n");
+          process.stdout.write(renderReportLines(formatAttention(items, String(opts.workspace)), opts.ascii));
         }
         process.exit(opts.strict === true ? attentionStrictExit(items) : 0);
       }
