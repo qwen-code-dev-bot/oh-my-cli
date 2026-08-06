@@ -311,12 +311,12 @@ describe("attentionRecord / formatAttention (Issue #558)", () => {
     expect(record.total).toBe(ATTENTION_MAX_ITEMS + 1);
     expect(record.shown).toBe(ATTENTION_MAX_ITEMS);
     expect(record.omitted).toBe(1);
-    const text = formatAttention(items, WS_A);
+    const text = formatAttention(items, WS_A).join("\n");
     expect(text).toContain("1 more not shown");
   });
 
   it("renders an explicit empty-state line", () => {
-    const text = formatAttention([], WS_A);
+    const text = formatAttention([], WS_A).join("\n");
     expect(text).toContain(`workspace ${WS_A}`);
     expect(text).toContain("Nothing needs attention in this workspace.");
   });
@@ -324,7 +324,7 @@ describe("attentionRecord / formatAttention (Issue #558)", () => {
   it("renders item lines with status and action hints, free of ANSI and secrets", () => {
     seedNamed();
     const items = buildAttention({ store, workspacePath: WS_A, keyOf, now: fixedNow });
-    const text = formatAttention(items, WS_A);
+    const text = formatAttention(items, WS_A).join("\n");
     expect(text).toContain("turn-completed");
     expect(text).toContain("final answer delivered");
     expect(text).toContain("--resume");
@@ -340,6 +340,6 @@ describe("attentionRecord / formatAttention (Issue #558)", () => {
     expect(JSON.stringify(attentionRecord(items(), WS_A))).toBe(
       JSON.stringify(attentionRecord(items(), WS_A)),
     );
-    expect(formatAttention(items(), WS_A)).toBe(formatAttention(items(), WS_A));
+    expect(formatAttention(items(), WS_A).join("\n")).toBe(formatAttention(items(), WS_A).join("\n"));
   });
 });
