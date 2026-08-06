@@ -232,9 +232,11 @@ export interface SessionBundleVerify {
 /**
  * Verify one session bundle (Issue #708). Strictly pure and read-only:
  * every transcript line must parse as JSON (torn lines are counted), and
- * a sidecar carried as raw text (rather than a JSON value) is reported
- * torn by name. Structural validation is the caller's job (isSessionBundle);
- * this assumes a validated bundle and inspects its content.
+ * every sidecar's carried content must parse as JSON. Sidecars ride as
+ * raw stored text by construction (byte-fidelity, #704), so the check
+ * parses that text and reports by name only what fails to parse.
+ * Structural validation is the caller's job (isSessionBundle); this
+ * assumes a validated bundle and inspects its content.
  */
 export function verifySessionBundle(bundle: SessionBundle): SessionBundleVerify {
   let tornTranscriptLines = 0;
@@ -247,7 +249,12 @@ export function verifySessionBundle(bundle: SessionBundle): SessionBundleVerify 
   }
   const tornSidecars: string[] = [];
   for (const [name, value] of Object.entries(bundle.sidecars)) {
-    if (typeof value === "string") tornSidecars.push(name);
+    if (typeof value !== "string") continue; // carried as a parsed value: sound
+    try {
+      JSON.parse(value);
+    } catch {
+      tornSidecars.push(name);
+    }
   }
   return {
     sourceSessionId: bundle.sourceSessionId,
