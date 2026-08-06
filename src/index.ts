@@ -59,7 +59,7 @@ import {
 import type { SessionScopeInfo } from "./session-summary.js";
 import { salvageSession, resolveSalvageTarget } from "./session-salvage.js";
 import { archiveSession, unarchiveSession, resolveArchiveTarget } from "./session-archive.js";
-import { bundleSession, isSessionBundle, restoreSessionBundle, SESSION_BUNDLE_SCHEMA, SESSION_BUNDLE_VERSION } from "./session-bundle.js";
+import { bundleSession, bundleStore, isSessionBundle, isStoreBundle, restoreSessionBundle, restoreStoreBundle, SESSION_BUNDLE_SCHEMA, SESSION_BUNDLE_VERSION, STORE_BUNDLE_SCHEMA, STORE_BUNDLE_VERSION } from "./session-bundle.js";
 import { pinSession, unpinSession } from "./session-pin.js";
 import { buildSessionInspectRecord, formatSessionInspect } from "./session-inspect.js";
 import {
@@ -792,7 +792,15 @@ program
     "--bundle-session <id-or-name>",
     "Bundle a session losslessly (raw transcript + every present sidecar, unredacted — for backup or moving between your own stores; use --export-session for redacted sharing) to stdout or --bundle-file, and exit",
   )
-  .option("--bundle-file <path>", "With --bundle-session: write the bundle to this file instead of stdout")
+  .option("--bundle-file <path>", "With --bundle-session/--bundle-store: write the bundle to this file instead of stdout")
+  .option(
+    "--bundle-store",
+    "Bundle every session in the store losslessly (each session exactly as --bundle-session, in deterministic session-id order — for whole-store backup or migration; unredacted) to stdout or --bundle-file, and exit",
+  )
+  .option(
+    "--restore-store <file>",
+    "Restore a --bundle-store bundle: every contained session is materialized as a NEW session id (never overwrites), and exit",
+  )
   .option(
     "--restore-session <file>",
     "Restore a --bundle-session bundle as a NEW session id (never overwrites; turn-log entries are rewritten to the new id), and exit",
@@ -2765,6 +2773,57 @@ program
         const { sessionId } = restoreSessionBundle(store, parsed);
         process.stdout.write(
           `Restored session ${shortSessionId(sessionId)} (${sessionId}) from bundle of ${parsed.sourceSessionId}.\n`,
+        );
+        process.exit(0);
+      }
+
+      // Store-bundle mode (Issue #706): the whole-set shape layered on the
+      // session bundles — every session in deterministic order, unredacted,
+      // strictly read-only.
+      if (opts.bundleStore === true) {
+        const store = new SessionStore();
+        const bundle = bundleStore(store, Date.now());
+        const doc = JSON.stringify(bundle) + "\n";
+        if (opts.bundleFile !== undefined) {
+          fs.writeFileSync(String(opts.bundleFile), doc);
+          process.stdout.write(
+            `Bundled store (${bundle.sessionCount} session(s)) -> ${String(opts.bundleFile)}\n`,
+          );
+        } else {
+          process.stdout.write(doc);
+        }
+        process.exit(0);
+      }
+
+      // Store-restore mode (Issue #706): materialize every contained session
+      // as a NEW id — never overwriting. Fail-closed on any invalid bundle
+      // (schema, version, count, or contained entries) before any write.
+      if (opts.restoreStore !== undefined) {
+        const bundlePath = String(opts.restoreStore);
+        let raw: string;
+        try {
+          raw = fs.readFileSync(bundlePath, "utf-8");
+        } catch {
+          process.stderr.write(`Error: cannot read store bundle "${bundlePath}"\n`);
+          process.exit(2);
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          process.stderr.write(`Error: cannot parse store bundle "${bundlePath}" (invalid JSON)\n`);
+          process.exit(2);
+        }
+        if (!isStoreBundle(parsed)) {
+          process.stderr.write(
+            `Error: invalid store bundle "${bundlePath}" (expected schema ${STORE_BUNDLE_SCHEMA} v${STORE_BUNDLE_VERSION})\n`,
+          );
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const { sessionIds } = restoreStoreBundle(store, parsed);
+        process.stdout.write(
+          `Restored ${sessionIds.length} session(s) from store bundle (${sessionIds.map(shortSessionId).join(", ")}).\n`,
         );
         process.exit(0);
       }
