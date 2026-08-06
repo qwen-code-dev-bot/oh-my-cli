@@ -74,6 +74,7 @@ import {
   staleSessionsStrictExit,
   STALE_DEFAULT_DAYS,
 } from "./stale-sessions.js";
+import { executeArchiveStale, formatArchiveStale, ARCHIVE_STALE_DRY_RUN_NOTE } from "./archive-stale.js";
 import { buildSessionStorageReport, formatSessionStorageReport, parseStorageBudget, storageBudgetStrictExit } from "./session-storage.js";
 import { buildSessionHealthReport, formatSessionHealthReport, healthReportStrictExit } from "./session-health.js";
 import { buildStoreDoctorReport, formatStoreDoctorReport, storeDoctorStrictExit } from "./store-doctor.js";
@@ -625,6 +626,14 @@ program
     "Show a read-only, advisory retention report: sessions older than the threshold (default 30 days) that are neither pinned nor archived are archive candidates (add --output json for a versioned record) and exit",
   )
   .option(
+    "--archive-stale [days]",
+    "Archive sessions older than the threshold (default 30 days) that carry no keep signal — a strict dry run by default, showing exactly what --stale-sessions reports; add --apply to write the archived markers (nothing is ever deleted; restore any session with --unarchive-session)",
+  )
+  .option(
+    "--apply",
+    "With --archive-stale: actually write the archived markers; without it the run is a strict dry run",
+  )
+  .option(
     "--storage-report",
     "Show a read-only per-session on-disk storage footprint report ranked largest-first — transcript and sidecar bytes, totals, and the largest session (add --output json for a versioned record) and exit",
   )
@@ -1112,6 +1121,58 @@ program
           process.stdout.write(renderReportLines(formatStaleSessions(record), opts.ascii));
         }
         process.exit(opts.strict === true ? staleSessionsStrictExit(record) : 0);
+      }
+
+      if (opts.apply === true && opts.archiveStale === undefined) {
+        process.stderr.write(
+          "Error: --apply is only used with --archive-stale\n",
+        );
+        process.exit(2);
+      }
+
+      // Archive-stale mode (Issue #702): the retention story's action half —
+      // acts on exactly the candidates the stale-sessions report resolves.
+      // Dry run by default: prints the stale report plus a trailing note
+      // and mutates nothing. With --apply, archives exactly those
+      // candidates via the shared archiveSession primitive — the existing
+      // archived marker, nothing more: no transcript or other sidecar is
+      // ever touched, nothing is ever deleted, and every archive is
+      // reversible with --unarchive-session. Pinned and already-archived
+      // sessions are protected by the builder and never become candidates.
+      if (opts.archiveStale !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let thresholdDays = STALE_DEFAULT_DAYS;
+        if (typeof opts.archiveStale === "string") {
+          const parsed = Number(opts.archiveStale);
+          if (!Number.isInteger(parsed) || parsed <= 0) {
+            process.stderr.write(
+              `Error: --archive-stale days must be a positive integer (got "${opts.archiveStale}")\n`,
+            );
+            process.exit(2);
+          }
+          thresholdDays = parsed;
+        }
+        const store = new SessionStore();
+        const outcome = executeArchiveStale(store, {
+          thresholdDays,
+          apply: opts.apply === true,
+        });
+        if (format === "json") {
+          process.stdout.write(JSON.stringify(outcome.record) + "\n");
+        } else if (opts.apply === true) {
+          process.stdout.write(
+            renderReportLines(formatArchiveStale(outcome.record), opts.ascii),
+          );
+        } else {
+          const lines = formatStaleSessions(outcome.report);
+          lines.push("", ARCHIVE_STALE_DRY_RUN_NOTE);
+          process.stdout.write(renderReportLines(lines, opts.ascii));
+        }
+        process.exit(0);
       }
 
       // Storage-report mode (Issue #664): a strictly read-only per-session
