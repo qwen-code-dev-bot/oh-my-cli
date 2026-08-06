@@ -3982,7 +3982,7 @@ program
           // the output is identical, the exit code signals.
           process.stdout.write(JSON.stringify(healthInventoryRecord(inventory)) + "\n");
         } else {
-          process.stdout.write(formatHealthInventory(inventory) + "\n");
+          process.stdout.write(renderReportLines(formatHealthInventory(inventory), opts.ascii));
         }
         process.exit(opts.strict === true ? healthInventoryStrictExit(inventory) : 0);
       }

@@ -350,7 +350,12 @@ export function healthInventoryRecord(inv: HealthInventory): Record<string, unkn
   return record;
 }
 
-export function formatHealthInventory(inv: HealthInventory): string {
+/**
+ * Render the health inventory as lines (Issue #696 joins the family
+ * convention): the caller joins them for stdout, applying the ASCII glyph
+ * map when requested. Byte-identical to the pre-refactor joined text.
+ */
+export function formatHealthInventory(inv: HealthInventory): string[] {
   const lines: string[] = [];
   lines.push("Health Inventory");
   lines.push("─".repeat(40));
@@ -360,17 +365,17 @@ export function formatHealthInventory(inv: HealthInventory): string {
   if (!inv.settingsFound) {
     lines.push("");
     lines.push("No settings file found; no integrations configured.");
-    return lines.join("\n");
+    return lines;
   }
   if (inv.parseError) {
     lines.push("");
     lines.push(`Settings error: ${inv.parseError}`);
-    return lines.join("\n");
+    return lines;
   }
   if (inv.integrations.length === 0) {
     lines.push("");
     lines.push("No integrations configured.");
-    return lines.join("\n");
+    return lines;
   }
 
   const mcp = inv.integrations.filter((i) => i.kind === "mcp");
@@ -401,7 +406,7 @@ export function formatHealthInventory(inv: HealthInventory): string {
       `(${inv.integrations.length} total)`,
   );
 
-  return lines.join("\n");
+  return lines;
 }
 
 function formatLine(i: IntegrationHealth): string {

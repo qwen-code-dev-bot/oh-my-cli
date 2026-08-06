@@ -88,7 +88,7 @@ describe("Health inventory: formatHealthInventory", () => {
         { kind: "extension", name: "ext", target: "~/ext", enabled: true, category: "healthy", reason: "path exists", probeMs: 0 },
       ],
     };
-    const out = formatHealthInventory(inv);
+    const out = formatHealthInventory(inv).join("\n");
     expect(out).toContain("Health Inventory");
     expect(out).toContain("MCP servers:");
     expect(out).toContain("Extensions:");
@@ -106,7 +106,7 @@ describe("Health inventory: formatHealthInventory", () => {
       probeTimeoutMs: 3000,
       integrations: [],
     };
-    const out = formatHealthInventory(inv);
+    const out = formatHealthInventory(inv).join("\n");
     expect(out).not.toContain(`${home}/.oh-my-cli`);
     expect(out).toContain("~");
     expect(out).toContain("No settings file found");
@@ -120,7 +120,7 @@ describe("Health inventory: formatHealthInventory", () => {
       probeTimeoutMs: 3000,
       integrations: [],
     };
-    const out = formatHealthInventory(inv);
+    const out = formatHealthInventory(inv).join("\n");
     expect(out).toContain("Settings error: invalid JSON");
   });
 
@@ -134,7 +134,7 @@ describe("Health inventory: formatHealthInventory", () => {
         { kind: "mcp", transport: "http", name: "db", target: `Bearer ${fakeToken}`, enabled: true, category: "unavailable", reason: "connection refused", probeMs: 1 },
       ],
     };
-    const out = formatHealthInventory(inv);
+    const out = formatHealthInventory(inv).join("\n");
     expect(out).not.toContain(fakeToken);
     expect(out).toContain("[REDACTED]");
   });
