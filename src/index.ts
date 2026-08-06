@@ -59,6 +59,7 @@ import {
 import type { SessionScopeInfo } from "./session-summary.js";
 import { salvageSession, resolveSalvageTarget } from "./session-salvage.js";
 import { archiveSession, unarchiveSession, resolveArchiveTarget } from "./session-archive.js";
+import { bundleSession, isSessionBundle, restoreSessionBundle, SESSION_BUNDLE_SCHEMA, SESSION_BUNDLE_VERSION } from "./session-bundle.js";
 import { pinSession, unpinSession } from "./session-pin.js";
 import { buildSessionInspectRecord, formatSessionInspect } from "./session-inspect.js";
 import {
@@ -787,6 +788,15 @@ program
   .option("--export-session <id-or-name>", "Export a session locally as redacted Markdown + a deterministic JSON manifest, by exact id or user-owned name, and exit")
   .option("--out <dir>", "Output directory for --export-session (default: current directory)")
   .option("--force", "Overwrite existing output files (--export-session, --summary-out)")
+  .option(
+    "--bundle-session <id-or-name>",
+    "Bundle a session losslessly (raw transcript + every present sidecar, unredacted — for backup or moving between your own stores; use --export-session for redacted sharing) to stdout or --bundle-file, and exit",
+  )
+  .option("--bundle-file <path>", "With --bundle-session: write the bundle to this file instead of stdout")
+  .option(
+    "--restore-session <file>",
+    "Restore a --bundle-session bundle as a NEW session id (never overwrites; turn-log entries are rewritten to the new id), and exit",
+  )
   .option("--rename-session <id-or-name>", "Set, replace, or clear a user-owned name for an exact session, targeted by exact id or its current user-owned name (with --session-name), and exit")
   .option(
     "--salvage-session <id-or-name>",
@@ -2699,6 +2709,63 @@ program
           process.stderr.write(`${msg}\n`);
           process.exit(2);
         }
+        process.exit(0);
+      }
+
+      // Bundle mode (Issue #704): the lossless moving shape — raw transcript
+      // lines + every present sidecar carried as-is, unredacted, to stdout or
+      // --bundle-file. Strictly read-only; corrupt sessions bundle honestly
+      // (their torn lines/sidecars ride along for a faithful round-trip).
+      if (opts.bundleSession !== undefined) {
+        const store = new SessionStore();
+        const resolved = resolveArchiveTarget(String(opts.bundleSession), store);
+        if (!resolved.ok) {
+          process.stderr.write(`Error: ${resolved.reason}\n`);
+          process.exit(2);
+        }
+        const bundle = bundleSession(store, resolved.sessionId, Date.now());
+        const doc = JSON.stringify(bundle) + "\n";
+        if (opts.bundleFile !== undefined) {
+          fs.writeFileSync(String(opts.bundleFile), doc);
+          process.stdout.write(
+            `Bundled session ${shortSessionId(resolved.sessionId)} -> ${String(opts.bundleFile)}\n`,
+          );
+        } else {
+          process.stdout.write(doc);
+        }
+        process.exit(0);
+      }
+
+      // Restore mode (Issue #704): materialize a bundle as a NEW session id —
+      // never overwriting or reusing an existing session. Fail-closed on any
+      // invalid bundle before writing anything.
+      if (opts.restoreSession !== undefined) {
+        const bundlePath = String(opts.restoreSession);
+        let raw: string;
+        try {
+          raw = fs.readFileSync(bundlePath, "utf-8");
+        } catch {
+          process.stderr.write(`Error: cannot read bundle file "${bundlePath}"\n`);
+          process.exit(2);
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          process.stderr.write(`Error: cannot parse bundle file "${bundlePath}" (invalid JSON)\n`);
+          process.exit(2);
+        }
+        if (!isSessionBundle(parsed)) {
+          process.stderr.write(
+            `Error: invalid session bundle "${bundlePath}" (expected schema ${SESSION_BUNDLE_SCHEMA} v${SESSION_BUNDLE_VERSION})\n`,
+          );
+          process.exit(2);
+        }
+        const store = new SessionStore();
+        const { sessionId } = restoreSessionBundle(store, parsed);
+        process.stdout.write(
+          `Restored session ${shortSessionId(sessionId)} (${sessionId}) from bundle of ${parsed.sourceSessionId}.\n`,
+        );
         process.exit(0);
       }
 
