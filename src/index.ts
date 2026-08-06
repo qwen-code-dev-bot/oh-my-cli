@@ -59,7 +59,7 @@ import {
 import type { SessionScopeInfo } from "./session-summary.js";
 import { salvageSession, resolveSalvageTarget } from "./session-salvage.js";
 import { archiveSession, unarchiveSession, resolveArchiveTarget } from "./session-archive.js";
-import { bundleSession, bundleStore, isSessionBundle, isStoreBundle, restoreSessionBundle, restoreStoreBundle, SESSION_BUNDLE_SCHEMA, SESSION_BUNDLE_VERSION, STORE_BUNDLE_SCHEMA, STORE_BUNDLE_VERSION } from "./session-bundle.js";
+import { BUNDLE_VERIFY_SCHEMA, BUNDLE_VERIFY_VERSION, bundleSession, bundleStore, formatBundleVerify, isSessionBundle, isStoreBundle, restoreSessionBundle, restoreStoreBundle, SESSION_BUNDLE_SCHEMA, SESSION_BUNDLE_VERSION, STORE_BUNDLE_SCHEMA, STORE_BUNDLE_VERSION, verifySessionBundle, verifyStoreBundle } from "./session-bundle.js";
 import { pinSession, unpinSession } from "./session-pin.js";
 import { buildSessionInspectRecord, formatSessionInspect } from "./session-inspect.js";
 import {
@@ -800,6 +800,10 @@ program
   .option(
     "--restore-store <file>",
     "Restore a --bundle-store bundle: every contained session is materialized as a NEW session id (never overwrites), and exit",
+  )
+  .option(
+    "--verify-bundle <file>",
+    "Verify a --bundle-session/--bundle-store bundle read-only: report damaged content (torn transcript lines/sidecars) with exit 0 healthy, 1 damaged, 2 unreadable/invalid/unknown",
   )
   .option(
     "--restore-session <file>",
@@ -2826,6 +2830,64 @@ program
           `Restored ${sessionIds.length} session(s) from store bundle (${sessionIds.map(shortSessionId).join(", ")}).\n`,
         );
         process.exit(0);
+      }
+
+      // Verify mode (Issue #708): read-only integrity check of a session or
+      // store bundle (auto-detected by schema). Restore carries honest
+      // damage forward; verify reports it — 0 healthy, 1 damaged, 2
+      // unreadable/invalid/unknown before any output. Nothing is written.
+      if (opts.verifyBundle !== undefined) {
+        const bundlePath = String(opts.verifyBundle);
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        let raw: string;
+        try {
+          raw = fs.readFileSync(bundlePath, "utf-8");
+        } catch {
+          process.stderr.write(`Error: cannot read bundle file "${bundlePath}"\n`);
+          process.exit(2);
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          process.stderr.write(`Error: cannot parse bundle file "${bundlePath}" (invalid JSON)\n`);
+          process.exit(2);
+        }
+        let kind: "session" | "store";
+        let sessions: ReturnType<typeof verifyStoreBundle>["sessions"];
+        if (isSessionBundle(parsed)) {
+          kind = "session";
+          sessions = [verifySessionBundle(parsed)];
+        } else if (isStoreBundle(parsed)) {
+          kind = "store";
+          sessions = verifyStoreBundle(parsed).sessions;
+        } else {
+          process.stderr.write(
+            `Error: unknown bundle schema in "${bundlePath}" (expected ${SESSION_BUNDLE_SCHEMA} v${SESSION_BUNDLE_VERSION} or ${STORE_BUNDLE_SCHEMA} v${STORE_BUNDLE_VERSION})\n`,
+          );
+          process.exit(2);
+        }
+        const healthy = sessions.every((session) => session.healthy);
+        const record = { kind, sessions, healthy };
+        if (format === "json") {
+          process.stdout.write(
+            JSON.stringify({
+              schema: BUNDLE_VERIFY_SCHEMA,
+              v: BUNDLE_VERIFY_VERSION,
+              kind,
+              sessionCount: sessions.length,
+              sessions,
+              verdict: healthy ? "healthy" : "damaged",
+            }) + "\n",
+          );
+        } else {
+          process.stdout.write(renderReportLines(formatBundleVerify(record), opts.ascii));
+        }
+        process.exit(healthy ? 0 : 1);
       }
 
       // Session rename mode (#249): set, replace, or clear a user-owned name for
