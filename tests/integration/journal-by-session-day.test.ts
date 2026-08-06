@@ -134,10 +134,12 @@ describe("Integration: journal by-session-day (--by-session-day, Issue #662)", (
     ].sort((a, b) => a.day.localeCompare(b.day) || a.sessionId.localeCompare(b.sessionId));
     expect(kindRecord.bySessionDay).toEqual(expected);
 
-    // --since 1d keeps only the two live last-activity entries (one per
-    // session, both today).
+    // --since today keeps only the two live last-activity entries (one
+    // per session, both today). A day-bounded window is clock-independent;
+    // the sliding 24h window crossed the fixed 01:00Z anchor between 00:00
+    // and 01:00 UTC.
     const sinceJson = await runCli(
-      ["--workspace-journal", "--workspace", wsDir, "--since", "1d", "--by-session-day", "--output", "json"],
+      ["--workspace-journal", "--workspace", wsDir, "--since", "today", "--by-session-day", "--output", "json"],
       baseEnv,
     );
     const sinceRecord = JSON.parse(sinceJson.stdout.trim());

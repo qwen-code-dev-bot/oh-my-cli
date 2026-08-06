@@ -4,7 +4,8 @@
 // The report/journal family renders with Unicode decoration — box-drawing
 // separators, middle dots, multiplication signs, em dashes — and the
 // session surfaces additionally emit semantic marks (status checks, arrows,
-// ellipses). For screen readers, legacy terminals, C-locale pipelines, and
+// ellipses); the health inventory adds warning/disabled status marks
+// (Issue #696). For screen readers, legacy terminals, C-locale pipelines, and
 // log scrapers these glyphs are noise or breakage. `--ascii` maps the
 // glyphs to ASCII equivalents while keeping all content and structure
 // identical: decorative glyphs map to their nearest ASCII shape; semantic
@@ -29,9 +30,11 @@ export const ASCII_GLYPH_MAP: Readonly<Record<string, string>> = {
   "\u2194": "<->", // ↔ bidirectional arrow
   "\u2713": "[ok]", // ✓ positive status mark
   "\u2717": "[bad]", // ✗ negative status mark
+  "\u26a0": "[warn]", // ⚠ warning status mark (Issue #696)
+  "\u2298": "[off]", // ⊘ disabled status mark (Issue #696)
 };
 
-const ASCII_GLYPH_RE = /[\u2500\u00b7\u00d7\u2014\u2026\u2192\u2194\u2713\u2717]/g;
+const ASCII_GLYPH_RE = /[\u2500\u00b7\u00d7\u2014\u2026\u2192\u2194\u2713\u2717\u26a0\u2298]/g;
 
 /** Map the known glyphs of one line to ASCII equivalents. Pure. */
 export function asciiSafeLine(line: string): string {

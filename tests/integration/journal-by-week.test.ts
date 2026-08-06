@@ -36,7 +36,7 @@ describe("Integration: journal by-week (--by-week, Issue #658)", () => {
   let store: SessionStore;
   let sessionId: string;
   let weekOld: string; // two weeks ago
-  let weekMid: string; // three days ago
+  let weekMid: string; // one week after the old anchor
   let weekNow: string; // today
 
   function sessionsDir(): string {
@@ -60,10 +60,11 @@ describe("Integration: journal by-week (--by-week, Issue #658)", () => {
     sessionId = store.newId();
     const d = new Date();
     const startOfToday = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
-    // Created + 2 notes two weeks ago at 01:00Z; one note three days ago;
-    // live last-activity today.
+    // Created + 2 notes two weeks ago at 01:00Z; one note exactly one ISO
+    // week later (a fixed "three days ago" anchor collapsed into the
+    // current week on Thu-Sun); live last-activity today.
     const oldAt = startOfToday - 14 * DAY + 3_600_000;
-    const midAt = startOfToday - 3 * DAY + 3_600_000;
+    const midAt = oldAt + 7 * DAY;
     store.writeMeta(sessionId, { model: "fake-model", workspace: wsDir, createdAt: oldAt });
     store.append(sessionId, { role: "user", content: "by-week fodder" });
     expect(appendSessionNote(store, sessionId, "crumb 0", oldAt + 120_000).ok).toBe(true);
