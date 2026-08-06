@@ -85,13 +85,18 @@ describe("journal windowing with calendar words (Issue #654)", () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "omc-654u-"));
     store = new SessionStore(dir);
     id = store.newId();
-    // Created two days before the real now; a recent note inside today.
+    // Created two days before the real now; the note is anchored at the
+    // early current UTC day so it is always inside "today" (and never
+    // "yesterday") regardless of the run's wall clock — a `now - 30m`
+    // anchor crossed the day boundary between 00:00 and 00:30 UTC.
     store.checkpoint(id, [{ role: "user", content: "calendar word fodder" }], {
       model: "m",
       workspace: "/srv/ws",
       createdAt: Date.now() - 2 * DAY,
     });
-    expect(appendSessionNote(store, id, "recent note", Date.now() - 30 * 60_000).ok).toBe(true);
+    const now = new Date();
+    const startOfToday = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    expect(appendSessionNote(store, id, "recent note", startOfToday + 60_000).ok).toBe(true);
   });
 
   afterEach(() => {
