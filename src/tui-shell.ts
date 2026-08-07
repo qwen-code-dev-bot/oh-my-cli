@@ -50,6 +50,7 @@ import {
   formatApprovalModeNotice,
 } from "./approval-mode-switch.js";
 import { rejectCompactArgs } from "./compact-command.js";
+import { decodeUtf8Streaming, hasNonAscii } from "./utf8-chunks.js";
 import { emptyLspView, formatLspView } from "./lsp-runtime.js";
 import type { LspView } from "./lsp-runtime.js";
 import { formatLifecycleView } from "./lifecycle-render.js";
@@ -3076,6 +3077,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
   let referenceUniverse: ReferenceUniverse | null = null;
   let escapeBuffer = "";
   let escapeTimer: NodeJS.Timeout | null = null;
+  // Trailing incomplete UTF-8 sequence awaiting its continuation bytes
+  // (Issue #731); shell-local, bounded to 3 bytes, never persisted.
+  let utf8Pending: Buffer = Buffer.alloc(0);
   const motionTimer = setInterval(() => {
     if (
       !state.goal ||
@@ -4603,7 +4607,19 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
 
   function onData(buf: Buffer): void {
     if (paletteOpen) return;
-    const incoming = buf.toString("utf-8");
+    // Issue #731: reassemble UTF-8 delivered across chunk boundaries before
+    // any dispatch. Pure-ASCII chunks (single keys, escape sequences — the
+    // common case) round-trip byte-identically through the fast-path guard;
+    // non-ASCII input is decoded with invalid bytes dropped (never U+FFFD),
+    // holding a trailing incomplete sequence for the next chunk.
+    let input = buf;
+    if (utf8Pending.length > 0 || hasNonAscii(buf)) {
+      const reassembled = decodeUtf8Streaming(utf8Pending, buf);
+      utf8Pending = reassembled.pending;
+      if (reassembled.text === "") return; // only incomplete tail bytes arrived
+      input = Buffer.from(reassembled.text, "utf-8");
+    }
+    const incoming = input.toString("utf-8");
     if (escapeBuffer || incoming.startsWith("\x1b")) {
       if (escapeTimer) clearTimeout(escapeTimer);
       escapeTimer = null;
@@ -4629,7 +4645,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
       if (decoded.rest) handleData(Buffer.from(decoded.rest));
       return;
     }
-    handleData(buf);
+    handleData(input);
   }
 
   function handleData(buf: Buffer): void {
