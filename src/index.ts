@@ -156,7 +156,7 @@ import {
   resumeWorkspaceLegacyMessage,
   shortSessionId,
 } from "./session-picker.js";
-import { openComposerDraftStore } from "./composer-draft.js";
+import { openComposerDraftStore, clearDurableDraft } from "./composer-draft.js";
 import {
   openPromptHistoryStore,
   readlineHistorySeed,
@@ -5709,6 +5709,97 @@ program
           /* fail closed: empty recall */
         }
 
+        // Durable composer draft on the readline surface (Issue #725), parity
+        // with the full-screen shell's #556 contract. Restore: a saved draft
+        // is prefilled into the input line after the first prompt (the visible
+        // line is the notice). Save: debounced on real editing input plus a
+        // final save/clear at exit boundaries. Clear: submitting clears (the
+        // #564 invariant — submitted text is never restored) and Ctrl+C on a
+        // non-empty line clears the line + draft and keeps the session alive.
+        // Same workspace-keyed store the full-screen shell uses (opened
+        // inline there): identical file, ownership, and semantics.
+        const composerDrafts = openComposerDraftStore({ workspacePath: workspace.root });
+        let readlineDraftText: string | null = null;
+        try {
+          const draft = composerDrafts.load();
+          if (draft.status === "restored" && draft.text.trim() !== "") {
+            readlineDraftText = draft.text;
+          }
+        } catch {
+          /* fail closed: no restore */
+        }
+
+        let draftAutosaveTimer: NodeJS.Timeout | null = null;
+        const cancelDraftAutosave = () => {
+          if (draftAutosaveTimer) {
+            clearTimeout(draftAutosaveTimer);
+            draftAutosaveTimer = null;
+          }
+        };
+        const saveDraftNow = () => {
+          cancelDraftAutosave();
+          const line = rl.line;
+          try {
+            // save("") clears the durable copy — empty exits never leave a
+            // stale draft behind.
+            composerDrafts.save(line.trim() !== "" ? line : "");
+          } catch {
+            /* best-effort durability */
+          }
+        };
+        // Debounced autosave for crash durability (mirrors the shell's
+        // per-paint save). Only real editing schedules a save: escape-led
+        // sequences (history navigation, Ctrl+K palette) never persist a
+        // recalled line as a draft — that would re-restore submitted text,
+        // violating #564.
+        const scheduleDraftAutosave = (buf: Buffer) => {
+          if (buf.length === 0) return;
+          const first = buf[0];
+          if (first === 0x1b || first < 32) return;
+          cancelDraftAutosave();
+          draftAutosaveTimer = setTimeout(() => {
+            draftAutosaveTimer = null;
+            const line = rl.line;
+            if (line.trim() === "") return;
+            try {
+              composerDrafts.save(line);
+            } catch {
+              /* best-effort durability */
+            }
+          }, 300);
+        };
+        process.stdin.on("data", scheduleDraftAutosave);
+
+        // Ctrl+C with terminal readline emits SIGINT on the interface (not the
+        // process): non-empty line clears the draft and stays alive (shell
+        // parity); empty line exits cleanly like the shell's empty-composer
+        // Ctrl+C.
+        rl.on("SIGINT", () => {
+          if (rl.line.trim() !== "") {
+            // `line`/`cursor` are documented runtime-mutable state that this
+            // @types/node version declares read-only, hence the bounded cast.
+            (rl as unknown as { line: string; cursor: number }).line = "";
+            (rl as unknown as { cursor: number }).cursor = 0;
+            // Ctrl-U redraws the (now empty) line under the pending prompt —
+            // the pending question survives the interface SIGINT, so no
+            // re-prompt is needed.
+            rl.write(null, { ctrl: true, name: "u" });
+            cancelDraftAutosave();
+            clearDurableDraft(composerDrafts);
+            process.stderr.write("\nDraft cleared. Ctrl+C again to exit.\n");
+            return;
+          }
+          rl.close();
+        });
+
+        // Exit boundaries (/exit and Ctrl-D EOF both close the interface):
+        // preserve unsent text, clear stale drafts when the line is empty,
+        // then exit. Read-only runs never reach this surface.
+        rl.on("close", () => {
+          saveDraftNow();
+          process.exit(0);
+        });
+
         // Startup identity: a responsive pixel-art banner printed once to stderr.
         // It is never redrawn, so it yields space naturally as the session scrolls.
         process.stderr.write(
@@ -5908,6 +5999,12 @@ program
               return;
             }
             try {
+              // Submitting clears the durable draft (Issue #725, carrying the
+              // #564 invariant): submitted text must never be restored as a
+              // draft, and any pending autosave is cancelled before it can
+              // persist the submitted line.
+              cancelDraftAutosave();
+              clearDurableDraft(composerDrafts);
               // Durable workspace prompt history (Issue #723): readline
               // submissions are recorded under the full-screen shell's exact
               // rules — non-empty, non-slash-prefixed, best-effort, never
@@ -5973,6 +6070,12 @@ program
         }
 
         prompt();
+        // Prefill the restored draft into the input line (Issue #725): the
+        // question is set synchronously by prompt(), so the write lands on
+        // the live line. The draft stays stored until submit/clear.
+        if (readlineDraftText !== null) {
+          rl.write(readlineDraftText);
+        }
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
