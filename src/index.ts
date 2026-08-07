@@ -164,6 +164,7 @@ import {
   repairControlCharInsertion,
   wordKillBefore,
   lineKillBefore,
+  isSweptControlByte,
 } from "./readline-screen.js";
 import {
   openPromptHistoryStore,
@@ -5767,15 +5768,21 @@ program
         // last two: under TERM=dumb Node 24's readline is append-only with
         // no cursor addressing, so for 0x01/0x05 the repair of readline's
         // inserted byte IS the effect (the keystrokes stop corrupting the
-        // prompt). Registered BEFORE the readline interface (like the paste
-        // tap) so it snapshots the line before readline consumes the byte:
-        // Node's readline inserts the raw control byte into the line buffer,
-        // so the follow-up repairs that insertion (verified shape only —
-        // fail closed otherwise) and then applies the keystroke's real
-        // effect. Effects land only at the idle prompt; mid-turn or with the
-        // palette open the buffer is still repaired but the streaming output
-        // / picker stays untouched. Non-TTY stdin is never touched: there
-        // these bytes are literal piped data, not keystrokes.
+        // prompt). Every remaining unhandled lone control byte gets that
+        // same repair-only treatment (Issue #755 sweep, including Tab —
+        // this surface wires no completer, so a tab is just pollution) —
+        // the bytes other machinery owns (interface SIGINT, Enter, the
+        // palette's Ctrl+K, escape prefixes) keep their existing behavior
+        // exactly.
+        // Registered BEFORE the readline interface (like the paste tap) so
+        // it snapshots the line before readline consumes the byte: Node's
+        // readline inserts the raw control byte into the line buffer, so
+        // the follow-up repairs that insertion (verified shape only — fail
+        // closed otherwise) and then applies the keystroke's real effect.
+        // Effects land only at the idle prompt; mid-turn or with the
+        // palette open the buffer is still repaired but the streaming
+        // output / picker stays untouched. Non-TTY stdin is never touched:
+        // there these bytes are literal piped data, not keystrokes.
         process.stdin.on("data", (buf: Buffer) => {
           if (buf.length !== 1 || !process.stdin.isTTY) return;
           const isCtrlL = buf[0] === 0x0c;
@@ -5784,7 +5791,15 @@ program
           const isCtrlZ = buf[0] === 0x1a;
           const isCtrlA = buf[0] === 0x01;
           const isCtrlE = buf[0] === 0x05;
-          if (!isCtrlL && !isCtrlW && !isCtrlU && !isCtrlZ && !isCtrlA && !isCtrlE) {
+          const swept =
+            !isCtrlL &&
+            !isCtrlW &&
+            !isCtrlU &&
+            !isCtrlZ &&
+            !isCtrlA &&
+            !isCtrlE &&
+            isSweptControlByte(buf[0]);
+          if (!isCtrlL && !isCtrlW && !isCtrlU && !isCtrlZ && !isCtrlA && !isCtrlE && !swept) {
             return;
           }
           // Every handled byte is its own inserted character.

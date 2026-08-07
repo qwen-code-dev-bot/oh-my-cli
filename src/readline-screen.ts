@@ -1,5 +1,5 @@
 // Control-keystroke handling for the readline surface (Issues #745, #747,
-// #749, #753). Node's readline implements none of Ctrl+L (clear and
+// #749, #753, #755). Node's readline implements none of Ctrl+L (clear and
 // redraw), Ctrl+W (kill the previous word), Ctrl+U (kill the line before
 // the cursor), or Ctrl+A/Ctrl+E: for each it inserts the raw control byte
 // (\f, 0x17, 0x15, 0x01, 0x05) into the line buffer at the cursor and
@@ -12,7 +12,10 @@
 // REPL. Exception: under TERM=dumb Node 24's readline is append-only (no
 // cursor addressing at all — even Backspace is a no-op), so for Ctrl+A and
 // Ctrl+E the repair itself is the whole fix: the bytes are ignored cleanly
-// instead of corrupting the prompt (Issue #753, rescoping note).
+// instead of corrupting the prompt (Issue #753, rescoping note). The same
+// repair-only treatment is swept across every remaining unhandled control
+// byte, so no control keystroke can corrupt a prompt or submission (Issue
+// #755).
 
 // Same sequence the /clear command and the full-screen shell use: clear the
 // visible screen and home the cursor. The scrollback is preserved, like
@@ -69,4 +72,32 @@ export function wordKillBefore(state: ReadlineLineState): ReadlineLineState {
 export function lineKillBefore(state: ReadlineLineState): ReadlineLineState {
   const { line, cursor } = state;
   return { line: line.slice(cursor), cursor: 0 };
+}
+
+// The control bytes the readline surface does NOT sweep (Issue #755): the
+// six effect bytes owned by #745-#753, plus the bytes other machinery owns
+// outright — readline's interface SIGINT (0x03, #743 cooperative cancel),
+// submission (0x0a/0x0d), the command palette's raw tap (0x0b, #717), and
+// escape-sequence prefixes (0x1b). Tab (0x09) IS swept: this surface wires
+// no completer, so dumb-mode readline just inserts a literal tab and
+// pollutes submissions like any other unhandled byte (verified by probe).
+// Every swept byte has no effect beyond pollution, so the tap repairs its
+// insertion and nothing else.
+export function isSweptControlByte(byte: number): boolean {
+  if (byte >= 0x20) return false;
+  switch (byte) {
+    case 0x01: // Ctrl+A — ignored cleanly (#753)
+    case 0x03: // Ctrl+C — readline emits the interface SIGINT (#743)
+    case 0x05: // Ctrl+E — ignored cleanly (#753)
+    case 0x0a: // Enter — submission
+    case 0x0b: // Ctrl+K — command palette's raw tap (#717)
+    case 0x0c: // Ctrl+L — screen clear (#745)
+    case 0x0d: // Enter — submission
+    case 0x15: // Ctrl+U — line kill (#749)
+    case 0x17: // Ctrl+W — word kill (#747)
+    case 0x1a: // Ctrl+Z — suspend (#751)
+    case 0x1b: // escape-sequence prefix
+      return false;
+  }
+  return true;
 }

@@ -4,9 +4,10 @@ import {
   repairControlCharInsertion,
   wordKillBefore,
   lineKillBefore,
+  isSweptControlByte,
 } from "../../src/readline-screen.js";
 
-describe("readline control-char insertion repair (Issues #745/#747/#749/#751/#753)", () => {
+describe("readline control-char insertion repair (Issues #745/#747/#749/#751/#753/#755)", () => {
   it("repairs a form feed inserted at the end of the line", () => {
     const snapshot = { line: "abc def", cursor: 7 };
     const repaired = repairControlCharInsertion(snapshot, { line: "abc def\f", cursor: 8 }, "\f");
@@ -75,6 +76,18 @@ describe("readline control-char insertion repair (Issues #745/#747/#749/#751/#75
     expect(
       repairControlCharInsertion(snapshot, { line: "alpha beta\u0005", cursor: 11 }, "\u0005"),
     ).toEqual(snapshot);
+  });
+
+  it("repairs the swept bytes (Issue #755) with the same verified shape", () => {
+    // Representative unhandled control bytes from the pollution probe
+    // (Ctrl+B, Ctrl+D, Ctrl+F, Ctrl+N, Ctrl+P): every one repairs to the
+    // pre-keypress state.
+    const snapshot = { line: "sweep probe", cursor: 11 };
+    for (const ch of ["\u0002", "\u0004", "\u0006", "\u000e", "\u0010"]) {
+      expect(
+        repairControlCharInsertion(snapshot, { line: `sweep probe${ch}`, cursor: 12 }, ch),
+      ).toEqual(snapshot);
+    }
   });
 
   it("reports the state as-is when the byte never reached the buffer", () => {
@@ -181,6 +194,39 @@ describe("readline line-kill before the cursor (Issue #749)", () => {
   it("is a no-op at line start and on an empty line", () => {
     expect(lineKillBefore({ line: "abc", cursor: 0 })).toEqual({ line: "abc", cursor: 0 });
     expect(lineKillBefore({ line: "", cursor: 0 })).toEqual({ line: "", cursor: 0 });
+  });
+});
+
+describe("control-byte sweep predicate (Issue #755)", () => {
+  it("excludes the effect bytes owned by #745-#753", () => {
+    for (const byte of [0x01, 0x05, 0x0c, 0x15, 0x17, 0x1a]) {
+      expect(isSweptControlByte(byte)).toBe(false);
+    }
+  });
+
+  it("excludes the bytes other machinery owns outright", () => {
+    // Interface SIGINT (#743), Enter submission, the palette's Ctrl+K
+    // (#717), and escape-sequence prefixes. (Tab is NOT excluded: this
+    // surface wires no completer, so dumb-mode readline inserts a literal
+    // tab — swept like any other polluting byte.)
+    for (const byte of [0x03, 0x0a, 0x0b, 0x0d, 0x1b]) {
+      expect(isSweptControlByte(byte)).toBe(false);
+    }
+  });
+
+  it("sweeps the remaining control bytes, including Tab and Ctrl+D", () => {
+    // The pollution probe's bytes, the tab probe, and the rest of the
+    // control range.
+    for (const byte of [0x02, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x16, 0x18, 0x19, 0x1c, 0x1d, 0x1e, 0x1f]) {
+      expect(isSweptControlByte(byte)).toBe(true);
+    }
+  });
+
+  it("never sweeps printable input or out-of-range values", () => {
+    expect(isSweptControlByte(0x20)).toBe(false); // space
+    expect(isSweptControlByte(0x61)).toBe(false); // 'a'
+    expect(isSweptControlByte(0x7f)).toBe(false); // DEL
+    expect(isSweptControlByte(0xff)).toBe(false);
   });
 });
 
