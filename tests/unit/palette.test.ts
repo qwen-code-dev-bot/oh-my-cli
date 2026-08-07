@@ -119,6 +119,37 @@ describe("Palette: honest session commands (Issue #713)", () => {
   });
 });
 
+describe("Palette: single honest /approval-mode entry (Issue #715)", () => {
+  it("advertises one /approval-mode command naming the three modes", () => {
+    const cmd = defaultCommands().find((c) => c.name === "/approval-mode");
+    expect(cmd).toBeTruthy();
+    expect(cmd!.description).toContain("default");
+    expect(cmd!.description).toContain("auto-edit");
+    expect(cmd!.description).toContain("yolo");
+  });
+
+  it("the three hollow multi-word stubs are gone — no advertised command is unreachable", () => {
+    const names = defaultCommands().map((c) => c.name);
+    expect(names).not.toContain("/approval-mode default");
+    expect(names).not.toContain("/approval-mode auto-edit");
+    expect(names).not.toContain("/approval-mode yolo");
+    // And no multi-word name remains that the token-based slash resolver
+    // could never match from typed input.
+    for (const name of names) {
+      expect(name.startsWith("/")).toBe(true);
+      expect(name.includes(" ")).toBe(false);
+    }
+  });
+
+  it("the fallback action is honest for surfaces without live switching", async () => {
+    const cmd = defaultCommands().find((c) => c.name === "/approval-mode")!;
+    const output = await cmd.action("");
+    expect(typeof output).toBe("string");
+    expect(output).toContain("cannot change the approval mode");
+    expect(output).toContain("--approval-mode");
+  });
+});
+
 describe("Palette: renderPaletteLines color", () => {
   const commands: PaletteCommand[] = [
     { name: "/new", description: "Start a new conversation session", action: () => {} },

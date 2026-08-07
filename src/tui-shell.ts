@@ -43,6 +43,12 @@ import type { SessionStats, SessionStatsRuntime } from "./session-stats.js";
 import { clearDurableDraft } from "./composer-draft.js";
 import type { ComposerDraftStore } from "./composer-draft.js";
 import type { PromptHistoryStore } from "./prompt-history.js";
+import {
+  approvalModeCommandDecision,
+  decisionAppliesMode,
+  nextPendingEscalation,
+  formatApprovalModeNotice,
+} from "./approval-mode-switch.js";
 import { emptyLspView, formatLspView } from "./lsp-runtime.js";
 import type { LspView } from "./lsp-runtime.js";
 import { formatLifecycleView } from "./lifecycle-render.js";
@@ -169,7 +175,9 @@ export interface StatusInfo {
   model: string;
   // Already redacted (home collapsed to ~) by the caller; never a credential.
   workspace: string;
-  approvalMode: string;
+  // The EFFECTIVE approval mode (Issue #715): live shell state, switchable at
+  // runtime via /approval-mode; the footer and /status render it as-is.
+  approvalMode: ApprovalMode;
   contextUsage?: string | null;
 }
 
@@ -2844,8 +2852,12 @@ export interface ConversationShellOptions {
 // (/exit, Ctrl+D, Ctrl+C on empty) still terminate the process through
 // shutdown() after restoring the terminal; the promise resolves only for the
 // restart contract, so the entry point can seal the current session and
-// re-run the shell with a fresh session id in the same workspace.
-export type ShellExit = { kind: "new-session" } | { kind: "exit" };
+// re-run the shell with a fresh session id in the same workspace. The exit
+// carries the effective approval mode (Issue #715): it is invocation posture,
+// so a runtime switch survives a /new restart within the same invocation.
+export type ShellExit =
+  | { kind: "new-session"; approvalMode: ApprovalMode }
+  | { kind: "exit" };
 
 // Run the interactive conversation shell. Under ordinary operation the promise
 // never resolves: the process stays alive via stdin listeners and ends through
@@ -2950,6 +2962,10 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
   // Restart-contract resolver (Issue #713): set when the run promise is
   // created; invoked only by restartWithNewSession().
   let resolveExit: ((exit: ShellExit) => void) | null = null;
+  // Pending approval-mode escalation (Issue #715): set when the user requests
+  // a looser mode; only the exact `<mode> confirm` form applies it. Shell
+  // state only — never persisted, never carried into session metadata.
+  let pendingEscalation: ApprovalMode | null = null;
   // Bounded incremental repainting (#245): the last painted screen and its
   // structural signature, used to rewrite only changed rows for ordinary
   // streamed deltas. `forceFull` starts true so the first paint clears and
@@ -4226,12 +4242,16 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
   ): Promise<void> {
     const generation = ++runGeneration;
     const turnStart = Date.now();
+    // The turn is gated by the effective approval mode at turn start (Issue
+    // #715): a runtime switch takes effect from the next submit, and a turn
+    // always completes under the mode it started with.
+    const turnApprovalMode = state.status.approvalMode;
     try {
       const history = opts.loadHistory();
       const result = await runAgent(text, history.slice(0, -1), {
         config: opts.config,
         workspace: opts.workspace,
-        approvalMode: opts.approvalMode,
+        approvalMode: turnApprovalMode,
         sessionId: opts.sessionId,
         onMessage: opts.onMessage,
         sink: createShellSink(generation),
@@ -4382,7 +4402,11 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
     stdout.removeListener("resize", onResize);
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
-    if (resolveExit) resolveExit({ kind: "new-session" });
+    // The effective approval mode is invocation posture (Issue #715): it
+    // survives a /new restart so a runtime switch is not silently dropped.
+    if (resolveExit) {
+      resolveExit({ kind: "new-session", approvalMode: state.status.approvalMode });
+    }
   }
 
   async function runPaletteCommand(cmd: PaletteCommand, args = ""): Promise<boolean> {
@@ -4397,6 +4421,26 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
       // restart to the entry point instead of pretending (the old stub printed
       // a success-styled notice and changed nothing).
       restartWithNewSession();
+      return true;
+    }
+    if (cmd.name === "/approval-mode") {
+      // Issue #715: the advertised posture control, made real. The decision is
+      // pure and shared with the readline surface; this handler applies it to
+      // the live shell state. De-escalation is immediate; escalation requires
+      // the explicit `<mode> confirm` form matching a pending request. Busy
+      // gating happens upstream (submit gate / #566 palette predicate), so no
+      // mode change ever fires mid-stream.
+      const decision = approvalModeCommandDecision(
+        state.status.approvalMode,
+        args,
+        pendingEscalation,
+      );
+      if (decisionAppliesMode(decision)) {
+        state.status.approvalMode = decision.mode;
+      }
+      pendingEscalation = nextPendingEscalation(decision);
+      state.transcript.push({ kind: "notice", text: formatApprovalModeNotice(decision) });
+      scheduleRender();
       return true;
     }
     if (cmd.name === "/clear") {
@@ -4445,7 +4489,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
     const runtimeOutput = formatRuntimeSlashCommand(cmd.name, {
       model: opts.config.model,
       workspace: opts.workspace.root,
-      approvalMode: opts.approvalMode,
+      // /status reports the EFFECTIVE mode, including any runtime switch
+      // (Issue #715) — not the startup flag.
+      approvalMode: state.status.approvalMode,
       sessionId: opts.sessionId,
       settingsPath: opts.settingsPath,
       tools: opts.tools,
