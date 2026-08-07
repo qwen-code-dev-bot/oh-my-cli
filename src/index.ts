@@ -164,6 +164,7 @@ import {
   PROMPT_HISTORY_MAX_ENTRIES,
 } from "./prompt-history.js";
 import { readlineOrientationLine } from "./readline-orientation.js";
+import { corruptStoreWarning } from "./readline-store-warnings.js";
 import {
   approvalModeCommandDecision,
   decisionAppliesMode,
@@ -5714,16 +5715,23 @@ program
         // Seed Up-recall from the durable workspace prompt history (Issue
         // #723): the store is oldest-first, readline recalls index 0 first
         // (newest-first). Any store failure degrades to the pre-#723
-        // behavior — an empty in-invocation history — never a crash.
-        // `history` is a documented runtime property of readline.Interface
-        // (mutable line history) that this @types/node version does not
-        // declare, hence the bounded cast.
+        // behavior — an empty in-invocation history — never a crash; a
+        // corrupt store additionally produces one bounded warning (Issue
+        // #739), matching the full-screen shell's honesty. `history` is a
+        // documented runtime property of readline.Interface (mutable line
+        // history) that this @types/node version does not declare, hence the
+        // bounded cast.
+        let promptHistoryWarning: string | null = null;
         try {
+          const historyLoad = promptHistories.load();
+          if (historyLoad.corrupt) {
+            promptHistoryWarning = corruptStoreWarning("prompt history", promptHistories.filePath);
+          }
           (rl as unknown as { history: string[] }).history = readlineHistorySeed(
-            promptHistories.load().entries,
+            historyLoad.entries,
           );
         } catch {
-          /* fail closed: empty recall */
+          promptHistoryWarning = corruptStoreWarning("prompt history", promptHistories.filePath);
         }
 
         // Durable composer draft on the readline surface (Issue #725), parity
@@ -5737,13 +5745,18 @@ program
         // inline there): identical file, ownership, and semantics.
         const composerDrafts = openComposerDraftStore({ workspacePath: workspace.root });
         let readlineDraftText: string | null = null;
+        // A corrupt draft degrades to no restore (fail closed) plus one
+        // bounded warning naming the preserved file (Issue #739).
+        let draftWarning: string | null = null;
         try {
           const draft = composerDrafts.load();
           if (draft.status === "restored" && draft.text.trim() !== "") {
             readlineDraftText = draft.text;
+          } else if (draft.status === "corrupt") {
+            draftWarning = corruptStoreWarning("composer draft", composerDrafts.filePath);
           }
         } catch {
-          /* fail closed: no restore */
+          draftWarning = corruptStoreWarning("composer draft", composerDrafts.filePath);
         }
 
         let draftAutosaveTimer: NodeJS.Timeout | null = null;
@@ -5841,6 +5854,14 @@ program
         // nothing (resumeId is null).
         if (resumeId) {
           process.stderr.write(`${readlineOrientationLine(existingMessages)}\n`);
+        }
+        // Corrupt durable stores are visible, not silent (Issue #739): one
+        // bounded warning per store, after the session/orientation lines.
+        if (promptHistoryWarning) {
+          process.stderr.write(`${promptHistoryWarning}\n`);
+        }
+        if (draftWarning) {
+          process.stderr.write(`${draftWarning}\n`);
         }
 
         let paletteOpen = false;
