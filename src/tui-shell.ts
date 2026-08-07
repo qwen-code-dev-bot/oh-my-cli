@@ -51,6 +51,7 @@ import {
 } from "./approval-mode-switch.js";
 import { rejectCompactArgs } from "./compact-command.js";
 import { decodeUtf8Streaming, hasNonAscii } from "./utf8-chunks.js";
+import { pastedTextToComposer } from "./paste-transform.js";
 import { emptyLspView, formatLspView } from "./lsp-runtime.js";
 import type { LspView } from "./lsp-runtime.js";
 import { formatLifecycleView } from "./lifecycle-render.js";
@@ -4816,15 +4817,20 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
       return;
     }
 
-    // Otherwise treat the buffer as pasted/typed text: insert printable
-    // characters and drop embedded control bytes.
-    let inserted = "";
-    for (const ch of s) {
-      const cp = ch.codePointAt(0)!;
-      if (cp === 0x0d || cp === 0x0a || cp === 0x7f || cp < 0x20) continue;
-      inserted += ch;
+    // Otherwise treat the buffer as pasted text (Issue #733): line
+    // boundaries map to the composer's native multi-line model instead of
+    // being dropped, so a multi-line paste arrives exactly as pasted and
+    // submits exactly as shown. Typed keys reach the single-byte branch
+    // individually (typed Enter never appears inside a multi-byte chunk), so
+    // single-key semantics — including Enter-to-submit — are untouched.
+    const pasted = pastedTextToComposer(s);
+    if (pasted === "") return;
+    if (!pasted.includes("\n")) return insert(pasted);
+    const segments = pasted.split("\n");
+    for (let i = 0; i < segments.length; i++) {
+      if (i > 0) insertNewline();
+      if (segments[i] !== "") insert(segments[i]);
     }
-    if (inserted) insert(inserted);
   }
 
   function onResize(): void {
