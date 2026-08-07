@@ -196,10 +196,12 @@ describe("streaming-safe allowlist", () => {
     for (const name of STREAMING_SAFE_SLASH_COMMANDS) {
       expect(isStreamingSafeSlashCommand(name)).toBe(true);
     }
-    // /new and /resume restart or rebind the session (Issue #713), and
-    // /approval-mode rebinds the safety posture (Issue #715), so they are
-    // rejected mid-stream like any other non-read-only command.
-    for (const name of ["/clear", "/exit", "/attach", "/ask", "/goal", "/stats", "/new", "/resume", "/approval-mode"]) {
+    // /new and /resume restart or rebind the session (Issue #713),
+    // /approval-mode rebinds the safety posture (Issue #715), and /compact
+    // writes a sidecar that must not race an in-flight turn's appends (Issue
+    // #719), so they are rejected mid-stream like any other non-read-only
+    // command.
+    for (const name of ["/clear", "/exit", "/attach", "/ask", "/goal", "/stats", "/new", "/resume", "/approval-mode", "/compact"]) {
       expect(isStreamingSafeSlashCommand(name)).toBe(false);
     }
   });
