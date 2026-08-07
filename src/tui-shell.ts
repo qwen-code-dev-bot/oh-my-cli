@@ -49,6 +49,7 @@ import {
   nextPendingEscalation,
   formatApprovalModeNotice,
 } from "./approval-mode-switch.js";
+import { rejectCompactArgs } from "./compact-command.js";
 import { emptyLspView, formatLspView } from "./lsp-runtime.js";
 import type { LspView } from "./lsp-runtime.js";
 import { formatLifecycleView } from "./lifecycle-render.js";
@@ -2839,6 +2840,10 @@ export interface ConversationShellOptions {
   // prompt submitted from the interactive composer. Optional so a shell
   // without a history store keeps the in-session recall model unchanged.
   promptHistories?: PromptHistoryStore;
+  // Interactive compaction of the current session (Issue #719): the entry
+  // point owns the session store, so it supplies the full report text; the
+  // shell only surfaces it. Absent on surfaces without a store.
+  onCompact?: () => string;
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
   env?: Record<string, string | undefined>;
@@ -4247,8 +4252,14 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
     // always completes under the mode it started with.
     const turnApprovalMode = state.status.approvalMode;
     try {
+      // The store holds every persisted turn (it ends with the previous
+      // turn's assistant message); the current user message is appended by
+      // runAgent itself. Pass the full history — slicing the last message
+      // away dropped the previous assistant turn from the model's context on
+      // every turn (and dropped the compaction summary on resumed compacted
+      // sessions). Issue #719.
       const history = opts.loadHistory();
-      const result = await runAgent(text, history.slice(0, -1), {
+      const result = await runAgent(text, history, {
         config: opts.config,
         workspace: opts.workspace,
         approvalMode: turnApprovalMode,
@@ -4440,6 +4451,26 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
       }
       pendingEscalation = nextPendingEscalation(decision);
       state.transcript.push({ kind: "notice", text: formatApprovalModeNotice(decision) });
+      scheduleRender();
+      return true;
+    }
+    if (cmd.name === "/compact") {
+      // Issue #719: compact the current session through the exact headless
+      // mechanics. The entry point performs the store work and returns the
+      // honest report; the shell renders it. Arguments are rejected before
+      // anything touches the store; busy gating happens upstream (submit gate
+      // for typed input, #566 palette predicate for selection), so a
+      // compaction never races an in-flight turn's appends.
+      const rejection = rejectCompactArgs(args);
+      if (rejection !== null) {
+        state.transcript.push({ kind: "notice", text: rejection });
+        scheduleRender();
+        return true;
+      }
+      const output = opts.onCompact
+        ? opts.onCompact()
+        : "/compact is unavailable on this surface.";
+      state.transcript.push({ kind: "notice", text: output });
       scheduleRender();
       return true;
     }

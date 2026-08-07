@@ -173,6 +173,8 @@ import {
   formatCompaction,
   loadSessionMessages,
 } from "./compaction.js";
+import type { CompactionSummary } from "./compaction.js";
+import { compactCurrentSession, rejectCompactArgs } from "./compact-command.js";
 import { collectDoctorReport, doctorRecord, formatDoctorReport } from "./doctor.js";
 import { collectRepoReadiness, formatRepoReadiness } from "./repo-readiness.js";
 import { collectRepoContext, formatRepoContext } from "./repo-context.js";
@@ -5345,6 +5347,22 @@ program
         // persisted — an invocation restart drops it by design.
         let pendingApprovalEscalation: ApprovalMode | null = null;
 
+        // Interactive compaction of the current session (Issue #719): the
+        // exact headless mechanics (--compact) over the live session id,
+        // which the closures read at call time so /new restarts target the
+        // fresh session. The transcript is never touched; the sidecar applies
+        // from the next turn and the next --resume.
+        const compactIo = {
+          load: (sid: string) => store.load(sid),
+          save: (sid: string, summary: CompactionSummary) =>
+            saveCompaction(store.compactPath(sid), summary),
+        };
+        const runCompactForCurrentSession = (args: string): string => {
+          const rejection = rejectCompactArgs(args);
+          if (rejection !== null) return rejection;
+          return compactCurrentSession(sessionId, compactIo);
+        };
+
         // Build palette commands with live context
         const paletteCommands: PaletteCommand[] = [
           {
@@ -5392,6 +5410,14 @@ program
               pendingApprovalEscalation = nextPendingEscalation(decision);
               return formatApprovalModeNotice(decision);
             },
+          },
+          {
+            // /compact (Issue #719): same report on both surfaces — the
+            // readline action and the full-screen shell's onCompact option
+            // share runCompactForCurrentSession.
+            name: "/compact",
+            description: "Compact the current session (transcript preserved; applies from next turn/resume)",
+            action: (args = "") => runCompactForCurrentSession(args),
           },
           ...defaultCommands().filter(
             (command) =>
@@ -5577,6 +5603,10 @@ program
             // workspace, and every submitted prompt is recorded for future
             // recall. Keyed by the same canonical workspace identity.
             promptHistories,
+            // Interactive compaction of the current session (Issue #719);
+            // the shell renders the returned report. The session id is read
+            // at call time, so a /new restart targets the fresh session.
+            onCompact: () => runCompactForCurrentSession(""),
             // Offline posture banner before the first request (Issue #576).
             offline: offlineRequested,
             // Immediate Goal status summary on resume (Issue #584).
@@ -5816,9 +5846,14 @@ program
             }
             try {
               turnInFlight = true;
+              // Full history: the store ends with the previous turn's assistant
+              // message and runAgent appends the current user message itself.
+              // Slicing the last message away dropped the previous assistant
+              // turn from the context on every turn (Issue #719) — the
+              // headless paths already pass the full transcript.
               existingMessages = loadSessionMessages(store, sessionId);
               const images = pendingImages.splice(0);
-              const result = await runAgent(promptText, existingMessages.slice(0, -1), {
+              const result = await runAgent(promptText, existingMessages, {
                 config,
                 workspace,
                 approvalMode,
