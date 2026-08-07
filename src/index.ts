@@ -5329,10 +5329,34 @@ program
 
         // Build palette commands with live context
         const paletteCommands: PaletteCommand[] = [
+          {
+            // /new (Issue #713), plain-readline surface: the full-screen shell
+            // intercepts /new and returns the structured restart result; on the
+            // readline fallback this action performs the same contract in place —
+            // seal the current session and switch the REPL to a fresh session id
+            // in the same workspace and posture. Run-scoped bounds are per-turn
+            // gates on the shared invocation options, so they carry over
+            // unchanged; workspace-keyed durable state (#556/#711) is untouched.
+            name: "/new",
+            description: "Start a new conversation session",
+            action: () => {
+              sealSession();
+              sessionId = store.newId();
+              store.writeMeta(sessionId, {
+                model: config.model,
+                ...(resolved.profile ? { profile: resolved.profile } : {}),
+                workspace: workspace.root,
+                createdAt: Date.now(),
+              });
+              runtimeSlashContext.sessionId = sessionId;
+              return `New session started: ${sessionId}`;
+            },
+          },
           ...defaultCommands().filter(
-            (command) => !RUNTIME_SLASH_COMMANDS.some(
-              (name) => name === command.name,
-            ),
+            (command) =>
+              !RUNTIME_SLASH_COMMANDS.some(
+                (name) => name === command.name,
+              ) && command.name !== "/new",
           ),
           ...RUNTIME_SLASH_COMMAND_DESCRIPTORS.map(({ name, description }) => ({
             name,
@@ -5464,8 +5488,15 @@ program
             env: process.env,
           })
         ) {
+          // Restart loop for the /new contract (Issue #713): the shell resolves
+          // only when the user asks for a fresh session; ordinary exits
+          // terminate the process inside the shell. The Goal resume notice
+          // belongs to the session the shell was launched with, never to a
+          // session started via /new.
+          let resumeNoticeForShell: string | undefined = resumeGoalNotice ?? undefined;
+          for (;;) {
           maybeInjectFault();
-          await runConversationShell({
+          const shellExit = await runConversationShell({
             config,
             workspace,
             approvalMode,
@@ -5508,7 +5539,7 @@ program
             // Offline posture banner before the first request (Issue #576).
             offline: offlineRequested,
             // Immediate Goal status summary on resume (Issue #584).
-            resumeNotice: resumeGoalNotice ?? undefined,
+            resumeNotice: resumeNoticeForShell,
             // Shell failure receipts (Issue #574): persistence is session-bound;
             // the shell forwards failed shell executions here.
             onShellFailure: (detail) =>
@@ -5516,6 +5547,22 @@ program
                 head: currentRepoHead(workspace.root) || null,
               }),
           });
+            if (shellExit.kind !== "new-session") break;
+            // Seal the finished session and start a fresh one in the same
+            // workspace and posture (Issue #713). Workspace-keyed durable state
+            // (composer draft #556, prompt history #711) carries over by
+            // construction; run-scoped bounds are per-turn gates on the shared
+            // options above, so they are never reset by a restart.
+            sealSession();
+            sessionId = store.newId();
+            store.writeMeta(sessionId, {
+              model: config.model,
+              ...(resolved.profile ? { profile: resolved.profile } : {}),
+              workspace: workspace.root,
+              createdAt: Date.now(),
+            });
+            resumeNoticeForShell = undefined;
+          }
           return;
         }
 

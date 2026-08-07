@@ -2840,10 +2840,19 @@ export interface ConversationShellOptions {
   renderStats?: RenderStats;
 }
 
-// Run the interactive conversation shell. Resolves never under normal operation:
-// the process stays alive via stdin listeners and ends through an explicit exit
-// (Ctrl+D / Ctrl+C on empty / palette /exit) that restores the terminal first.
-export function runConversationShell(opts: ConversationShellOptions): Promise<void> {
+// Structured result of a conversation shell run (Issue #713). Ordinary exits
+// (/exit, Ctrl+D, Ctrl+C on empty) still terminate the process through
+// shutdown() after restoring the terminal; the promise resolves only for the
+// restart contract, so the entry point can seal the current session and
+// re-run the shell with a fresh session id in the same workspace.
+export type ShellExit = { kind: "new-session" } | { kind: "exit" };
+
+// Run the interactive conversation shell. Under ordinary operation the promise
+// never resolves: the process stays alive via stdin listeners and ends through
+// an explicit exit (Ctrl+D / Ctrl+C on empty / palette /exit) that restores
+// the terminal first. It resolves only when the user requests `/new` (Issue
+// #713), handing the restart to the entry point.
+export function runConversationShell(opts: ConversationShellOptions): Promise<ShellExit> {
   const stdin = opts.stdin ?? process.stdin;
   const stdout = opts.stdout ?? process.stdout;
 
@@ -2938,6 +2947,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   let paletteOpen = false;
   let renderScheduled = false;
   let cleaned = false;
+  // Restart-contract resolver (Issue #713): set when the run promise is
+  // created; invoked only by restartWithNewSession().
+  let resolveExit: ((exit: ShellExit) => void) | null = null;
   // Bounded incremental repainting (#245): the last painted screen and its
   // structural signature, used to rewrite only changed rows for ordinary
   // streamed deltas. `forceFull` starts true so the first paint clears and
@@ -4357,11 +4369,34 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     process.exit(code);
   }
 
+  // The /new restart path (Issue #713): the same teardown as shutdown(), but
+  // it resolves the run contract instead of exiting the process, so the entry
+  // point can seal this session and re-run the shell with a fresh session id
+  // in the same workspace and posture. The busy gate in submit() rejects /new
+  // mid-stream, so no in-flight turn is abandoned here.
+  function restartWithNewSession(): void {
+    if (!running) return;
+    running = false;
+    cleanup();
+    stdin.removeListener("data", onData);
+    stdout.removeListener("resize", onResize);
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
+    if (resolveExit) resolveExit({ kind: "new-session" });
+  }
+
   async function runPaletteCommand(cmd: PaletteCommand, args = ""): Promise<boolean> {
     // Shell-specific handling for commands whose default action would otherwise
     // bypass terminal cleanup or the shell's own state.
     if (cmd.name === "/exit" || cmd.name === "/quit") {
       shutdown(0);
+      return true;
+    }
+    if (cmd.name === "/new") {
+      // Issue #713: a real fresh session — tear down cleanly and hand the
+      // restart to the entry point instead of pretending (the old stub printed
+      // a success-styled notice and changed nothing).
+      restartWithNewSession();
       return true;
     }
     if (cmd.name === "/clear") {
@@ -4695,6 +4730,13 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   } catch {
     /* not a raw-capable stream */
   }
+  // A restarted shell (Issue #713 /new) inherits a stdin paused by the
+  // previous run's cleanup(); resuming is a no-op on a first launch.
+  try {
+    stdin.resume();
+  } catch {
+    /* not a resumable stream */
+  }
   stdin.on("data", onData);
   stdout.on("resize", onResize);
   process.removeAllListeners("SIGINT");
@@ -4702,7 +4744,10 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   process.once("SIGTERM", onSignal);
   paint();
 
-  // The process is kept alive by the stdin listener; termination happens through
-  // shutdown()/process.exit, so this promise intentionally never resolves.
-  return new Promise<void>(() => {});
+  // The process is kept alive by the stdin listener; ordinary termination
+  // happens through shutdown()/process.exit. The promise resolves only for the
+  // /new restart contract (Issue #713).
+  return new Promise<ShellExit>((resolve) => {
+    resolveExit = resolve;
+  });
 }
