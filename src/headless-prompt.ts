@@ -1,7 +1,9 @@
-// Headless prompt resolution (Issue #759). `-p`/`--prompt` accepts its value
-// as an argument or — when the value is omitted — from piped stdin, the
-// composition pattern every trusted coding CLI supports (`git diff | cli -p`).
-// The decisions here are pure so the wiring in index.ts stays a thin reader;
+// Headless prompt resolution (Issues #759, #761). `-p`/`--prompt` accepts
+// its value as an argument or — when the value is omitted — from piped
+// stdin, the composition pattern every trusted coding CLI supports
+// (`git diff | cli -p`). When BOTH are present the pipe carries context for
+// the instruction: one combined prompt, recorded verbatim (#761). The
+// decisions here are pure so the wiring in index.ts stays a thin reader;
 // errors are honest and bounded: a TTY cannot be a pipe, and an empty pipe
 // is not a prompt.
 
@@ -40,4 +42,13 @@ export function resolveHeadlessPromptSource(
 export function normalizeStdinPrompt(text: string): string | null {
   const trimmed = text.trim();
   return trimmed === "" ? null : trimmed;
+}
+
+// A prompt argument plus piped stdin is one request (#761): the instruction
+// first, a blank line, then the piped content — the ordering trusted coding
+// CLIs use for `cat thing | cli -p "instruction"`. A null pipe (absent,
+// empty, or whitespace-only) conveys nothing and the argument stands alone.
+export function combinePromptAndStdin(value: string, stdinText: string | null): string {
+  if (stdinText === null) return value;
+  return `${value}\n\n${stdinText}`;
 }
