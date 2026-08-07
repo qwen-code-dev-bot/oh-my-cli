@@ -2767,6 +2767,13 @@ const RESET_ALL = "\x1b[0m";
 const CLEAR_LINE = "\x1b[2K";
 const MOVE = (row: number, col: number) => `\x1b[${row + 1};${col + 1}H`;
 
+// The live facts the shell contributes to the read-only /context view (Issue
+// #721); the entry point adds the store facts and formats the block.
+export interface ShellContextFacts {
+  lastCallPromptTokens: number | null;
+  lastTurnUsage: { prompt: number; completion: number; total: number } | null;
+}
+
 export interface ConversationShellOptions {
   config: Config;
   workspace: Workspace;
@@ -2844,6 +2851,10 @@ export interface ConversationShellOptions {
   // point owns the session store, so it supplies the full report text; the
   // shell only surfaces it. Absent on surfaces without a store.
   onCompact?: () => string;
+  // Read-only context budget view (Issue #721): the shell contributes its
+  // live facts; the entry point adds the store facts and returns the
+  // formatted block. Read-only and streaming-safe.
+  onContext?: (facts: ShellContextFacts) => string;
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
   env?: Record<string, string | undefined>;
@@ -2967,6 +2978,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
   // Restart-contract resolver (Issue #713): set when the run promise is
   // created; invoked only by restartWithNewSession().
   let resolveExit: ((exit: ShellExit) => void) | null = null;
+  // Live facts for the read-only /context view (Issue #721), updated from
+  // each turn's result; read-only consumers only.
+  let contextFacts: ShellContextFacts = { lastCallPromptTokens: null, lastTurnUsage: null };
   // Pending approval-mode escalation (Issue #715): set when the user requests
   // a looser mode; only the exact `<mode> confirm` form applies it. Shell
   // state only — never persisted, never carried into session metadata.
@@ -4319,6 +4333,12 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
         scheduleRender();
       }
       if (result.tokens) state.status.contextUsage = `tokens ${result.tokens.total}`;
+      // /context facts (Issue #721): exactly what the provider reported for
+      // this turn and the gate input of the last provider call.
+      contextFacts = {
+        lastCallPromptTokens: result.lastCallPromptTokens,
+        lastTurnUsage: result.tokens ? { ...result.tokens } : null,
+      };
       if (goalRevision !== undefined && opts.settleGoal) {
         try {
           const output = opts.settleGoal(goalRevision, result.ok);
@@ -4470,6 +4490,17 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
       const output = opts.onCompact
         ? opts.onCompact()
         : "/compact is unavailable on this surface.";
+      state.transcript.push({ kind: "notice", text: output });
+      scheduleRender();
+      return true;
+    }
+    if (cmd.name === "/context") {
+      // Issue #721: read-only context budget view. Streaming-safe (allowlist):
+      // it only reads shell facts and the entry point's store facts, mutates
+      // nothing, and is honest about absent data.
+      const output = opts.onContext
+        ? opts.onContext(contextFacts)
+        : "/context is unavailable on this surface.";
       state.transcript.push({ kind: "notice", text: output });
       scheduleRender();
       return true;

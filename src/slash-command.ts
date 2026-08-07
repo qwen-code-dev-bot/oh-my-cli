@@ -40,6 +40,9 @@ export const INTERACTIVE_SLASH_COMMANDS = [
 export const STREAMING_SAFE_SLASH_COMMANDS: readonly string[] = [
   ...RUNTIME_SLASH_COMMANDS,
   "/help",
+  // Read-only context budget view (Issue #721): reads shell and store facts,
+  // mutates nothing, so it is safe mid-stream like /status.
+  "/context",
 ];
 
 export function isStreamingSafeSlashCommand(name: string): boolean {
