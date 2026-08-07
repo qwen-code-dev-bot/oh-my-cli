@@ -5852,8 +5852,14 @@ program
         // Ctrl+C with terminal readline emits SIGINT on the interface (not the
         // process): non-empty line clears the draft and stays alive (shell
         // parity); empty line exits cleanly like the shell's empty-composer
-        // Ctrl+C.
+        // Ctrl+C. Mid-turn, re-dispatch to the process handler so the
+        // run-scoped installSigintCancel escalation applies (Issue #743):
+        // first Ctrl+C requests the cooperative cancel, second exits.
         rl.on("SIGINT", () => {
+          if (turnInFlight) {
+            process.kill(process.pid, "SIGINT");
+            return;
+          }
           if (rl.line.trim() !== "") {
             // `line`/`cursor` are documented runtime-mutable state that this
             // @types/node version declares read-only, hence the bounded cast.
