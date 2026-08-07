@@ -36,6 +36,54 @@ export function slashPreviewQuery(text: string): string | null {
   return /^\/[^\s/]*$/.test(text) ? text.slice(1) : null;
 }
 
+// Line-based palette picker (Issue #717): the plain-readline surface cannot
+// host the raw-mode overlay without corrupting the stdin readline owns (the
+// old Ctrl+K path exited the session on selection and bricked input on
+// cancel). This surface lists the commands by number and takes an ordinary
+// line of input instead — pure helpers so the rendering and the parsing are
+// unit-testable without a terminal.
+export interface PalettePickerOptions {
+  // Per-entry unavailability reason (e.g. the busy gate); when present it
+  // replaces the description so the list never advertises an action the
+  // dispatch will refuse.
+  reasonFor?: (command: PaletteCommand) => string | null;
+}
+
+export function formatPalettePickerLines(
+  commands: readonly PaletteCommand[],
+  opts: PalettePickerOptions = {},
+): string[] {
+  return commands.map((command, index) => {
+    const reason = opts.reasonFor?.(command) ?? null;
+    const detail = reason ?? command.description;
+    return `  ${index + 1}) ${command.name} — ${detail}`;
+  });
+}
+
+export type PaletteSelection =
+  | { kind: "cancel" }
+  | { kind: "invalid"; message: string }
+  | { kind: "select"; index: number };
+
+export function parsePaletteSelection(answer: string, count: number): PaletteSelection {
+  const trimmed = answer.trim();
+  if (trimmed === "") return { kind: "cancel" };
+  if (!/^\d+$/.test(trimmed)) {
+    return {
+      kind: "invalid",
+      message: `Not a valid selection: "${trimmed}". Enter a number between 1 and ${count}, or press Enter to cancel.`,
+    };
+  }
+  const n = Number(trimmed);
+  if (n < 1 || n > count) {
+    return {
+      kind: "invalid",
+      message: `No entry ${n} — enter a number between 1 and ${count}, or press Enter to cancel.`,
+    };
+  }
+  return { kind: "select", index: n - 1 };
+}
+
 const ESC = "\x1b[";
 const HIDE_CURSOR = `${ESC}?25l`;
 const SHOW_CURSOR = `${ESC}?25h`;

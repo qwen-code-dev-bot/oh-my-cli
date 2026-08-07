@@ -8,6 +8,7 @@ import {
   formatRuntimeSlashCommand,
   formatSlashCommandHelp,
   resolveSlashCommand,
+  isStreamingSafeSlashCommand,
 } from "./slash-command.js";
 import { resolveEffectiveSettings, formatEffectiveSettings } from "./effective-settings.js";
 import { collectWorkflowList, formatWorkflowList } from "./workflow-contract.js";
@@ -42,7 +43,11 @@ import { runAgent, createConsoleSink } from "./agent.js";
 import type { AgentResult } from "./agent.js";
 import type { ApprovalMode } from "./approval.js";
 import type { SessionMessage } from "./session.js";
-import { runPalette, defaultCommands } from "./palette.js";
+import {
+  defaultCommands,
+  formatPalettePickerLines,
+  parsePaletteSelection,
+} from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
 import { runPreflight, formatPreflight, validateFallbackModel } from "./preflight.js";
 import { collectSandboxDiagnostic, formatDiagnostic } from "./sandbox-diag.js";
@@ -5630,37 +5635,105 @@ program
         process.stderr.write(`Session: ${sessionId}  ${DIM}Ctrl+K: command palette${RESET}\n`);
 
         let paletteOpen = false;
+        // The picker's own rl.question is pending (distinct from the typed
+        // prompt's question); readline supports one pending question, so the
+        // guarded prompt() must not stack a second one (Issue #717).
+        let paletteQuestionActive = false;
 
-        // Listen for Ctrl+K (0x0b) on raw stdin to open the palette
-        const ctrlKHandler = (buf: Buffer) => {
-          if (!paletteOpen && buf[0] === 0x0b) {
-            paletteOpen = true;
-            rl.pause();
-            process.stderr.write("\n");
-            runPalette(paletteCommands, process.stdin, process.stdout, { color: useColor }).then(async (result) => {
-              paletteOpen = false;
-              if (result.selected && !result.cancelled) {
-                process.stderr.write(`\n${BOLD}${result.selected.name}${RESET}: ${result.selected.description}\n`);
-                try {
-                  await result.selected.action();
-                } catch (err: unknown) {
-                  const msg = err instanceof Error ? err.message : String(err);
-                  process.stderr.write(`Error: ${msg}\n`);
-                }
-              }
-              rl.resume();
-              prompt();
-            });
-          }
-        };
-        process.stdin.on("data", ctrlKHandler);
+        // Whether the current dispatch has an agent turn in flight. The
+        // readline surface is single-threaded — typed input is only accepted
+        // between turns — but the Ctrl+K listener is a raw stdin tap that
+        // fires mid-turn too, so the palette gate needs an explicit flag.
+        let turnInFlight = false;
+        const BUSY_PALETTE_REASON = "a turn is in flight — available when it settles";
 
         // Images staged via /attach are sent with the next prompt, then cleared.
         const pendingImages: LoadedImage[] = [];
 
+        // Idempotent prompt: a settling turn and the palette picker can both
+        // reach for a fresh prompt; readline supports exactly one pending
+        // question, so extra requests are dropped instead of stacked.
+        let promptActive = false;
         const prompt = () => {
-          rl.question("> ", async (answer) => {
-            if (paletteOpen) return;
+          if (promptActive || paletteQuestionActive) return;
+          promptActive = true;
+          rl.question("> ", (answer) => {
+            promptActive = false;
+            if (paletteOpen) {
+              // The palette list is showing: this line is the user's
+              // selection, not a command or prompt (Issue #717).
+              paletteOpen = false;
+              handlePaletteAnswer(answer);
+              return;
+            }
+            void dispatchInput(answer);
+          });
+        };
+
+        // Shared selection handling for both picker entry points (the pending
+        // typed question during normal use, or the dedicated picker question
+        // when Ctrl+K fires mid-turn with no typed question pending).
+        const handlePaletteAnswer = (answer: string) => {
+          const selection = parsePaletteSelection(answer, paletteCommands.length);
+          if (selection.kind === "cancel") {
+            prompt();
+            return;
+          }
+          if (selection.kind === "invalid") {
+            process.stderr.write(`${selection.message}\n`);
+            prompt();
+            return;
+          }
+          const command = paletteCommands[selection.index];
+          const reason = paletteBusyReason(command);
+          if (reason) {
+            process.stderr.write(`${command.name} unavailable — ${reason}\n`);
+            prompt();
+            return;
+          }
+          // Dispatch exactly as if the command had been typed: same
+          // resolution, same special cases, same visible output.
+          void dispatchInput(command.name);
+        };
+
+        const paletteBusyReason = (command: PaletteCommand): string | null =>
+          turnInFlight && !isStreamingSafeSlashCommand(command.name)
+            ? BUSY_PALETTE_REASON
+            : null;
+
+        // Ctrl+K opens the line-based command palette (Issue #717). The former
+        // implementation overlaid the raw-mode interactive palette on the same
+        // stdin readline owns: selecting exited the session, cancelling left a
+        // prompt that accepted no input, and the dispatch discarded every
+        // command output. The picker here stays in cooked mode end to end and
+        // routes the selection through the shared typed dispatch path.
+        const ctrlKHandler = (buf: Buffer) => {
+          if (paletteOpen || buf[0] !== 0x0b) return;
+          paletteOpen = true;
+          process.stderr.write(
+            `\n${BOLD}Command palette${RESET} — select by number, or press Enter to cancel:\n`,
+          );
+          process.stderr.write(
+            `${formatPalettePickerLines(paletteCommands, { reasonFor: paletteBusyReason }).join("\n")}\n`,
+          );
+          if (promptActive) {
+            // A typed question is already pending: its callback will route the
+            // next line to handlePaletteAnswer. No second question.
+            return;
+          }
+          paletteQuestionActive = true;
+          rl.question("Select #: ", (answer) => {
+            paletteQuestionActive = false;
+            paletteOpen = false;
+            handlePaletteAnswer(answer);
+          });
+        };
+        process.stdin.on("data", ctrlKHandler);
+
+        // One dispatch path for typed lines and palette selections (Issue
+        // #717): whatever the palette advertises executes with exactly the
+        // semantics and visible output of typing it.
+        async function dispatchInput(answer: string): Promise<void> {
             if (!answer.trim()) {
               prompt();
               return;
@@ -5742,6 +5815,7 @@ program
               return;
             }
             try {
+              turnInFlight = true;
               existingMessages = loadSessionMessages(store, sessionId);
               const images = pendingImages.splice(0);
               const result = await runAgent(promptText, existingMessages.slice(0, -1), {
@@ -5777,10 +5851,11 @@ program
             } catch (err: unknown) {
               const msg = err instanceof Error ? err.message : String(err);
               process.stderr.write(`Error: ${msg}\n`);
+            } finally {
+              turnInFlight = false;
             }
             prompt();
-          });
-        };
+        }
 
         prompt();
       }

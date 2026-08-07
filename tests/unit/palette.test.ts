@@ -6,6 +6,8 @@ import {
   paletteStyle,
   slashPreviewQuery,
   commandDisabledReason,
+  formatPalettePickerLines,
+  parsePaletteSelection,
 } from "../../src/palette.js";
 import type { PaletteCommand } from "../../src/palette.js";
 
@@ -250,5 +252,62 @@ describe("Palette: disabled reasons (Issue #566)", () => {
 
   it("keeps disabled entries discoverable through filtering", () => {
     expect(filterCommands([enabled, disabled], "goal").map((c) => c.name)).toEqual(["/goal"]);
+  });
+});
+
+describe("Palette: line-based picker (Issue #717)", () => {
+  const commands: PaletteCommand[] = [
+    { name: "/new", description: "Start a new conversation session", action: () => {} },
+    { name: "/status", description: "Show current session and workspace info", action: () => {} },
+    { name: "/goal", description: "Set, inspect, pause, resume, achieve, or clear the session goal", action: () => {} },
+  ];
+
+  it("renders one numbered line per command with its description", () => {
+    const lines = formatPalettePickerLines(commands);
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain("1)");
+    expect(lines[0]).toContain("/new");
+    expect(lines[0]).toContain("Start a new conversation session");
+    expect(lines[2]).toContain("3)");
+    expect(lines[2]).toContain("/goal");
+  });
+
+  it("replaces the description with the unavailability reason when gated", () => {
+    const busy = "a turn is in flight — available when it settles";
+    const lines = formatPalettePickerLines(commands, {
+      reasonFor: (c) => (c.name === "/goal" ? busy : null),
+    });
+    expect(lines[2]).toContain(busy);
+    expect(lines[2]).not.toContain("Set, inspect, pause");
+    expect(lines[1]).toContain("Show current session and workspace info");
+  });
+
+  it("parses empty input as cancel", () => {
+    expect(parsePaletteSelection("", 3)).toEqual({ kind: "cancel" });
+    expect(parsePaletteSelection("   ", 3)).toEqual({ kind: "cancel" });
+  });
+
+  it("parses a valid 1-based selection", () => {
+    expect(parsePaletteSelection("1", 3)).toEqual({ kind: "select", index: 0 });
+    expect(parsePaletteSelection(" 3 ", 3)).toEqual({ kind: "select", index: 2 });
+  });
+
+  it("rejects non-numeric input naming it", () => {
+    const decision = parsePaletteSelection("/status", 3);
+    expect(decision.kind).toBe("invalid");
+    if (decision.kind === "invalid") {
+      expect(decision.message).toContain('"/status"');
+      expect(decision.message).toContain("1 and 3");
+    }
+  });
+
+  it("rejects out-of-range numbers naming the bounds", () => {
+    for (const answer of ["0", "4", "99"]) {
+      const decision = parsePaletteSelection(answer, 3);
+      expect(decision.kind).toBe("invalid");
+      if (decision.kind === "invalid") {
+        expect(decision.message).toContain("1 and 3");
+      }
+    }
   });
 });
