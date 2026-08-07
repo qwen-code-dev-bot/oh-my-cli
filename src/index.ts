@@ -157,6 +157,7 @@ import {
   shortSessionId,
 } from "./session-picker.js";
 import { openComposerDraftStore, clearDurableDraft } from "./composer-draft.js";
+import { isMultilinePasteChunk, flattenPastedChunk } from "./readline-paste.js";
 import {
   openPromptHistoryStore,
   readlineHistorySeed,
@@ -5685,6 +5686,21 @@ program
 
         const { bold: BOLD, dim: DIM, reset: RESET } = createColorPalette(useColor);
 
+        // Multi-line paste guard (Issue #727): registered BEFORE the readline
+        // interface so it observes each raw chunk ahead of readline's line
+        // splitting. A chunk that is a multi-line paste is flagged for the
+        // dispatch path, which flattens it into the composer instead of
+        // auto-submitting its first line. Observes only — never consumes
+        // data. Gated on a pending prompt question so a paste arriving
+        // mid-turn (typeahead) is left to the pre-#727 behavior rather than
+        // arming a stale interception.
+        let pasteChunk: Buffer | null = null;
+        process.stdin.on("data", (buf: Buffer) => {
+          if (promptActive && isMultilinePasteChunk(buf)) {
+            pasteChunk = Buffer.from(buf);
+          }
+        });
+
         const readline = await import("node:readline");
         const rl = readline.createInterface({
           input: process.stdin,
@@ -5918,6 +5934,36 @@ program
         // #717): whatever the palette advertises executes with exactly the
         // semantics and visible output of typing it.
         async function dispatchInput(answer: string): Promise<void> {
+            // Multi-line paste guard (Issue #727): never auto-submit. The
+            // flagged chunk's first line arrived as this callback's answer and
+            // the remaining lines are still being folded into the line buffer
+            // by readline, so apply the flattened text after the chunk is
+            // fully processed, then re-arm the prompt. Nothing reaches the
+            // provider or the session store without an explicit Enter.
+            if (pasteChunk !== null) {
+              const flat = flattenPastedChunk(pasteChunk);
+              pasteChunk = null;
+              setImmediate(() => {
+                const rlLine = rl as unknown as { line: string; cursor: number };
+                rlLine.line = "";
+                rlLine.cursor = 0;
+                rl.write(null, { ctrl: true, name: "u" });
+                if (flat !== "") {
+                  rl.write(flat);
+                  try {
+                    composerDrafts.save(flat);
+                  } catch {
+                    /* best-effort durability */
+                  }
+                }
+                process.stderr.write(
+                  "\nMulti-line paste placed in the input line — review, then press Enter to send. " +
+                    "True multi-line input: use the full-screen shell (Alt+Enter).\n",
+                );
+                prompt();
+              });
+              return;
+            }
             if (!answer.trim()) {
               prompt();
               return;
