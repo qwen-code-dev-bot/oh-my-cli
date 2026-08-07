@@ -159,6 +159,7 @@ import {
 } from "./session-picker.js";
 import { openComposerDraftStore, clearDurableDraft } from "./composer-draft.js";
 import { isMultilinePasteChunk, flattenPastedChunk } from "./readline-paste.js";
+import { CLEAR_SCREEN_SEQUENCE, repairCtrlLInsertion } from "./readline-screen.js";
 import {
   openPromptHistoryStore,
   readlineHistorySeed,
@@ -5750,6 +5751,44 @@ program
           if (promptActive && isMultilinePasteChunk(buf)) {
             pasteChunk = Buffer.from(buf);
           }
+        });
+
+        // Ctrl+L clears the screen and redraws the prompt line (Issue #745),
+        // like bash/zsh/the node REPL. Registered BEFORE the readline interface
+        // (like the paste tap) so it snapshots the line before readline
+        // consumes the byte: Node's readline has no Ctrl+L handling and
+        // inserts a literal \f into the line buffer, so the follow-up repairs
+        // that insertion (verified shape only — fail closed otherwise). The
+        // screen clear itself happens only at the idle prompt; mid-turn or
+        // with the palette open the buffer is still repaired but the
+        // streaming output / picker stays untouched. Non-TTY stdin is never
+        // touched: there a 0x0c byte is literal piped data, not a keystroke.
+        process.stdin.on("data", (buf: Buffer) => {
+          if (buf.length !== 1 || buf[0] !== 0x0c) return;
+          if (!process.stdin.isTTY) return;
+          const snapshot = {
+            line: (rl as unknown as { line: string }).line,
+            cursor: (rl as unknown as { cursor: number }).cursor,
+          };
+          setImmediate(() => {
+            const rlInternals = rl as unknown as {
+              line: string;
+              cursor: number;
+              _refreshLine(): void;
+            };
+            const repaired = repairCtrlLInsertion(snapshot, {
+              line: rlInternals.line,
+              cursor: rlInternals.cursor,
+            });
+            if (repaired === null) return;
+            rlInternals.line = repaired.line;
+            rlInternals.cursor = repaired.cursor;
+            if (turnInFlight || paletteOpen || paletteQuestionActive || !promptActive) {
+              return;
+            }
+            process.stderr.write(CLEAR_SCREEN_SEQUENCE);
+            rlInternals._refreshLine();
+          });
         });
 
         const readline = await import("node:readline");
