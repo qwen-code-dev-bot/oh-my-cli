@@ -163,6 +163,7 @@ import {
   readlineHistorySeed,
   PROMPT_HISTORY_MAX_ENTRIES,
 } from "./prompt-history.js";
+import { readlineOrientationLine } from "./readline-orientation.js";
 import {
   approvalModeCommandDecision,
   decisionAppliesMode,
@@ -5833,6 +5834,14 @@ program
         );
 
         process.stderr.write(`Session: ${sessionId}  ${DIM}Ctrl+K: command palette${RESET}\n`);
+        // Resume orientation for the readline surface (Issue #737): the
+        // full-screen shell seeds a transcript view on resume; the
+        // line-oriented surface gets one bounded line instead. Read-only,
+        // built from the already-loaded messages; fresh sessions print
+        // nothing (resumeId is null).
+        if (resumeId) {
+          process.stderr.write(`${readlineOrientationLine(existingMessages)}\n`);
+        }
 
         let paletteOpen = false;
         // The picker's own rl.question is pending (distinct from the typed
