@@ -71,6 +71,18 @@ export interface OpenPromptHistoryStoreOptions {
   keyOf?: (workspacePath: string) => string;
 }
 
+// Seed transform for the readline surface's Up-recall (Issue #723): the
+// store keeps entries chronological (oldest first), while Node readline's
+// `history` recalls index 0 first on Up — i.e. newest first. Reverse, and
+// defensively bound to the store cap (the store already bounds on load; the
+// slice protects a hand-edited or future-cap record). Pure and unit-testable.
+export function readlineHistorySeed(entries: ReadonlyArray<string>): string[] {
+  const reversed = [...entries].reverse();
+  return reversed.length > PROMPT_HISTORY_MAX_ENTRIES
+    ? reversed.slice(0, PROMPT_HISTORY_MAX_ENTRIES)
+    : reversed;
+}
+
 // Keep a stored record bounded and well-typed regardless of what wrote it:
 // non-string, empty, and oversized entries are dropped; the newest
 // PROMPT_HISTORY_MAX_ENTRIES survive. Returns null when the shape itself is

@@ -11,6 +11,7 @@ import {
   defaultPromptHistoryDir,
   promptHistoryFileName,
   openPromptHistoryStore,
+  readlineHistorySeed,
 } from "../../src/prompt-history.js";
 
 describe("prompt history store (Issue #711)", () => {
@@ -231,5 +232,38 @@ describe("prompt history store (Issue #711)", () => {
     expect(name).toMatch(/^[0-9a-f]{64}\.json$/);
     // No path separator can escape the history directory.
     expect(name).not.toContain("/");
+  });
+});
+
+describe("readlineHistorySeed (Issue #723)", () => {
+  it("reverses the store's oldest-first order to readline's newest-first", () => {
+    // readline recalls index 0 first on Up, so the newest prompt must lead.
+    expect(readlineHistorySeed(["first", "second", "third"])).toEqual([
+      "third",
+      "second",
+      "first",
+    ]);
+  });
+
+  it("seeds an empty history for a store with no entries", () => {
+    expect(readlineHistorySeed([])).toEqual([]);
+  });
+
+  it("bounds the seed to the store cap, keeping the newest entries", () => {
+    const entries = Array.from(
+      { length: PROMPT_HISTORY_MAX_ENTRIES + 30 },
+      (_, i) => `prompt ${i}`,
+    );
+    const seed = readlineHistorySeed(entries);
+    expect(seed).toHaveLength(PROMPT_HISTORY_MAX_ENTRIES);
+    // Newest entry leads; the 30 oldest are dropped.
+    expect(seed[0]).toBe(`prompt ${PROMPT_HISTORY_MAX_ENTRIES + 29}`);
+    expect(seed[seed.length - 1]).toBe("prompt 30");
+  });
+
+  it("does not mutate the store's array", () => {
+    const entries = ["a", "b", "c"];
+    readlineHistorySeed(entries);
+    expect(entries).toEqual(["a", "b", "c"]);
   });
 });
