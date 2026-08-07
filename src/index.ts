@@ -5769,9 +5769,11 @@ program
         // no cursor addressing, so for 0x01/0x05 the repair of readline's
         // inserted byte IS the effect (the keystrokes stop corrupting the
         // prompt). Every remaining unhandled lone control byte gets that
-        // same repair-only treatment (Issue #755 sweep) — the bytes other
-        // machinery owns (interface SIGINT, Tab, Enter, the palette's
-        // Ctrl+K, escape prefixes) keep their existing behavior exactly.
+        // same repair-only treatment (Issue #755 sweep, including Tab —
+        // this surface wires no completer, so a tab is just pollution) —
+        // the bytes other machinery owns (interface SIGINT, Enter, the
+        // palette's Ctrl+K, escape prefixes) keep their existing behavior
+        // exactly.
         // Registered BEFORE the readline interface (like the paste tap) so
         // it snapshots the line before readline consumes the byte: Node's
         // readline inserts the raw control byte into the line buffer, so

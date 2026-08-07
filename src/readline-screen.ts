@@ -77,17 +77,18 @@ export function lineKillBefore(state: ReadlineLineState): ReadlineLineState {
 // The control bytes the readline surface does NOT sweep (Issue #755): the
 // six effect bytes owned by #745-#753, plus the bytes other machinery owns
 // outright — readline's interface SIGINT (0x03, #743 cooperative cancel),
-// Tab completion (0x09), submission (0x0a/0x0d), the command palette's raw
-// tap (0x0b, #717), and escape-sequence prefixes (0x1b). Every other lone
-// control byte has no effect on the dumb surface beyond pollution, so the
-// tap repairs its insertion and nothing else.
+// submission (0x0a/0x0d), the command palette's raw tap (0x0b, #717), and
+// escape-sequence prefixes (0x1b). Tab (0x09) IS swept: this surface wires
+// no completer, so dumb-mode readline just inserts a literal tab and
+// pollutes submissions like any other unhandled byte (verified by probe).
+// Every swept byte has no effect beyond pollution, so the tap repairs its
+// insertion and nothing else.
 export function isSweptControlByte(byte: number): boolean {
   if (byte >= 0x20) return false;
   switch (byte) {
     case 0x01: // Ctrl+A — ignored cleanly (#753)
     case 0x03: // Ctrl+C — readline emits the interface SIGINT (#743)
     case 0x05: // Ctrl+E — ignored cleanly (#753)
-    case 0x09: // Tab — readline completion
     case 0x0a: // Enter — submission
     case 0x0b: // Ctrl+K — command palette's raw tap (#717)
     case 0x0c: // Ctrl+L — screen clear (#745)

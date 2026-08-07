@@ -205,16 +205,19 @@ describe("control-byte sweep predicate (Issue #755)", () => {
   });
 
   it("excludes the bytes other machinery owns outright", () => {
-    // Interface SIGINT (#743), Tab completion, Enter submission, the
-    // palette's Ctrl+K (#717), and escape-sequence prefixes.
-    for (const byte of [0x03, 0x09, 0x0a, 0x0b, 0x0d, 0x1b]) {
+    // Interface SIGINT (#743), Enter submission, the palette's Ctrl+K
+    // (#717), and escape-sequence prefixes. (Tab is NOT excluded: this
+    // surface wires no completer, so dumb-mode readline inserts a literal
+    // tab — swept like any other polluting byte.)
+    for (const byte of [0x03, 0x0a, 0x0b, 0x0d, 0x1b]) {
       expect(isSweptControlByte(byte)).toBe(false);
     }
   });
 
-  it("sweeps the remaining control bytes, including Ctrl+D", () => {
-    // The pollution probe's bytes plus the rest of the control range.
-    for (const byte of [0x02, 0x04, 0x06, 0x07, 0x08, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x16, 0x18, 0x19, 0x1c, 0x1d, 0x1e, 0x1f]) {
+  it("sweeps the remaining control bytes, including Tab and Ctrl+D", () => {
+    // The pollution probe's bytes, the tab probe, and the rest of the
+    // control range.
+    for (const byte of [0x02, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x16, 0x18, 0x19, 0x1c, 0x1d, 0x1e, 0x1f]) {
       expect(isSweptControlByte(byte)).toBe(true);
     }
   });
