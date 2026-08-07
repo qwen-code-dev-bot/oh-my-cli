@@ -5852,8 +5852,14 @@ program
         // Ctrl+C with terminal readline emits SIGINT on the interface (not the
         // process): non-empty line clears the draft and stays alive (shell
         // parity); empty line exits cleanly like the shell's empty-composer
-        // Ctrl+C.
+        // Ctrl+C. Mid-turn, re-dispatch to the process handler so the
+        // run-scoped installSigintCancel escalation applies (Issue #743):
+        // first Ctrl+C requests the cooperative cancel, second exits.
         rl.on("SIGINT", () => {
+          if (turnInFlight) {
+            process.kill(process.pid, "SIGINT");
+            return;
+          }
           if (rl.line.trim() !== "") {
             // `line`/`cursor` are documented runtime-mutable state that this
             // @types/node version declares read-only, hence the bounded cast.
@@ -6149,27 +6155,49 @@ program
               // headless paths already pass the full transcript.
               existingMessages = loadSessionMessages(store, sessionId);
               const images = pendingImages.splice(0);
-              const result = await runAgent(promptText, existingMessages, {
-                config,
-                workspace,
-                approvalMode,
-                sessionId,
-                onMessage,
-                budgetUsd,
-                maxTurns,
-                maxWallTimeMs,
-                maxToolCalls,
-                compactThreshold,
-                // One-shot fallback degrade (Issue #590), carried on config.
-                fallbackModel: config.fallbackModel ?? null,
-                mutatingAllowed,
-                images,
-                preToolUseHooks,
-                onShellFailure: (detail) =>
-                  appendFailureReceipt(store, sessionId, detail, {
-                    head: currentRepoHead(workspace.root) || null,
-                  }),
+              // Cooperative SIGINT cancel on the readline surface (Issue
+              // #743), same contract as the headless plain path (#552): one
+              // bounded interruption notice, a stop at the next cancel
+              // boundary, and a settled "cancelled" turn (#550) — the
+              // session survives instead of the process dying. The handler
+              // swap is scoped to this turn (dispose + re-register in
+              // finally), so idle Ctrl+C keeps the default exit behavior.
+              process.removeListener("SIGINT", defaultSigintHandler);
+              const sigint = installSigintCancel({
+                onInterrupt: () =>
+                  process.stderr.write("\nInterrupted: cancelling at the next safe boundary...\n"),
               });
+              let result: AgentResult;
+              try {
+                result = await runAgent(promptText, existingMessages, {
+                  config,
+                  workspace,
+                  approvalMode,
+                  sessionId,
+                  onMessage,
+                  budgetUsd,
+                  maxTurns,
+                  maxWallTimeMs,
+                  maxToolCalls,
+                  compactThreshold,
+                  // One-shot fallback degrade (Issue #590), carried on config.
+                  fallbackModel: config.fallbackModel ?? null,
+                  mutatingAllowed,
+                  images,
+                  preToolUseHooks,
+                  cancelRequested: sigint.cancelRequested,
+                  onShellFailure: (detail) =>
+                    appendFailureReceipt(store, sessionId, detail, {
+                      head: currentRepoHead(workspace.root) || null,
+                    }),
+                });
+              } finally {
+                sigint.dispose();
+                process.on("SIGINT", defaultSigintHandler);
+              }
+              if (result.reason === "cancelled") {
+                process.stderr.write("Turn cancelled.\n");
+              }
               // /context facts for the readline surface (Issue #721): the
               // same live facts the full-screen shell tracks.
               readlineContextFacts = {
