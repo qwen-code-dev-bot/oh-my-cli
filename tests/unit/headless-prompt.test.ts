@@ -3,6 +3,7 @@ import {
   resolveHeadlessPromptSource,
   normalizeStdinPrompt,
   combinePromptAndStdin,
+  promptValueError,
 } from "../../src/headless-prompt.js";
 
 describe("headless prompt source resolution (Issue #759)", () => {
@@ -68,5 +69,21 @@ describe("prompt argument + piped stdin combination (Issue #761)", () => {
     expect(combinePromptAndStdin("explain", "line one\nline two")).toBe(
       "explain\n\nline one\nline two",
     );
+  });
+});
+
+describe("whitespace-only prompt argument (Issue #763)", () => {
+  it("rejects empty and whitespace-only values with one honest error", () => {
+    for (const value of ["", " ", "   ", "\t", "\n", " \t\n "]) {
+      const message = promptValueError(value);
+      expect(message).not.toBeNull();
+      expect(message).toContain("prompt is empty");
+    }
+  });
+
+  it("accepts real content, including padded content verbatim", () => {
+    expect(promptValueError("fix the bug")).toBeNull();
+    expect(promptValueError("  padded real  ")).toBeNull();
+    expect(promptValueError("\nbody\n")).toBeNull();
   });
 });
