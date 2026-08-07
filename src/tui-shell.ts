@@ -4693,7 +4693,16 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
     if (buf.length === 1) {
       const b = buf[0];
       if (b === 0x03) return onCtrlC(); // Ctrl+C
-      if (b === 0x04) return shutdown(0); // Ctrl+D
+      if (b === 0x04) {
+        // Ctrl+D (Issue #729): EOF exits when there is nothing in flight, but
+        // mid-turn it takes the same cooperative interrupt path as Ctrl+C —
+        // a hard exit here abandoned the run without a settled outcome
+        // (orphaned user message, provider call dropped mid-stream).
+        if (cancelDecision(state.turn, state.composer.text.length > 0) === "interrupt") {
+          return onCtrlC();
+        }
+        return shutdown(0);
+      }
       if (b === 0x1b) {
         // Esc closes whichever overlay is open; the reference picker takes
         // precedence over the slash palette (it owns the composer row).

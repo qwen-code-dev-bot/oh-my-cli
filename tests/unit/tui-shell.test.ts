@@ -975,6 +975,38 @@ describe("tui-shell: cancelDecision distinguishes interrupt from clear", () => {
   });
 });
 
+describe("tui-shell: Ctrl+D routing contract (Issue #729)", () => {
+  // The shell routes Ctrl+D through cancelDecision: interrupt exactly when a
+  // turn is in flight, exit otherwise. This locks the mapping the key
+  // handler relies on so the EOF key can never regress to abandoning a run.
+  const inFlight = [
+    { phase: "streaming" },
+    { phase: "waiting" },
+    { phase: "running-tool", detail: "x" },
+    { phase: "awaiting-approval", detail: "y" },
+  ] as const;
+  const settled = [
+    { phase: "idle" },
+    { phase: "completed" },
+    { phase: "failed" },
+    { phase: "cancelled" },
+  ] as const;
+
+  it("interrupts mid-turn for both draft states", () => {
+    for (const turn of inFlight) {
+      expect(cancelDecision(turn, true)).toBe("interrupt");
+      expect(cancelDecision(turn, false)).toBe("interrupt");
+    }
+  });
+
+  it("exits (never interrupts) once no turn is in flight", () => {
+    for (const turn of settled) {
+      expect(cancelDecision(turn, false)).not.toBe("interrupt");
+      expect(cancelDecision(turn, true)).not.toBe("interrupt");
+    }
+  });
+});
+
 describe("tui-shell: footer hints document bindings and compress once learned", () => {
   it("documents send, newline, and history before the flow is learned", () => {
     const hints = footerHints(false);
