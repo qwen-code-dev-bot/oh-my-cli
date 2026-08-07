@@ -5761,7 +5761,8 @@ program
         // Universal control keystrokes for the readline surface. Ctrl+L clears
         // the screen and redraws the prompt line (Issue #745); Ctrl+W kills
         // the word before the cursor (Issue #747); Ctrl+U kills the line
-        // before the cursor (Issue #749) — all standard in bash/zsh/the node
+        // before the cursor (Issue #749); Ctrl+Z suspends the process like
+        // every terminal app (Issue #751) — all standard in bash/zsh/the node
         // REPL. Registered BEFORE the readline interface (like the paste tap)
         // so it snapshots the line before readline consumes the byte: Node's
         // readline implements none of these keystrokes and inserts the raw
@@ -5777,8 +5778,15 @@ program
           const isCtrlL = buf[0] === 0x0c;
           const isCtrlW = buf[0] === 0x17;
           const isCtrlU = buf[0] === 0x15;
-          if (!isCtrlL && !isCtrlW && !isCtrlU) return;
-          const insertedChar = isCtrlL ? "\f" : isCtrlW ? "\u0017" : "\u0015";
+          const isCtrlZ = buf[0] === 0x1a;
+          if (!isCtrlL && !isCtrlW && !isCtrlU && !isCtrlZ) return;
+          const insertedChar = isCtrlL
+            ? "\f"
+            : isCtrlW
+              ? "\u0017"
+              : isCtrlU
+                ? "\u0015"
+                : "\u001a";
           const snapshot = {
             line: (rl as unknown as { line: string }).line,
             cursor: (rl as unknown as { cursor: number }).cursor,
@@ -5797,6 +5805,14 @@ program
             if (repaired === null) return;
             const idle =
               !turnInFlight && !paletteOpen && !paletteQuestionActive && promptActive;
+            if (idle && isCtrlZ) {
+              // Suspend edits nothing — the buffer keeps the repaired state
+              // and the suspend recipe redraws it after the resume.
+              rlInternals.line = repaired.line;
+              rlInternals.cursor = repaired.cursor;
+              suspendReadlineSurface(rlInternals);
+              return;
+            }
             const next = idle
               ? isCtrlW
                 ? wordKillBefore(repaired)
@@ -5811,6 +5827,48 @@ program
             rlInternals._refreshLine();
           });
         });
+
+        // Job-control suspend for the readline surface (Issue #751): the #735
+        // recipe adapted to the line-oriented surface. Readline keeps the
+        // input in raw mode, so the tty never generates SIGTSTP on Ctrl+Z —
+        // the byte arrives as data (handled by the tap above). Pause
+        // readline's input and leave raw mode so the user's shell regains a
+        // cooked terminal, note the resume key, then restore the default
+        // SIGTSTP disposition and raise it: the kernel stops the process and
+        // execution continues right after the raise on SIGCONT (fg) —
+        // re-enter raw mode, resume readline, and redraw the prompt line on
+        // a fresh line below whatever the shell printed while suspended. The
+        // line buffer survives untouched.
+        const suspendReadlineSurface = (rlInternals: {
+          line: string;
+          cursor: number;
+          _refreshLine(): void;
+        }): void => {
+          rl.pause();
+          try {
+            process.stdin.setRawMode(false);
+          } catch {
+            /* not a raw-capable stream */
+          }
+          process.stderr.write("[oh-my-cli suspended — resume with fg]\n");
+          // Remove any JS SIGTSTP handling so the raise gets the kernel's
+          // default action (stop the process); execution continues after it
+          // returns.
+          process.removeAllListeners("SIGTSTP");
+          process.kill(process.pid, "SIGTSTP");
+          // -- the process is stopped here and resumes here on SIGCONT --
+          try {
+            process.stdin.setRawMode(true);
+          } catch {
+            /* not a raw-capable stream */
+          }
+          rl.resume();
+          // A fresh line: the user's shell printed its own prompt/output
+          // below the suspended surface, so the redrawn prompt starts under
+          // it rather than overprinting it.
+          process.stderr.write("\n");
+          rlInternals._refreshLine();
+        };
 
         const readline = await import("node:readline");
         const rl = readline.createInterface({

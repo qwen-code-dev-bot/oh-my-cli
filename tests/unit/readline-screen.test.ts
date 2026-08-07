@@ -6,7 +6,7 @@ import {
   lineKillBefore,
 } from "../../src/readline-screen.js";
 
-describe("readline control-char insertion repair (Issues #745/#747/#749)", () => {
+describe("readline control-char insertion repair (Issues #745/#747/#749/#751)", () => {
   it("repairs a form feed inserted at the end of the line", () => {
     const snapshot = { line: "abc def", cursor: 7 };
     const repaired = repairControlCharInsertion(snapshot, { line: "abc def\f", cursor: 8 }, "\f");
@@ -51,6 +51,16 @@ describe("readline control-char insertion repair (Issues #745/#747/#749)", () =>
       snapshot,
       { line: "abc def\u0015", cursor: 8 },
       "\u0015",
+    );
+    expect(repaired).toEqual(snapshot);
+  });
+
+  it("repairs the Ctrl+Z byte (0x1a) with the same verified shape", () => {
+    const snapshot = { line: "cz probe line", cursor: 13 };
+    const repaired = repairControlCharInsertion(
+      snapshot,
+      { line: "cz probe line\u001a", cursor: 14 },
+      "\u001a",
     );
     expect(repaired).toEqual(snapshot);
   });
