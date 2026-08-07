@@ -167,7 +167,12 @@ import {
   isSweptControlByte,
   stripInsertedPaletteByte,
 } from "./readline-screen.js";
-import { resolveHeadlessPromptSource, normalizeStdinPrompt } from "./headless-prompt.js";
+import {
+  resolveHeadlessPromptSource,
+  normalizeStdinPrompt,
+  combinePromptAndStdin,
+} from "./headless-prompt.js";
+import { readStdinWithSilenceTimeout } from "./stdin-reader.js";
 import {
   openPromptHistoryStore,
   readlineHistorySeed,
@@ -5112,6 +5117,18 @@ program
           }
           if (source.kind === "value") {
             runPrompt = source.value;
+            if (!process.stdin.isTTY) {
+              // A prompt argument with piped stdin (Issue #761): the pipe
+              // carries context for the instruction — one combined prompt,
+              // recorded verbatim. The read is bounded: real pipelines
+              // deliver promptly, but an open-but-silent pipe (a spawner
+              // that neither writes nor closes) falls through to
+              // argument-only instead of hanging the turn. An empty or
+              // whitespace-only pipe conveys nothing either.
+              const pipedRaw = await readStdinWithSilenceTimeout(process.stdin);
+              const piped = pipedRaw === null ? null : normalizeStdinPrompt(pipedRaw);
+              runPrompt = combinePromptAndStdin(source.value, piped);
+            }
           } else {
             const chunks: Buffer[] = [];
             for await (const chunk of process.stdin) chunks.push(chunk as Buffer);

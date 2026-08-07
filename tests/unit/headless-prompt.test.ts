@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { resolveHeadlessPromptSource, normalizeStdinPrompt } from "../../src/headless-prompt.js";
+import {
+  resolveHeadlessPromptSource,
+  normalizeStdinPrompt,
+  combinePromptAndStdin,
+} from "../../src/headless-prompt.js";
 
 describe("headless prompt source resolution (Issue #759)", () => {
   it("uses the argument value when one is given", () => {
@@ -46,5 +50,23 @@ describe("stdin prompt normalization (Issue #759)", () => {
   it("rejects empty and whitespace-only input", () => {
     expect(normalizeStdinPrompt("")).toBeNull();
     expect(normalizeStdinPrompt("\n\t  \n")).toBeNull();
+  });
+});
+
+describe("prompt argument + piped stdin combination (Issue #761)", () => {
+  it("combines instruction and piped content in order with a blank-line separator", () => {
+    expect(combinePromptAndStdin("review this", "PIPED BODY")).toBe(
+      "review this\n\nPIPED BODY",
+    );
+  });
+
+  it("keeps the argument alone when the pipe conveyed nothing", () => {
+    expect(combinePromptAndStdin("review this", null)).toBe("review this");
+  });
+
+  it("preserves multi-line piped content verbatim", () => {
+    expect(combinePromptAndStdin("explain", "line one\nline two")).toBe(
+      "explain\n\nline one\nline two",
+    );
   });
 });
