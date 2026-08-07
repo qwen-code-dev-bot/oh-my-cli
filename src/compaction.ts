@@ -303,9 +303,13 @@ export function renderSummaryMessage(summary: CompactionSummary): SessionMessage
   return { role: "system", content: lines.join("\n") };
 }
 
-// Build the live transcript used on resume: the original system message (if any)
-// followed by the summary note. The detailed turns are dropped from the live
-// context but remain on disk.
+// Build the live context from a transcript plus its summary: the original
+// system message (if any), the summary note, and every message recorded after
+// the summarized head. The detailed turns inside the summarized head are
+// dropped from the live context but remain on disk. Preserving the tail is
+// what keeps continuation honest (Issue #719): a session that grows after a
+// compaction — resumed or still live — must not lose the post-compaction
+// turns from the model's context.
 export function buildCompactedTranscript(
   full: SessionMessage[],
   summary: CompactionSummary,
@@ -316,6 +320,9 @@ export function buildCompactedTranscript(
     out.push(system);
   }
   out.push(renderSummaryMessage(summary));
+  if (full.length > summary.messageCount) {
+    out.push(...full.slice(summary.messageCount));
+  }
   return out;
 }
 

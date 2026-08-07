@@ -251,6 +251,30 @@ describe("loadSessionMessages", () => {
     store.checkpoint(id, full, { createdAt: Date.now() });
     expect(loadSessionMessages(store, id).length).toBe(full.length);
   });
+
+  it("preserves messages appended after the summarized head (Issue #719)", () => {
+    // A session that grows after compaction — resumed or still live — must
+    // keep the post-compaction turns in the live context: system + summary
+    // note + the tail, never the tail alone dropped.
+    const store = newStore();
+    const id = store.newId();
+    const full = sampleTranscript();
+    store.checkpoint(id, full, { createdAt: Date.now() });
+    const { summary } = compactMessages(full);
+    saveCompaction(store.compactPath(id), summary);
+
+    store.append(id, { role: "user", content: "post-compaction question" });
+    store.append(id, { role: "assistant", content: "post-compaction answer" });
+
+    const loaded = loadSessionMessages(store, id);
+    expect(loaded.length).toBe(4);
+    expect(loaded[0].role).toBe("system");
+    expect(loaded[1].content).toContain("compacted");
+    expect(loaded[2]).toMatchObject({ role: "user", content: "post-compaction question" });
+    expect(loaded[3]).toMatchObject({ role: "assistant", content: "post-compaction answer" });
+    // The on-disk transcript is still untouched.
+    expect(store.load(id).length).toBe(full.length + 2);
+  });
 });
 
 describe("formatCompaction", () => {
