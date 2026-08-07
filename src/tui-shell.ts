@@ -3109,6 +3109,43 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
     write(SHOW_CURSOR + RESET_ALL + ALT_SCREEN_OFF);
   }
 
+  // Job-control suspend (Issue #735): restore the user's terminal (leave the
+  // alternate screen, leave raw mode, show the cursor) WITHOUT detaching
+  // listeners or state, note the resume key, then restore the default
+  // SIGTSTP disposition and raise it — the kernel stops the process. When
+  // the process resumes (fg / SIGCONT), execution continues right after the
+  // raise: re-enter raw mode and the alternate screen and force a full
+  // repaint. All shell state (transcript, scroll, draft, overlays, turn
+  // phase) survives untouched.
+  function suspendShell(): void {
+    if (!running) return;
+    try {
+      stdin.setRawMode(false);
+    } catch {
+      /* not in raw mode */
+    }
+    write(SHOW_CURSOR + RESET_ALL + ALT_SCREEN_OFF);
+    stdout.write("[oh-my-cli suspended — resume with fg]\n");
+    // Remove any JS SIGTSTP handling so the raise gets the kernel's default
+    // action (stop the process); execution continues after it returns.
+    process.removeAllListeners("SIGTSTP");
+    process.kill(process.pid, "SIGTSTP");
+    // -- the process is stopped here and resumes here on SIGCONT --
+    try {
+      stdin.setRawMode(true);
+    } catch {
+      /* not a raw-capable stream */
+    }
+    try {
+      stdin.resume();
+    } catch {
+      /* not a resumable stream */
+    }
+    write(ALT_SCREEN_ON + CLEAR + HOME);
+    forceFull = true;
+    paint();
+  }
+
   function paint(): void {
     renderScheduled = false;
     if (!running || paletteOpen) return;
@@ -4651,6 +4688,10 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
 
   function handleData(buf: Buffer): void {
     if (paletteOpen) return;
+    // Job-control suspend takes precedence over every modal state (Issue
+    // #735): 0x1a never appears inside escape sequences, so this branch
+    // can't shadow a binding or a terminal sequence.
+    if (buf.length === 1 && buf[0] === 0x1a) return suspendShell();
     const s = buf.toString("utf-8");
 
     // While the side-question overlay is open it is modal (Issue #200): keys
