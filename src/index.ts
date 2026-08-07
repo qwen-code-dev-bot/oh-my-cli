@@ -157,7 +157,11 @@ import {
   shortSessionId,
 } from "./session-picker.js";
 import { openComposerDraftStore } from "./composer-draft.js";
-import { openPromptHistoryStore } from "./prompt-history.js";
+import {
+  openPromptHistoryStore,
+  readlineHistorySeed,
+  PROMPT_HISTORY_MAX_ENTRIES,
+} from "./prompt-history.js";
 import {
   approvalModeCommandDecision,
   decisionAppliesMode,
@@ -5682,7 +5686,28 @@ program
         const { bold: BOLD, dim: DIM, reset: RESET } = createColorPalette(useColor);
 
         const readline = await import("node:readline");
-        const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+        const rl = readline.createInterface({
+          input: process.stdin,
+          output: process.stderr,
+          // Bounded like the durable store; duplicates collapse across the
+          // seeding seam (Issue #723).
+          historySize: PROMPT_HISTORY_MAX_ENTRIES,
+          removeHistoryDuplicates: true,
+        });
+        // Seed Up-recall from the durable workspace prompt history (Issue
+        // #723): the store is oldest-first, readline recalls index 0 first
+        // (newest-first). Any store failure degrades to the pre-#723
+        // behavior — an empty in-invocation history — never a crash.
+        // `history` is a documented runtime property of readline.Interface
+        // (mutable line history) that this @types/node version does not
+        // declare, hence the bounded cast.
+        try {
+          (rl as unknown as { history: string[] }).history = readlineHistorySeed(
+            promptHistories.load().entries,
+          );
+        } catch {
+          /* fail closed: empty recall */
+        }
 
         // Startup identity: a responsive pixel-art banner printed once to stderr.
         // It is never redrawn, so it yields space naturally as the session scrolls.
@@ -5883,6 +5908,17 @@ program
               return;
             }
             try {
+              // Durable workspace prompt history (Issue #723): readline
+              // submissions are recorded under the full-screen shell's exact
+              // rules — non-empty, non-slash-prefixed, best-effort, never
+              // blocking or failing the submit.
+              if (!promptText.startsWith("/")) {
+                try {
+                  promptHistories.append(promptText);
+                } catch {
+                  /* best-effort durability; recall degrades gracefully */
+                }
+              }
               turnInFlight = true;
               // Full history: the store ends with the previous turn's assistant
               // message and runAgent appends the current user message itself.
