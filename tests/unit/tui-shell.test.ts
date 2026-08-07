@@ -22,6 +22,7 @@ import {
   advanceTurn,
   seedTranscriptFromHistory,
   userPromptsFromHistory,
+  seedRecallEntries,
   createPromptHistory,
   recallOlder,
   recallNewer,
@@ -816,6 +817,36 @@ describe("tui-shell: userPromptsFromHistory seeds recall", () => {
 
   it("treats missing or non-string content as empty", () => {
     expect(userPromptsFromHistory([{ role: "user" }, { role: "user", content: null }])).toEqual([]);
+  });
+});
+
+describe("tui-shell: seedRecallEntries merges workspace history (Issue #711)", () => {
+  it("seeds a fresh session with the workspace history in chronological order", () => {
+    expect(seedRecallEntries([], ["older", "newer"])).toEqual(["older", "newer"]);
+  });
+
+  it("keeps a resumed session's own prompts first, in their existing order", () => {
+    expect(seedRecallEntries(["own-a", "own-b"], ["older"])).toEqual([
+      "own-a",
+      "own-b",
+      "older",
+    ]);
+  });
+
+  it("drops workspace entries already recallable from the loaded transcript", () => {
+    expect(seedRecallEntries(["run the tests"], ["fix the bug", "run the tests"])).toEqual([
+      "run the tests",
+      "fix the bug",
+    ]);
+  });
+
+  it("collapses consecutive duplicates across the merge boundary", () => {
+    expect(seedRecallEntries(["same"], ["same", "next"])).toEqual(["same", "next"]);
+    expect(seedRecallEntries([], ["a", "a", "b"])).toEqual(["a", "b"]);
+  });
+
+  it("handles empty inputs without recall", () => {
+    expect(seedRecallEntries([], [])).toEqual([]);
   });
 });
 

@@ -42,6 +42,7 @@ import { buildSessionStats, formatSessionStats } from "./session-stats.js";
 import type { SessionStats, SessionStatsRuntime } from "./session-stats.js";
 import { clearDurableDraft } from "./composer-draft.js";
 import type { ComposerDraftStore } from "./composer-draft.js";
+import type { PromptHistoryStore } from "./prompt-history.js";
 import { emptyLspView, formatLspView } from "./lsp-runtime.js";
 import type { LspView } from "./lsp-runtime.js";
 import { formatLifecycleView } from "./lifecycle-render.js";
@@ -960,6 +961,27 @@ export function userPromptsFromHistory(
     if (m.role !== "user") continue;
     const content = typeof m.content === "string" ? m.content : "";
     if (content.trim() !== "") out.push(content);
+  }
+  return out;
+}
+
+// Combine the loaded session's own prompts with the durable workspace prompt
+// history (Issue #711) into one chronological (oldest first) recall list,
+// matching the PromptHistory model. Own prompts keep their existing order and
+// stay nearest to the draft, so a resume recalls its own transcript first;
+// workspace entries the user can already recall from that transcript are
+// dropped, and consecutive duplicates collapse so recall never shows the same
+// prompt twice in a row. Pure so the merge boundaries are unit-testable.
+export function seedRecallEntries(
+  ownPrompts: ReadonlyArray<string>,
+  workspaceEntries: ReadonlyArray<string>,
+): string[] {
+  const own = new Set(ownPrompts);
+  const combined = [...ownPrompts, ...workspaceEntries.filter((entry) => !own.has(entry))];
+  const out: string[] = [];
+  for (const entry of combined) {
+    if (out.length > 0 && out[out.length - 1] === entry) continue;
+    out.push(entry);
   }
   return out;
 }
@@ -2804,6 +2826,11 @@ export interface ConversationShellOptions {
   // saved as the composer text changes, cleared on send/clear-draft. Optional
   // so a shell without a draft store behaves exactly as before.
   composerDrafts?: ComposerDraftStore;
+  // Durable workspace-scoped prompt history (Issue #711): seeds recall with
+  // prompts submitted in prior sessions of this workspace, and records each
+  // prompt submitted from the interactive composer. Optional so a shell
+  // without a history store keeps the in-session recall model unchanged.
+  promptHistories?: PromptHistoryStore;
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
   env?: Record<string, string | undefined>;
@@ -2850,14 +2877,32 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
   }
 
   // Seed prompt-history recall from prior user prompts so a resume can recall
-  // them with Up/Down. Returning users (with prior prompts) start with the
-  // compressed footer hints since they have already learned the basic flow.
-  let history: PromptHistory;
+  // them with Up/Down. Issue #711 extends recall across sessions: the durable
+  // workspace prompt history contributes entries the loaded transcript does
+  // not, so a fresh session in a workspace with prior runs starts with recall
+  // instead of an empty composer. A workspace record that cannot be trusted
+  // fails closed: recall degrades to the in-session model and the user gets
+  // one bounded notice (below, once the transcript exists). Returning users
+  // (with prior prompts) start with the compressed footer hints since they
+  // have already learned the basic flow.
+  let ownPrompts: string[] = [];
   try {
-    history = createPromptHistory(userPromptsFromHistory(opts.loadHistory()));
+    ownPrompts = userPromptsFromHistory(opts.loadHistory());
   } catch {
-    history = createPromptHistory([]);
+    ownPrompts = [];
   }
+  let workspacePrompts: string[] = [];
+  let promptHistoryCorrupt = false;
+  if (opts.promptHistories) {
+    try {
+      const loaded = opts.promptHistories.load();
+      workspacePrompts = loaded.entries;
+      promptHistoryCorrupt = loaded.corrupt;
+    } catch {
+      workspacePrompts = [];
+    }
+  }
+  let history = createPromptHistory(seedRecallEntries(ownPrompts, workspacePrompts));
 
   const state: ShellState = {
     viewport: { rows: stdout.rows ?? 24, cols: stdout.columns ?? 80 },
@@ -2920,6 +2965,14 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
         text: "composer draft could not be restored; starting with an empty composer",
       });
     }
+  }
+  // Durable prompt history fail-closed notice (Issue #711): content never
+  // appears here — only the bounded fact that recall started empty.
+  if (promptHistoryCorrupt) {
+    state.transcript.push({
+      kind: "notice",
+      text: "prompt history could not be restored; starting with an empty recall",
+    });
   }
   // Offline posture banner (Issue #576): visible before the first request.
   if (opts.offline) {
@@ -3949,6 +4002,18 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<vo
     state.transcript.push({ kind: "user", text });
     state.scroll = 0;
     history = pushPromptHistory(history, text);
+    // Durable workspace prompt history (Issue #711): a submitted prompt stays
+    // recallable in future sessions of this workspace. Slash-command input is
+    // excluded (a leading "/" is a command or command-like prompt, never a
+    // reusable prompt); the write is best-effort and never blocks the submit
+    // path — recall simply degrades to the in-session model on failure.
+    if (opts.promptHistories && !text.startsWith("/")) {
+      try {
+        opts.promptHistories.append(text);
+      } catch {
+        /* best-effort durability; retried implicitly by the next submit */
+      }
+    }
     state.hintsLearned = true;
     scheduleRender();
     submitChain = submitChain.then(() => runOne(text, images, goalRevision));

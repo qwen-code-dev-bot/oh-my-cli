@@ -152,6 +152,7 @@ import {
   shortSessionId,
 } from "./session-picker.js";
 import { openComposerDraftStore } from "./composer-draft.js";
+import { openPromptHistoryStore } from "./prompt-history.js";
 import { buildAttention, attentionRecord, formatAttention, attentionStrictExit } from "./attention-summary.js";
 import type { AttentionItem } from "./attention-summary.js";
 import { normalizeSessionName } from "./session-name.js";
@@ -5319,6 +5320,13 @@ program
           tools: toolNames,
         };
 
+        // Durable workspace-scoped prompt history (Issue #711): submitted
+        // prompts stay recallable across sessions of this workspace. Keyed by
+        // the canonical workspace identity; interactive-only by construction —
+        // headless `-p` runs never reach this branch, so they neither read nor
+        // write the store.
+        const promptHistories = openPromptHistoryStore({ workspacePath: workspace.root });
+
         // Build palette commands with live context
         const paletteCommands: PaletteCommand[] = [
           ...defaultCommands().filter(
@@ -5339,6 +5347,22 @@ program
             name: "/goal",
             description: "Set, inspect, pause, resume, achieve, or clear the session goal",
             action: (args = "") => runGoalCommand(store, sessionId, args),
+          },
+          {
+            // Durable prompt history (Issue #711): the explicit clear for the
+            // workspace's recall store. Clears only the durable record — the
+            // loaded session's own transcript recall is untouched, and future
+            // submissions start recording again into a fresh store.
+            name: "/clear-history",
+            description: "Clear this workspace's durable prompt history",
+            action: () => {
+              try {
+                promptHistories.clear();
+                return "Prompt history cleared for this workspace.";
+              } catch {
+                return "Prompt history could not be cleared (store unavailable).";
+              }
+            },
           },
           {
             // Side question (Issue #200) for the plain readline REPL. The
@@ -5476,6 +5500,11 @@ program
             // survives a restart in the same workspace and never leaks into
             // another. Keyed by the canonical workspace identity.
             composerDrafts: openComposerDraftStore({ workspacePath: workspace.root }),
+            // Durable workspace-scoped prompt history (Issue #711): a fresh
+            // session recalls prompts submitted in prior sessions of this
+            // workspace, and every submitted prompt is recorded for future
+            // recall. Keyed by the same canonical workspace identity.
+            promptHistories,
             // Offline posture banner before the first request (Issue #576).
             offline: offlineRequested,
             // Immediate Goal status summary on resume (Issue #584).
