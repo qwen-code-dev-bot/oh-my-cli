@@ -164,6 +164,8 @@ import {
   repairControlCharInsertion,
   wordKillBefore,
   lineKillBefore,
+  cursorToLineStart,
+  cursorToLineEnd,
 } from "./readline-screen.js";
 import {
   openPromptHistoryStore,
@@ -5762,7 +5764,8 @@ program
         // the screen and redraws the prompt line (Issue #745); Ctrl+W kills
         // the word before the cursor (Issue #747); Ctrl+U kills the line
         // before the cursor (Issue #749); Ctrl+Z suspends the process like
-        // every terminal app (Issue #751) — all standard in bash/zsh/the node
+        // every terminal app (Issue #751); Ctrl+A/Ctrl+E move the cursor to
+        // line start/end (Issue #753) — all standard in bash/zsh/the node
         // REPL. Registered BEFORE the readline interface (like the paste tap)
         // so it snapshots the line before readline consumes the byte: Node's
         // readline implements none of these keystrokes and inserts the raw
@@ -5779,14 +5782,13 @@ program
           const isCtrlW = buf[0] === 0x17;
           const isCtrlU = buf[0] === 0x15;
           const isCtrlZ = buf[0] === 0x1a;
-          if (!isCtrlL && !isCtrlW && !isCtrlU && !isCtrlZ) return;
-          const insertedChar = isCtrlL
-            ? "\f"
-            : isCtrlW
-              ? "\u0017"
-              : isCtrlU
-                ? "\u0015"
-                : "\u001a";
+          const isCtrlA = buf[0] === 0x01;
+          const isCtrlE = buf[0] === 0x05;
+          if (!isCtrlL && !isCtrlW && !isCtrlU && !isCtrlZ && !isCtrlA && !isCtrlE) {
+            return;
+          }
+          // Every handled byte is its own inserted character.
+          const insertedChar = String.fromCharCode(buf[0]);
           const snapshot = {
             line: (rl as unknown as { line: string }).line,
             cursor: (rl as unknown as { cursor: number }).cursor,
@@ -5818,7 +5820,11 @@ program
                 ? wordKillBefore(repaired)
                 : isCtrlU
                   ? lineKillBefore(repaired)
-                  : repaired
+                  : isCtrlA
+                    ? cursorToLineStart(repaired)
+                    : isCtrlE
+                      ? cursorToLineEnd(repaired)
+                      : repaired
               : repaired;
             rlInternals.line = next.line;
             rlInternals.cursor = next.cursor;

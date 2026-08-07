@@ -4,9 +4,11 @@ import {
   repairControlCharInsertion,
   wordKillBefore,
   lineKillBefore,
+  cursorToLineStart,
+  cursorToLineEnd,
 } from "../../src/readline-screen.js";
 
-describe("readline control-char insertion repair (Issues #745/#747/#749/#751)", () => {
+describe("readline control-char insertion repair (Issues #745/#747/#749/#751/#753)", () => {
   it("repairs a form feed inserted at the end of the line", () => {
     const snapshot = { line: "abc def", cursor: 7 };
     const repaired = repairControlCharInsertion(snapshot, { line: "abc def\f", cursor: 8 }, "\f");
@@ -63,6 +65,16 @@ describe("readline control-char insertion repair (Issues #745/#747/#749/#751)", 
       "\u001a",
     );
     expect(repaired).toEqual(snapshot);
+  });
+
+  it("repairs the Ctrl+A and Ctrl+E bytes (0x01/0x05) with the same verified shape", () => {
+    const snapshot = { line: "alpha beta", cursor: 10 };
+    expect(
+      repairControlCharInsertion(snapshot, { line: "alpha beta\u0001", cursor: 11 }, "\u0001"),
+    ).toEqual(snapshot);
+    expect(
+      repairControlCharInsertion(snapshot, { line: "alpha beta\u0005", cursor: 11 }, "\u0005"),
+    ).toEqual(snapshot);
   });
 
   it("reports the state as-is when the byte never reached the buffer", () => {
@@ -169,6 +181,45 @@ describe("readline line-kill before the cursor (Issue #749)", () => {
   it("is a no-op at line start and on an empty line", () => {
     expect(lineKillBefore({ line: "abc", cursor: 0 })).toEqual({ line: "abc", cursor: 0 });
     expect(lineKillBefore({ line: "", cursor: 0 })).toEqual({ line: "", cursor: 0 });
+  });
+});
+
+describe("readline cursor home/end movement (Issue #753)", () => {
+  it("moves the cursor to line start without touching the buffer", () => {
+    expect(cursorToLineStart({ line: "alpha beta", cursor: 10 })).toEqual({
+      line: "alpha beta",
+      cursor: 0,
+    });
+    expect(cursorToLineStart({ line: "alpha beta", cursor: 5 })).toEqual({
+      line: "alpha beta",
+      cursor: 0,
+    });
+  });
+
+  it("moves the cursor to line end without touching the buffer", () => {
+    expect(cursorToLineEnd({ line: "alpha beta", cursor: 0 })).toEqual({
+      line: "alpha beta",
+      cursor: 10,
+    });
+    expect(cursorToLineEnd({ line: "alpha beta", cursor: 5 })).toEqual({
+      line: "alpha beta",
+      cursor: 10,
+    });
+  });
+
+  it("is idempotent at its own boundary and safe on an empty line", () => {
+    expect(cursorToLineStart({ line: "abc", cursor: 0 })).toEqual({ line: "abc", cursor: 0 });
+    expect(cursorToLineEnd({ line: "abc", cursor: 3 })).toEqual({ line: "abc", cursor: 3 });
+    expect(cursorToLineStart({ line: "", cursor: 0 })).toEqual({ line: "", cursor: 0 });
+    expect(cursorToLineEnd({ line: "", cursor: 0 })).toEqual({ line: "", cursor: 0 });
+  });
+
+  it("composes with the cursor-relative kills once the cursor can move", () => {
+    // Ctrl+A then Ctrl+U is a no-op; Ctrl+E then Ctrl+W kills the last word.
+    const atStart = cursorToLineStart({ line: "one two three", cursor: 7 });
+    expect(lineKillBefore(atStart)).toEqual({ line: "one two three", cursor: 0 });
+    const atEnd = cursorToLineEnd({ line: "one two three", cursor: 0 });
+    expect(wordKillBefore(atEnd)).toEqual({ line: "one two ", cursor: 8 });
   });
 });
 
