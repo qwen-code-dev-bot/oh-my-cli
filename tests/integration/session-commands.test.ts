@@ -71,4 +71,19 @@ describe("Integration: session commands headless boundary (Issue #713)", () => {
     expect(r.stdout).not.toContain("In-shell session switching");
     expect(r.stderr).not.toContain("In-shell session switching");
   });
+
+  it("treats /approval-mode as prompt text in headless runs — no mode surface (Issue #715)", async () => {
+    server.setResponse({ type: "text", content: "mode is text here" });
+    const r = await runCli(["-p", "/approval-mode yolo", "--workspace", workspace], baseEnv);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("mode is text here");
+    expect(r.stdout).not.toContain("Approval mode set");
+    expect(r.stderr).not.toContain("Approval mode set");
+    // The escalation confirmation form is equally inert headless.
+    server.setResponse({ type: "text", content: "confirm is text too" });
+    const c = await runCli(["-p", "/approval-mode yolo confirm", "--workspace", workspace], baseEnv);
+    expect(c.code).toBe(0);
+    expect(c.stdout).toContain("confirm is text too");
+    expect(c.stdout).not.toContain("Approval mode set");
+  });
 });

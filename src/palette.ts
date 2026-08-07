@@ -261,9 +261,18 @@ export function defaultCommands(): PaletteCommand[] {
     { name: "/clear", description: "Clear the terminal screen", action: () => { process.stdout.write("\x1b[2J\x1b[H"); } },
     { name: "/help", description: "Show available commands and options", action: async () => {} },
     { name: "/exit", description: "Exit the interactive session", action: () => { process.exit(0); } },
-    { name: "/approval-mode default", description: "Require approval for all mutating tools", action: async () => {} },
-    { name: "/approval-mode auto-edit", description: "Auto-approve write/edit, prompt for shell", action: async () => {} },
-    { name: "/approval-mode yolo", description: "Auto-approve all tools (unsafe)", action: async () => {} },
+    {
+      // Real runtime switching is wired by the interactive surfaces (Issue
+      // #715): the full-screen shell intercepts the command and the readline
+      // fallback replaces this entry with the same live contract. The three
+      // former multi-word stubs were hollow — unreachable from typed input
+      // and inert from palette selection. The fallback action stays honest:
+      // a surface that runs it directly reports that it cannot switch.
+      name: "/approval-mode",
+      description: "View or change the approval mode (default, auto-edit, yolo)",
+      action: async () =>
+        "This surface cannot change the approval mode; relaunch with --approval-mode <default|auto-edit|yolo>.",
+    },
     { name: "/status", description: "Show current session and workspace info", action: async () => {} },
   ];
 }

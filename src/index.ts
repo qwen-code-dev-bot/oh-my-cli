@@ -153,6 +153,12 @@ import {
 } from "./session-picker.js";
 import { openComposerDraftStore } from "./composer-draft.js";
 import { openPromptHistoryStore } from "./prompt-history.js";
+import {
+  approvalModeCommandDecision,
+  decisionAppliesMode,
+  nextPendingEscalation,
+  formatApprovalModeNotice,
+} from "./approval-mode-switch.js";
 import { buildAttention, attentionRecord, formatAttention, attentionStrictExit } from "./attention-summary.js";
 import type { AttentionItem } from "./attention-summary.js";
 import { normalizeSessionName } from "./session-name.js";
@@ -4725,7 +4731,9 @@ program
       }
 
       const workspace = new Workspace(browseResume?.workspace ?? opts.workspace);
-      const approvalMode = opts.approvalMode as ApprovalMode;
+      // Mutable: the interactive surfaces switch the effective mode at runtime
+      // (Issue #715). Initialized from the startup flag; never persisted.
+      let approvalMode = opts.approvalMode as ApprovalMode;
 
       if (!["default", "auto-edit", "yolo"].includes(approvalMode)) {
         process.stderr.write(`Error: invalid approval mode "${approvalMode}"\n`);
@@ -5327,6 +5335,11 @@ program
         // write the store.
         const promptHistories = openPromptHistoryStore({ workspacePath: workspace.root });
 
+        // Pending approval-mode escalation for the readline surface (Issue
+        // #715); the full-screen shell keeps its own pending state. Never
+        // persisted — an invocation restart drops it by design.
+        let pendingApprovalEscalation: ApprovalMode | null = null;
+
         // Build palette commands with live context
         const paletteCommands: PaletteCommand[] = [
           {
@@ -5352,11 +5365,34 @@ program
               return `New session started: ${sessionId}`;
             },
           },
+          {
+            // /approval-mode (Issue #715), plain-readline surface: the
+            // full-screen shell intercepts the command in runPaletteCommand;
+            // here the same pure decision contract applies to the shared
+            // invocation-scoped `approvalMode` binding. De-escalation is
+            // immediate; escalation requires the explicit `<mode> confirm`
+            // form matching a pending request. Never persisted.
+            name: "/approval-mode",
+            description: "View or change the approval mode (default, auto-edit, yolo)",
+            action: (args = "") => {
+              const decision = approvalModeCommandDecision(
+                approvalMode,
+                args,
+                pendingApprovalEscalation,
+              );
+              if (decisionAppliesMode(decision)) {
+                approvalMode = decision.mode;
+                runtimeSlashContext.approvalMode = approvalMode;
+              }
+              pendingApprovalEscalation = nextPendingEscalation(decision);
+              return formatApprovalModeNotice(decision);
+            },
+          },
           ...defaultCommands().filter(
             (command) =>
               !RUNTIME_SLASH_COMMANDS.some(
                 (name) => name === command.name,
-              ) && command.name !== "/new",
+              ) && command.name !== "/new" && command.name !== "/approval-mode",
           ),
           ...RUNTIME_SLASH_COMMAND_DESCRIPTORS.map(({ name, description }) => ({
             name,
@@ -5552,7 +5588,11 @@ program
             // workspace and posture (Issue #713). Workspace-keyed durable state
             // (composer draft #556, prompt history #711) carries over by
             // construction; run-scoped bounds are per-turn gates on the shared
-            // options above, so they are never reset by a restart.
+            // options above, so they are never reset by a restart. The
+            // effective approval mode is invocation posture (Issue #715): it
+            // survives the restart and gates the fresh session's turns.
+            approvalMode = shellExit.approvalMode;
+            runtimeSlashContext.approvalMode = approvalMode;
             sealSession();
             sessionId = store.newId();
             store.writeMeta(sessionId, {
