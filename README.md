@@ -530,7 +530,7 @@ focused tests and the end-to-end receipt.
 
 | Option | Description |
 |---|---|
-| `-p, --prompt <prompt>` | Run a single non-interactive request |
+| `-p, --prompt [prompt]` | Run a single non-interactive request (prompt argument, or piped stdin when the value is omitted) |
 | `--image <paths...>` | Attach image file(s) by path for vision-capable analysis (PNG, JPEG, GIF, or WebP); also `/attach` in interactive mode |
 | `--resume <id-or-name>` | Resume a persisted session by exact id or user-owned name |
 | `--browse-sessions` | Interactively browse, search, and resume a previous session (requires a terminal) |

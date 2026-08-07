@@ -167,6 +167,7 @@ import {
   isSweptControlByte,
   stripInsertedPaletteByte,
 } from "./readline-screen.js";
+import { resolveHeadlessPromptSource, normalizeStdinPrompt } from "./headless-prompt.js";
 import {
   openPromptHistoryStore,
   readlineHistorySeed,
@@ -597,7 +598,10 @@ program
   .name("oh-my-cli")
   .description("A small code-agent CLI with file and shell tools")
   .version("0.1.0")
-  .option("-p, --prompt <prompt>", "Run a single non-interactive request")
+  .option(
+    "-p, --prompt [prompt]",
+    "Run a single non-interactive request (prompt argument, or piped stdin when the value is omitted)",
+  )
   .option(
     "--image <paths...>",
     "Attach image file(s) by path for vision-capable analysis (PNG, JPEG, GIF, or WebP)",
@@ -5096,7 +5100,31 @@ program
             process.exit(2);
           }
         }
-        const runPrompt = replayFixture ? replayFixture.prompt : opts.prompt;
+        let runPrompt: string | undefined = replayFixture ? replayFixture.prompt : undefined;
+        if (!replayFixture && opts.prompt !== undefined) {
+          // -p/--prompt resolution (Issue #759): the value argument wins; a
+          // valueless flag reads the prompt from piped stdin; a TTY cannot be
+          // a pipe and gets one honest usage error.
+          const source = resolveHeadlessPromptSource(opts.prompt, Boolean(process.stdin.isTTY));
+          if (source.kind === "error") {
+            process.stderr.write(`${source.message}\n`);
+            process.exit(1);
+          }
+          if (source.kind === "value") {
+            runPrompt = source.value;
+          } else {
+            const chunks: Buffer[] = [];
+            for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+            const piped = normalizeStdinPrompt(Buffer.concat(chunks).toString("utf8"));
+            if (piped === null) {
+              process.stderr.write(
+                "Error: stdin was empty — pipe a prompt into -p or pass it as an argument.\n",
+              );
+              process.exit(1);
+            }
+            runPrompt = piped;
+          }
+        }
         if (!runPrompt) {
           process.stderr.write("Error: a prompt is required (use -p or --replay-fixture)\n");
           process.exit(1);
