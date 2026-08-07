@@ -62,6 +62,51 @@ describe("Palette: filterCommands", () => {
   });
 });
 
+describe("Palette: filterCommands ranking (Issue #765)", () => {
+  // Declaration order deliberately puts the description-matcher first: the
+  // ranking, not the catalog order, must decide what Enter runs.
+  const commands: PaletteCommand[] = [
+    { name: "/resume", description: "Resume a session (exit, then --resume)", action: () => {} },
+    { name: "/reset-view", description: "Reset the view layout", action: () => {} },
+    { name: "/exit", description: "Exit the interactive session", action: () => {} },
+    { name: "/export", description: "Export the transcript", action: () => {} },
+  ];
+
+  it("ranks the exact name match first even when declared after description matches", () => {
+    const names = filterCommands(commands, "exit").map((c) => c.name);
+    expect(names[0]).toBe("/exit");
+    expect(names).toContain("/resume"); // description still matches, just ranks lower
+  });
+
+  it("ranks name starts-with above other name substrings and descriptions", () => {
+    const names = filterCommands(commands, "res").map((c) => c.name);
+    expect(names).toEqual(["/resume", "/reset-view"]);
+  });
+
+  it("keeps declaration order as the tie-break within a tier", () => {
+    const names = filterCommands(commands, "e").map((c) => c.name);
+    // /exit and /export start with "e" (prefix tier); /resume and
+    // /reset-view merely contain it (substring tier). Declaration order
+    // holds within each tier.
+    expect(names).toEqual(["/exit", "/export", "/resume", "/reset-view"]);
+  });
+
+  it("treats a leading slash in the query the same as without", () => {
+    expect(filterCommands(commands, "/exit").map((c) => c.name)[0]).toBe("/exit");
+    expect(filterCommands(commands, "exit").map((c) => c.name)[0]).toBe("/exit");
+  });
+
+  it("matches multi-word names by their full name including the slash form", () => {
+    const approval: PaletteCommand[] = [
+      { name: "/approval-mode default", description: "Require approval", action: () => {} },
+      { name: "/approval", description: "Show approvals", action: () => {} },
+    ];
+    expect(filterCommands(approval, "approval-mode default").map((c) => c.name)[0]).toBe(
+      "/approval-mode default",
+    );
+  });
+});
+
 describe("Palette: inline slash preview activation", () => {
   it("opens only for one leading slash token", () => {
     expect(slashPreviewQuery("/")).toBe("");
