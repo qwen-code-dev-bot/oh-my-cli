@@ -1,12 +1,13 @@
-// Control-keystroke handling for the readline surface (Issues #745, #747).
-// Node's readline implements neither Ctrl+L (clear and redraw) nor Ctrl+W
-// (kill the previous word): for both it inserts the raw control byte (\f,
-// 0x17) into the line buffer at the cursor and never touches the screen —
-// so on the TERM=dumb surface these universal keystrokes silently pollute
-// the user's prompt. The readline tap snapshots the line before readline
-// consumes the byte; after readline processes it, the insertion is repaired
-// (verified shape only), and at the idle prompt the keystroke's real effect
-// is applied and the line redrawn — matching bash/zsh/the node REPL.
+// Control-keystroke handling for the readline surface (Issues #745, #747,
+// #749). Node's readline implements none of Ctrl+L (clear and redraw),
+// Ctrl+W (kill the previous word), or Ctrl+U (kill the line before the
+// cursor): for each it inserts the raw control byte (\f, 0x17, 0x15) into
+// the line buffer at the cursor and never touches the screen — so on the
+// TERM=dumb surface these universal keystrokes silently pollute the user's
+// prompt. The readline tap snapshots the line before readline consumes the
+// byte; after readline processes it, the insertion is repaired (verified
+// shape only), and at the idle prompt the keystroke's real effect is
+// applied and the line redrawn — matching bash/zsh/the node REPL.
 
 // Same sequence the /clear command and the full-screen shell use: clear the
 // visible screen and home the cursor. The scrollback is preserved, like
@@ -53,4 +54,14 @@ export function wordKillBefore(state: ReadlineLineState): ReadlineLineState {
   while (start > 0 && /^\s$/.test(line[start - 1])) start--;
   while (start > 0 && !/^\s$/.test(line[start - 1])) start--;
   return { line: line.slice(0, start) + line.slice(cursor), cursor: start };
+}
+
+// bash's default line-kill (unix-line-discard): kill everything between the
+// start of the line and the cursor; the text from the cursor onward survives
+// verbatim and the cursor lands at column 0. So "abc def|" -> "", and with
+// the cursor after "abc" the tail " def" is preserved. At line start the
+// state is unchanged.
+export function lineKillBefore(state: ReadlineLineState): ReadlineLineState {
+  const { line, cursor } = state;
+  return { line: line.slice(cursor), cursor: 0 };
 }
