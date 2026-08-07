@@ -27,9 +27,27 @@ export function filterCommands(
 ): PaletteCommand[] {
   if (!query) return [...commands];
   const lower = query.toLowerCase();
-  return commands.filter(
-    (c) => c.name.toLowerCase().includes(lower) || c.description.toLowerCase().includes(lower),
-  );
+  const bareQuery = lower.startsWith("/") ? lower.slice(1) : lower;
+  if (bareQuery === "") {
+    // A bare "/" narrows nothing: every slash command matches by name.
+    return commands.filter((c) => c.name.toLowerCase().includes(lower));
+  }
+  // Tiered ranking (Issue #765): what you type is what Enter runs. Name
+  // matches outrank description matches — a command whose description merely
+  // mentions another command's name (e.g. /resume's description says "exit")
+  // must not shadow the real one. Declaration order is the stable tie-break
+  // within each tier; the set of matches is unchanged, only the order.
+  const rank = (c: PaletteCommand): number => {
+    const name = c.name.toLowerCase();
+    const bareName = name.startsWith("/") ? name.slice(1) : name;
+    if (bareName === bareQuery) return 0;
+    if (bareName.startsWith(bareQuery)) return 1;
+    if (bareName.includes(bareQuery)) return 2;
+    return 3;
+  };
+  return commands
+    .filter((c) => rank(c) < 3 || c.description.toLowerCase().includes(lower))
+    .sort((a, b) => rank(a) - rank(b));
 }
 
 export function slashPreviewQuery(text: string): string | null {
