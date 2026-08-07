@@ -336,6 +336,11 @@ export interface AgentResult {
   // Aggregated token totals across all rounds, or null when the provider never
   // reported usage.
   tokens: { prompt: number; completion: number; total: number } | null;
+  // Prompt size of the most recent provider call in this run (Issue #721) —
+  // the exact input the context-pressure auto-compaction gate compares
+  // against. Null when no call has reported usage yet (including right after
+  // an auto-compaction reset, until the next call reports).
+  lastCallPromptTokens: number | null;
   // Estimated provider cost (USD) across the run, or null when the provider
   // never reported usage. An estimate, not authoritative billing.
   estimatedCostUsd: number | null;
@@ -470,6 +475,11 @@ export async function runAgent(
   });
   const tokensSnapshot = () => (hasUsage ? { ...tokens } : null);
   const costSnapshot = () => (hasUsage ? costUsd : null);
+  // Issue #721: the auto-compaction gate input, surfaced for the /context
+  // view. 0 means "no call has reported usage (yet)" — including right after
+  // the gate resets the counter on compaction — and maps to null.
+  const lastCallPromptTokensSnapshot = () =>
+    lastPromptTokens > 0 ? lastPromptTokens : null;
   const budgetReached = () => budgetUsd !== null && costUsd >= budgetUsd;
   const totalToolCalls = () =>
     Object.values(toolCalls).reduce((sum, n) => sum + n, 0);
@@ -488,6 +498,7 @@ export async function runAgent(
         retries,
         stats: statsSnapshot(),
         tokens: tokensSnapshot(),
+        lastCallPromptTokens: lastCallPromptTokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
         fellBack,
@@ -506,6 +517,7 @@ export async function runAgent(
         retries,
         stats: statsSnapshot(),
         tokens: tokensSnapshot(),
+        lastCallPromptTokens: lastCallPromptTokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
         fellBack,
@@ -525,6 +537,7 @@ export async function runAgent(
         retries,
         stats: statsSnapshot(),
         tokens: tokensSnapshot(),
+        lastCallPromptTokens: lastCallPromptTokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
         fellBack,
@@ -540,6 +553,7 @@ export async function runAgent(
         retries,
         stats: statsSnapshot(),
         tokens: tokensSnapshot(),
+        lastCallPromptTokens: lastCallPromptTokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
         fellBack,
@@ -559,6 +573,7 @@ export async function runAgent(
         retries,
         stats: statsSnapshot(),
         tokens: tokensSnapshot(),
+        lastCallPromptTokens: lastCallPromptTokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
         fellBack,
@@ -662,6 +677,7 @@ export async function runAgent(
               retries,
               stats: statsSnapshot(),
               tokens: tokensSnapshot(),
+              lastCallPromptTokens: lastCallPromptTokensSnapshot(),
               estimatedCostUsd: costSnapshot(),
               costKnown,
               fellBack,
@@ -743,6 +759,7 @@ export async function runAgent(
           retries,
           stats: statsSnapshot(),
           tokens: tokensSnapshot(),
+          lastCallPromptTokens: lastCallPromptTokensSnapshot(),
           estimatedCostUsd: costSnapshot(),
           costKnown,
           fellBack,
@@ -779,6 +796,7 @@ export async function runAgent(
           retries,
           stats: statsSnapshot(),
           tokens: tokensSnapshot(),
+          lastCallPromptTokens: lastCallPromptTokensSnapshot(),
           estimatedCostUsd: costSnapshot(),
           costKnown,
           fellBack,
@@ -815,6 +833,7 @@ export async function runAgent(
         retries,
         stats: statsSnapshot(),
         tokens: tokensSnapshot(),
+        lastCallPromptTokens: lastCallPromptTokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
         fellBack,
@@ -858,6 +877,7 @@ export async function runAgent(
         retries,
         stats: statsSnapshot(),
         tokens: tokensSnapshot(),
+        lastCallPromptTokens: lastCallPromptTokensSnapshot(),
         estimatedCostUsd: costSnapshot(),
         costKnown,
         fellBack,
@@ -913,6 +933,7 @@ export async function runAgent(
           retries,
           stats: statsSnapshot(),
           tokens: tokensSnapshot(),
+          lastCallPromptTokens: lastCallPromptTokensSnapshot(),
           estimatedCostUsd: costSnapshot(),
           costKnown,
           fellBack,
@@ -965,6 +986,7 @@ export async function runAgent(
     retries,
     stats: statsSnapshot(),
     tokens: tokensSnapshot(),
+    lastCallPromptTokens: lastCallPromptTokensSnapshot(),
     estimatedCostUsd: costSnapshot(),
     costKnown,
     fellBack,

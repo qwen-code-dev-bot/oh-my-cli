@@ -171,6 +171,7 @@ import {
   compactMessages,
   saveCompaction,
   formatCompaction,
+  loadCompaction,
   loadSessionMessages,
 } from "./compaction.js";
 import type { CompactionSummary } from "./compaction.js";
@@ -356,6 +357,8 @@ import type { RunSummary } from "./run-summary.js";
 import { colorEnabled, createColorPalette } from "./color.js";
 import { detectColorDepth, formatProductBanner, VERSION } from "./product-banner.js";
 import { runConversationShell, isFullScreenCapable } from "./tui-shell.js";
+import type { ShellContextFacts } from "./tui-shell.js";
+import { formatContextView } from "./context-view.js";
 import {
   parseDeliveryWebPort,
   startDeliveryWebServer,
@@ -5363,6 +5366,30 @@ program
           return compactCurrentSession(sessionId, compactIo);
         };
 
+        // Read-only context budget view (Issue #721): the shell facts come
+        // from the surface (full-screen shell state or the readline turn
+        // tracker below); the store facts are read here at call time, so the
+        // view always reflects the current session id and sidecar. Reads
+        // only — never writes.
+        const renderContextView = (facts: ShellContextFacts): string => {
+          const sidecar = loadCompaction(store.compactPath(sessionId));
+          return formatContextView({
+            lastCallPromptTokens: facts.lastCallPromptTokens,
+            threshold: compactThreshold ?? null,
+            lastTurnUsage: facts.lastTurnUsage,
+            sidecar: sidecar
+              ? { messageCount: sidecar.messageCount, sourceDigest: sidecar.sourceDigest }
+              : null,
+            messageCount: store.load(sessionId).length,
+          });
+        };
+        // The readline surface has no shell state: track the same facts from
+        // each dispatched turn's result (updated in dispatchInput).
+        let readlineContextFacts: ShellContextFacts = {
+          lastCallPromptTokens: null,
+          lastTurnUsage: null,
+        };
+
         // Build palette commands with live context
         const paletteCommands: PaletteCommand[] = [
           {
@@ -5418,6 +5445,14 @@ program
             name: "/compact",
             description: "Compact the current session (transcript preserved; applies from next turn/resume)",
             action: (args = "") => runCompactForCurrentSession(args),
+          },
+          {
+            // /context (Issue #721): read-only budget view, streaming-safe.
+            // The full-screen shell intercepts it with its own live facts via
+            // the onContext option; this action serves the readline surface.
+            name: "/context",
+            description: "Show the context-compaction budget (read-only)",
+            action: () => renderContextView(readlineContextFacts),
           },
           ...defaultCommands().filter(
             (command) =>
@@ -5607,6 +5642,9 @@ program
             // the shell renders the returned report. The session id is read
             // at call time, so a /new restart targets the fresh session.
             onCompact: () => runCompactForCurrentSession(""),
+            // Read-only context budget view (Issue #721): the shell passes
+            // its live facts; the store facts are added at call time.
+            onContext: (facts) => renderContextView(facts),
             // Offline posture banner before the first request (Issue #576).
             offline: offlineRequested,
             // Immediate Goal status summary on resume (Issue #584).
@@ -5874,6 +5912,12 @@ program
                     head: currentRepoHead(workspace.root) || null,
                   }),
               });
+              // /context facts for the readline surface (Issue #721): the
+              // same live facts the full-screen shell tracks.
+              readlineContextFacts = {
+                lastCallPromptTokens: result.lastCallPromptTokens,
+                lastTurnUsage: result.tokens ? { ...result.tokens } : null,
+              };
               if (goalRevision !== undefined) {
                 const output = settleGoalExecution(
                   store,

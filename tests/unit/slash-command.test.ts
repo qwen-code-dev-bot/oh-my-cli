@@ -180,7 +180,7 @@ const paletteNames = [
 ];
 
 describe("streaming-safe allowlist", () => {
-  it("contains exactly the read-only runtime commands plus /help", () => {
+  it("contains exactly the read-only runtime commands plus /help and /context", () => {
     expect(STREAMING_SAFE_SLASH_COMMANDS).toEqual([
       "/status",
       "/model",
@@ -189,6 +189,8 @@ describe("streaming-safe allowlist", () => {
       "/capabilities",
       "/continuity",
       "/help",
+      // Read-only context budget view (Issue #721).
+      "/context",
     ]);
   });
 
