@@ -159,7 +159,12 @@ import {
 } from "./session-picker.js";
 import { openComposerDraftStore, clearDurableDraft } from "./composer-draft.js";
 import { isMultilinePasteChunk, flattenPastedChunk } from "./readline-paste.js";
-import { CLEAR_SCREEN_SEQUENCE, repairControlCharInsertion, wordKillBefore } from "./readline-screen.js";
+import {
+  CLEAR_SCREEN_SEQUENCE,
+  repairControlCharInsertion,
+  wordKillBefore,
+  lineKillBefore,
+} from "./readline-screen.js";
 import {
   openPromptHistoryStore,
   readlineHistorySeed,
@@ -5755,23 +5760,25 @@ program
 
         // Universal control keystrokes for the readline surface. Ctrl+L clears
         // the screen and redraws the prompt line (Issue #745); Ctrl+W kills
-        // the word before the cursor (Issue #747) — both standard in
-        // bash/zsh/the node REPL. Registered BEFORE the readline interface
-        // (like the paste tap) so it snapshots the line before readline
-        // consumes the byte: Node's readline implements neither keystroke and
-        // inserts the raw control byte into the line buffer, so the follow-up
-        // repairs that insertion (verified shape only — fail closed
-        // otherwise) and then applies the keystroke's real effect. Effects
-        // land only at the idle prompt; mid-turn or with the palette open the
-        // buffer is still repaired but the streaming output / picker stays
-        // untouched. Non-TTY stdin is never touched: there these bytes are
-        // literal piped data, not keystrokes.
+        // the word before the cursor (Issue #747); Ctrl+U kills the line
+        // before the cursor (Issue #749) — all standard in bash/zsh/the node
+        // REPL. Registered BEFORE the readline interface (like the paste tap)
+        // so it snapshots the line before readline consumes the byte: Node's
+        // readline implements none of these keystrokes and inserts the raw
+        // control byte into the line buffer, so the follow-up repairs that
+        // insertion (verified shape only — fail closed otherwise) and then
+        // applies the keystroke's real effect. Effects land only at the idle
+        // prompt; mid-turn or with the palette open the buffer is still
+        // repaired but the streaming output / picker stays untouched. Non-TTY
+        // stdin is never touched: there these bytes are literal piped data,
+        // not keystrokes.
         process.stdin.on("data", (buf: Buffer) => {
           if (buf.length !== 1 || !process.stdin.isTTY) return;
           const isCtrlL = buf[0] === 0x0c;
           const isCtrlW = buf[0] === 0x17;
-          if (!isCtrlL && !isCtrlW) return;
-          const insertedChar = isCtrlL ? "\f" : "\u0017";
+          const isCtrlU = buf[0] === 0x15;
+          if (!isCtrlL && !isCtrlW && !isCtrlU) return;
+          const insertedChar = isCtrlL ? "\f" : isCtrlW ? "\u0017" : "\u0015";
           const snapshot = {
             line: (rl as unknown as { line: string }).line,
             cursor: (rl as unknown as { cursor: number }).cursor,
@@ -5790,7 +5797,13 @@ program
             if (repaired === null) return;
             const idle =
               !turnInFlight && !paletteOpen && !paletteQuestionActive && promptActive;
-            const next = isCtrlW && idle ? wordKillBefore(repaired) : repaired;
+            const next = idle
+              ? isCtrlW
+                ? wordKillBefore(repaired)
+                : isCtrlU
+                  ? lineKillBefore(repaired)
+                  : repaired
+              : repaired;
             rlInternals.line = next.line;
             rlInternals.cursor = next.cursor;
             if (!idle) return;

@@ -3,9 +3,10 @@ import {
   CLEAR_SCREEN_SEQUENCE,
   repairControlCharInsertion,
   wordKillBefore,
+  lineKillBefore,
 } from "../../src/readline-screen.js";
 
-describe("readline control-char insertion repair (Issues #745/#747)", () => {
+describe("readline control-char insertion repair (Issues #745/#747/#749)", () => {
   it("repairs a form feed inserted at the end of the line", () => {
     const snapshot = { line: "abc def", cursor: 7 };
     const repaired = repairControlCharInsertion(snapshot, { line: "abc def\f", cursor: 8 }, "\f");
@@ -40,6 +41,16 @@ describe("readline control-char insertion repair (Issues #745/#747)", () => {
       snapshot,
       { line: "hello world\u0017", cursor: 12 },
       "\u0017",
+    );
+    expect(repaired).toEqual(snapshot);
+  });
+
+  it("repairs the Ctrl+U byte (0x15) with the same verified shape", () => {
+    const snapshot = { line: "abc def", cursor: 7 };
+    const repaired = repairControlCharInsertion(
+      snapshot,
+      { line: "abc def\u0015", cursor: 8 },
+      "\u0015",
     );
     expect(repaired).toEqual(snapshot);
   });
@@ -132,6 +143,22 @@ describe("readline word-kill before the cursor (Issue #747)", () => {
       line: " tail",
       cursor: 0,
     });
+  });
+});
+
+describe("readline line-kill before the cursor (Issue #749)", () => {
+  it("kills the whole line when the cursor is at the end", () => {
+    expect(lineKillBefore({ line: "abc def", cursor: 7 })).toEqual({ line: "", cursor: 0 });
+  });
+
+  it("keeps the tail verbatim when the cursor is mid-line", () => {
+    expect(lineKillBefore({ line: "abc def", cursor: 3 })).toEqual({ line: " def", cursor: 0 });
+    expect(lineKillBefore({ line: "abc def", cursor: 4 })).toEqual({ line: "def", cursor: 0 });
+  });
+
+  it("is a no-op at line start and on an empty line", () => {
+    expect(lineKillBefore({ line: "abc", cursor: 0 })).toEqual({ line: "abc", cursor: 0 });
+    expect(lineKillBefore({ line: "", cursor: 0 })).toEqual({ line: "", cursor: 0 });
   });
 });
 
