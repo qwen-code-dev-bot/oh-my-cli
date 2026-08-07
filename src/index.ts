@@ -165,6 +165,7 @@ import {
   wordKillBefore,
   lineKillBefore,
   isSweptControlByte,
+  stripInsertedPaletteByte,
 } from "./readline-screen.js";
 import {
   openPromptHistoryStore,
@@ -6059,6 +6060,10 @@ program
         // prompt's question); readline supports one pending question, so the
         // guarded prompt() must not stack a second one (Issue #717).
         let paletteQuestionActive = false;
+        // The user's in-progress line, stashed while the palette is open
+        // from a non-empty prompt (Issue #757); restored by
+        // restorePaletteStash when the round-trip ends.
+        let paletteLineStash: string | null = null;
 
         // Whether the current dispatch has an agent turn in flight. The
         // readline surface is single-threaded — typed input is only accepted
@@ -6093,15 +6098,43 @@ program
         // Shared selection handling for both picker entry points (the pending
         // typed question during normal use, or the dedicated picker question
         // when Ctrl+K fires mid-turn with no typed question pending).
+        //
+        // Palette line stash (Issue #757): opening the palette from a
+        // non-empty line clears the line so the selection answer is clean
+        // input; the user's in-progress text is stashed here and restored
+        // when the palette round-trip ends — cancel, invalid/busy notice, or
+        // after the selected command's dispatch settles. The durable #725
+        // draft mirrors the stash while it is out so a crash mid-palette
+        // loses nothing.
+        const restorePaletteStash = (onlyIfLineEmpty: boolean): void => {
+          if (paletteLineStash === null) return;
+          const rlInternals = rl as unknown as {
+            line: string;
+            cursor: number;
+            _refreshLine(): void;
+          };
+          if (onlyIfLineEmpty && rlInternals.line !== "") {
+            // Fresh input arrived after the dispatch — never clobber it.
+            paletteLineStash = null;
+            return;
+          }
+          rlInternals.line = paletteLineStash;
+          rlInternals.cursor = paletteLineStash.length;
+          paletteLineStash = null;
+          rlInternals._refreshLine();
+        };
+
         const handlePaletteAnswer = (answer: string) => {
           const selection = parsePaletteSelection(answer, paletteCommands.length);
           if (selection.kind === "cancel") {
             prompt();
+            restorePaletteStash(false);
             return;
           }
           if (selection.kind === "invalid") {
             process.stderr.write(`${selection.message}\n`);
             prompt();
+            restorePaletteStash(false);
             return;
           }
           const command = paletteCommands[selection.index];
@@ -6109,11 +6142,15 @@ program
           if (reason) {
             process.stderr.write(`${command.name} unavailable — ${reason}\n`);
             prompt();
+            restorePaletteStash(false);
             return;
           }
           // Dispatch exactly as if the command had been typed: same
-          // resolution, same special cases, same visible output.
-          void dispatchInput(command.name);
+          // resolution, same special cases, same visible output. The stashed
+          // line returns once the dispatch settles and the prompt is rearmed
+          // (the command was what got "submitted", never the stash — the
+          // #564 invariant holds).
+          void dispatchInput(command.name).then(() => restorePaletteStash(true));
         };
 
         const paletteBusyReason = (command: PaletteCommand): string | null =>
@@ -6138,7 +6175,27 @@ program
           );
           if (promptActive) {
             // A typed question is already pending: its callback will route the
-            // next line to handlePaletteAnswer. No second question.
+            // next line to handlePaletteAnswer. No second question. First,
+            // though, make the palette safe for a non-empty line (Issue
+            // #757): dumb-mode readline already appended a raw 0x0b, which
+            // would pollute every selection answer, and the user's
+            // in-progress text must not be swallowed by the picker. Strip
+            // the inserted byte, stash the cleaned line (mirrored into the
+            // durable draft), and clear the buffer so the answer is clean
+            // input; restorePaletteStash returns the line when the palette
+            // round-trip ends.
+            const rlInternals = rl as unknown as { line: string; cursor: number };
+            const cleaned = stripInsertedPaletteByte(rlInternals.line);
+            paletteLineStash = cleaned !== "" ? cleaned : null;
+            rlInternals.line = "";
+            rlInternals.cursor = 0;
+            if (paletteLineStash !== null) {
+              try {
+                composerDrafts.save(paletteLineStash);
+              } catch {
+                /* best-effort durability */
+              }
+            }
             return;
           }
           paletteQuestionActive = true;

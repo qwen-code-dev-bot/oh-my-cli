@@ -5,6 +5,7 @@ import {
   wordKillBefore,
   lineKillBefore,
   isSweptControlByte,
+  stripInsertedPaletteByte,
 } from "../../src/readline-screen.js";
 
 describe("readline control-char insertion repair (Issues #745/#747/#749/#751/#753/#755)", () => {
@@ -227,6 +228,28 @@ describe("control-byte sweep predicate (Issue #755)", () => {
     expect(isSweptControlByte(0x61)).toBe(false); // 'a'
     expect(isSweptControlByte(0x7f)).toBe(false); // DEL
     expect(isSweptControlByte(0xff)).toBe(false);
+  });
+});
+
+describe("palette byte stripping (Issue #757)", () => {
+  it("removes the one trailing 0x0b readline appends when the palette opens", () => {
+    expect(stripInsertedPaletteByte("palette test\u000b")).toBe("palette test");
+  });
+
+  it("leaves lines without a trailing palette byte untouched", () => {
+    expect(stripInsertedPaletteByte("palette test")).toBe("palette test");
+    expect(stripInsertedPaletteByte("")).toBe("");
+  });
+
+  it("never touches a 0x0b that is not the trailing insertion", () => {
+    // Mid-line bytes are the user's own content (e.g. pasted).
+    expect(stripInsertedPaletteByte("a\u000bb")).toBe("a\u000bb");
+    expect(stripInsertedPaletteByte("a\u000bb\u000b")).toBe("a\u000bb");
+  });
+
+  it("removes exactly one trailing byte", () => {
+    expect(stripInsertedPaletteByte("x\u000b\u000b")).toBe("x\u000b");
+    expect(stripInsertedPaletteByte("\u000b")).toBe("");
   });
 });
 

@@ -101,3 +101,13 @@ export function isSweptControlByte(byte: number): boolean {
   }
   return true;
 }
+
+// Ctrl+K is owned by the palette's raw tap (#717), so the sweep leaves the
+// byte alone — but dumb-mode readline still appends a raw 0x0b to the
+// pending question's buffer when the key arrives, and that pollution breaks
+// every palette answer typed from a non-empty line (Issue #757). Remove one
+// trailing palette byte — the exact shape readline appends — and nothing
+// else; a 0x0b anywhere else in the line is the user's own content.
+export function stripInsertedPaletteByte(line: string): string {
+  return line.endsWith("\u000b") ? line.slice(0, -1) : line;
+}
