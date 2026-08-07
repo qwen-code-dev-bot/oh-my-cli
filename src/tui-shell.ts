@@ -4730,6 +4730,13 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
   } catch {
     /* not a raw-capable stream */
   }
+  // A restarted shell (Issue #713 /new) inherits a stdin paused by the
+  // previous run's cleanup(); resuming is a no-op on a first launch.
+  try {
+    stdin.resume();
+  } catch {
+    /* not a resumable stream */
+  }
   stdin.on("data", onData);
   stdout.on("resize", onResize);
   process.removeAllListeners("SIGINT");
