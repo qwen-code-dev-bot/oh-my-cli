@@ -87,6 +87,38 @@ describe("Palette: defaultCommands", () => {
   });
 });
 
+describe("Palette: honest session commands (Issue #713)", () => {
+  const find = (name: string) => {
+    const cmd = defaultCommands().find((c) => c.name === name);
+    expect(cmd).toBeTruthy();
+    return cmd!;
+  };
+
+  it("/resume states that in-shell switching is not supported and names the supported paths", async () => {
+    const resume = find("/resume");
+    const output = await resume.action("");
+    expect(typeof output).toBe("string");
+    expect(output).toContain("In-shell session switching is not supported");
+    expect(output).toContain("--resume <id-or-name>");
+    expect(output).toContain("--browse-sessions");
+    // The palette listing itself no longer advertises an in-shell capability.
+    expect(resume.description).toContain("--resume");
+    expect(resume.description).toContain("--browse-sessions");
+  });
+
+  it("/resume ignores arguments: the notice is identical with or without one", async () => {
+    const resume = find("/resume");
+    expect(await resume.action("some-session-id")).toBe(await resume.action(""));
+  });
+
+  it("/new fallback action reports the surface limitation instead of silently no-oping", async () => {
+    const cmd = find("/new");
+    const output = await cmd.action("");
+    expect(typeof output).toBe("string");
+    expect(output).toContain("interactive shell");
+  });
+});
+
 describe("Palette: renderPaletteLines color", () => {
   const commands: PaletteCommand[] = [
     { name: "/new", description: "Start a new conversation session", action: () => {} },

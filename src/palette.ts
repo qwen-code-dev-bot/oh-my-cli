@@ -241,8 +241,23 @@ export async function runPalette(
 
 export function defaultCommands(): PaletteCommand[] {
   return [
-    { name: "/new", description: "Start a new conversation session", action: async () => {} },
-    { name: "/resume", description: "Resume a previous session by ID", action: async () => {} },
+    {
+      // Wired to the real restart contract by the interactive entry point
+      // (Issue #713). The fallback action is honest instead of hollow: a
+      // surface that runs it directly is told it cannot restart the shell.
+      name: "/new",
+      description: "Start a new conversation session",
+      action: async () => "/new runs in the interactive shell; this surface cannot start a new session.",
+    },
+    {
+      // In-shell session switching does not exist; the description and the
+      // action state exactly what is supported instead of pretending (Issue
+      // #713). The interactive entry point surfaces the same text.
+      name: "/resume",
+      description: "Resume a session at launch (exit, then --resume <id-or-name> or --browse-sessions)",
+      action: async () =>
+        "In-shell session switching is not supported. Exit and resume with oh-my-cli --resume <id-or-name> or --browse-sessions.",
+    },
     { name: "/clear", description: "Clear the terminal screen", action: () => { process.stdout.write("\x1b[2J\x1b[H"); } },
     { name: "/help", description: "Show available commands and options", action: async () => {} },
     { name: "/exit", description: "Exit the interactive session", action: () => { process.exit(0); } },
