@@ -1,11 +1,11 @@
-// Headless prompt resolution (Issues #759, #761). `-p`/`--prompt` accepts
-// its value as an argument or — when the value is omitted — from piped
-// stdin, the composition pattern every trusted coding CLI supports
-// (`git diff | cli -p`). When BOTH are present the pipe carries context for
-// the instruction: one combined prompt, recorded verbatim (#761). The
+// Headless prompt resolution (Issues #759, #761, #763). `-p`/`--prompt`
+// accepts its value as an argument or — when the value is omitted — from
+// piped stdin, the composition pattern every trusted coding CLI supports
+// (`git diff | cli -p`). When BOTH are present the pipe carries context
+// for the instruction: one combined prompt, recorded verbatim (#761). The
 // decisions here are pure so the wiring in index.ts stays a thin reader;
-// errors are honest and bounded: a TTY cannot be a pipe, and an empty pipe
-// is not a prompt.
+// errors are honest and bounded: a TTY cannot be a pipe, an empty pipe is
+// not a prompt, and neither is a whitespace-only argument (#763).
 
 export type HeadlessPromptSource =
   | { kind: "value"; value: string }
@@ -51,4 +51,16 @@ export function normalizeStdinPrompt(text: string): string | null {
 export function combinePromptAndStdin(value: string, stdinText: string | null): string {
   if (stdinText === null) return value;
   return `${value}\n\n${stdinText}`;
+}
+
+// A prompt that is empty by content cannot mean anything (#763): it must
+// become one honest error instead of a provider call — the piped path has
+// rejected the identical emptiness since #759. Content with surrounding
+// whitespace is real and stays verbatim; only content-less values are
+// rejected. Returns the error message, or null when the value is usable.
+export function promptValueError(value: string): string | null {
+  if (value.trim() === "") {
+    return "Error: the prompt is empty — pass text with -p or pipe it in.";
+  }
+  return null;
 }

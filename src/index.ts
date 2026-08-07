@@ -171,6 +171,7 @@ import {
   resolveHeadlessPromptSource,
   normalizeStdinPrompt,
   combinePromptAndStdin,
+  promptValueError,
 } from "./headless-prompt.js";
 import { readStdinWithSilenceTimeout } from "./stdin-reader.js";
 import {
@@ -5116,6 +5117,16 @@ program
             process.exit(1);
           }
           if (source.kind === "value") {
+            // A whitespace-only argument is empty by content (Issue #763):
+            // one honest error instead of a provider call — checked before
+            // any stdin read so a piped body cannot mask an empty
+            // instruction. Content with surrounding whitespace stays
+            // verbatim.
+            const valueProblem = promptValueError(source.value);
+            if (valueProblem !== null) {
+              process.stderr.write(`${valueProblem}\n`);
+              process.exit(1);
+            }
             runPrompt = source.value;
             if (!process.stdin.isTTY) {
               // A prompt argument with piped stdin (Issue #761): the pipe
