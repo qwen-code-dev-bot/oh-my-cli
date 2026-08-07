@@ -1,15 +1,18 @@
 // Control-keystroke handling for the readline surface (Issues #745, #747,
 // #749, #753). Node's readline implements none of Ctrl+L (clear and
 // redraw), Ctrl+W (kill the previous word), Ctrl+U (kill the line before
-// the cursor), or Ctrl+A/Ctrl+E (cursor to line start/end): for each it
-// inserts the raw control byte (\f, 0x17, 0x15, 0x01, 0x05) into the line
-// buffer at the cursor and never touches the screen — so on the TERM=dumb
-// surface these universal keystrokes silently pollute the user's prompt.
-// (Ctrl+Z suspend lives in the tap itself — Issue #751.) The readline tap
-// snapshots the line before readline consumes the byte; after readline
-// processes it, the insertion is repaired (verified shape only), and at the
-// idle prompt the keystroke's real effect is applied and the line redrawn —
-// matching bash/zsh/the node REPL.
+// the cursor), or Ctrl+A/Ctrl+E: for each it inserts the raw control byte
+// (\f, 0x17, 0x15, 0x01, 0x05) into the line buffer at the cursor and
+// never touches the screen — so on the TERM=dumb surface these universal
+// keystrokes silently pollute the user's prompt. (Ctrl+Z suspend lives in
+// the tap itself — Issue #751.) The readline tap snapshots the line before
+// readline consumes the byte; after readline processes it, the insertion is
+// repaired (verified shape only), and at the idle prompt the keystroke's
+// real effect is applied and the line redrawn — matching bash/zsh/the node
+// REPL. Exception: under TERM=dumb Node 24's readline is append-only (no
+// cursor addressing at all — even Backspace is a no-op), so for Ctrl+A and
+// Ctrl+E the repair itself is the whole fix: the bytes are ignored cleanly
+// instead of corrupting the prompt (Issue #753, rescoping note).
 
 // Same sequence the /clear command and the full-screen shell use: clear the
 // visible screen and home the cursor. The scrollback is preserved, like
@@ -66,15 +69,4 @@ export function wordKillBefore(state: ReadlineLineState): ReadlineLineState {
 export function lineKillBefore(state: ReadlineLineState): ReadlineLineState {
   const { line, cursor } = state;
   return { line: line.slice(cursor), cursor: 0 };
-}
-
-// readline emacs-mode cursor movement (beginning-of-line / end-of-line):
-// move the cursor to column 0 / past the last character without touching
-// the buffer content. Both are idempotent at their own boundary.
-export function cursorToLineStart(state: ReadlineLineState): ReadlineLineState {
-  return { line: state.line, cursor: 0 };
-}
-
-export function cursorToLineEnd(state: ReadlineLineState): ReadlineLineState {
-  return { line: state.line, cursor: state.line.length };
 }

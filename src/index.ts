@@ -164,8 +164,6 @@ import {
   repairControlCharInsertion,
   wordKillBefore,
   lineKillBefore,
-  cursorToLineStart,
-  cursorToLineEnd,
 } from "./readline-screen.js";
 import {
   openPromptHistoryStore,
@@ -5764,18 +5762,20 @@ program
         // the screen and redraws the prompt line (Issue #745); Ctrl+W kills
         // the word before the cursor (Issue #747); Ctrl+U kills the line
         // before the cursor (Issue #749); Ctrl+Z suspends the process like
-        // every terminal app (Issue #751); Ctrl+A/Ctrl+E move the cursor to
-        // line start/end (Issue #753) — all standard in bash/zsh/the node
-        // REPL. Registered BEFORE the readline interface (like the paste tap)
-        // so it snapshots the line before readline consumes the byte: Node's
-        // readline implements none of these keystrokes and inserts the raw
-        // control byte into the line buffer, so the follow-up repairs that
-        // insertion (verified shape only — fail closed otherwise) and then
-        // applies the keystroke's real effect. Effects land only at the idle
-        // prompt; mid-turn or with the palette open the buffer is still
-        // repaired but the streaming output / picker stays untouched. Non-TTY
-        // stdin is never touched: there these bytes are literal piped data,
-        // not keystrokes.
+        // every terminal app (Issue #751); Ctrl+A/Ctrl+E are ignored cleanly
+        // (Issue #753) — all standard in bash/zsh/the node REPL, except the
+        // last two: under TERM=dumb Node 24's readline is append-only with
+        // no cursor addressing, so for 0x01/0x05 the repair of readline's
+        // inserted byte IS the effect (the keystrokes stop corrupting the
+        // prompt). Registered BEFORE the readline interface (like the paste
+        // tap) so it snapshots the line before readline consumes the byte:
+        // Node's readline inserts the raw control byte into the line buffer,
+        // so the follow-up repairs that insertion (verified shape only —
+        // fail closed otherwise) and then applies the keystroke's real
+        // effect. Effects land only at the idle prompt; mid-turn or with the
+        // palette open the buffer is still repaired but the streaming output
+        // / picker stays untouched. Non-TTY stdin is never touched: there
+        // these bytes are literal piped data, not keystrokes.
         process.stdin.on("data", (buf: Buffer) => {
           if (buf.length !== 1 || !process.stdin.isTTY) return;
           const isCtrlL = buf[0] === 0x0c;
@@ -5820,11 +5820,7 @@ program
                 ? wordKillBefore(repaired)
                 : isCtrlU
                   ? lineKillBefore(repaired)
-                  : isCtrlA
-                    ? cursorToLineStart(repaired)
-                    : isCtrlE
-                      ? cursorToLineEnd(repaired)
-                      : repaired
+                  : repaired
               : repaired;
             rlInternals.line = next.line;
             rlInternals.cursor = next.cursor;

@@ -4,8 +4,6 @@ import {
   repairControlCharInsertion,
   wordKillBefore,
   lineKillBefore,
-  cursorToLineStart,
-  cursorToLineEnd,
 } from "../../src/readline-screen.js";
 
 describe("readline control-char insertion repair (Issues #745/#747/#749/#751/#753)", () => {
@@ -68,6 +66,8 @@ describe("readline control-char insertion repair (Issues #745/#747/#749/#751/#75
   });
 
   it("repairs the Ctrl+A and Ctrl+E bytes (0x01/0x05) with the same verified shape", () => {
+    // Under TERM=dumb these keystrokes have no effect beyond the pollution
+    // (Node 24's readline is append-only there), so the repair IS the fix.
     const snapshot = { line: "alpha beta", cursor: 10 };
     expect(
       repairControlCharInsertion(snapshot, { line: "alpha beta\u0001", cursor: 11 }, "\u0001"),
@@ -181,45 +181,6 @@ describe("readline line-kill before the cursor (Issue #749)", () => {
   it("is a no-op at line start and on an empty line", () => {
     expect(lineKillBefore({ line: "abc", cursor: 0 })).toEqual({ line: "abc", cursor: 0 });
     expect(lineKillBefore({ line: "", cursor: 0 })).toEqual({ line: "", cursor: 0 });
-  });
-});
-
-describe("readline cursor home/end movement (Issue #753)", () => {
-  it("moves the cursor to line start without touching the buffer", () => {
-    expect(cursorToLineStart({ line: "alpha beta", cursor: 10 })).toEqual({
-      line: "alpha beta",
-      cursor: 0,
-    });
-    expect(cursorToLineStart({ line: "alpha beta", cursor: 5 })).toEqual({
-      line: "alpha beta",
-      cursor: 0,
-    });
-  });
-
-  it("moves the cursor to line end without touching the buffer", () => {
-    expect(cursorToLineEnd({ line: "alpha beta", cursor: 0 })).toEqual({
-      line: "alpha beta",
-      cursor: 10,
-    });
-    expect(cursorToLineEnd({ line: "alpha beta", cursor: 5 })).toEqual({
-      line: "alpha beta",
-      cursor: 10,
-    });
-  });
-
-  it("is idempotent at its own boundary and safe on an empty line", () => {
-    expect(cursorToLineStart({ line: "abc", cursor: 0 })).toEqual({ line: "abc", cursor: 0 });
-    expect(cursorToLineEnd({ line: "abc", cursor: 3 })).toEqual({ line: "abc", cursor: 3 });
-    expect(cursorToLineStart({ line: "", cursor: 0 })).toEqual({ line: "", cursor: 0 });
-    expect(cursorToLineEnd({ line: "", cursor: 0 })).toEqual({ line: "", cursor: 0 });
-  });
-
-  it("composes with the cursor-relative kills once the cursor can move", () => {
-    // Ctrl+A then Ctrl+U is a no-op; Ctrl+E then Ctrl+W kills the last word.
-    const atStart = cursorToLineStart({ line: "one two three", cursor: 7 });
-    expect(lineKillBefore(atStart)).toEqual({ line: "one two three", cursor: 0 });
-    const atEnd = cursorToLineEnd({ line: "one two three", cursor: 0 });
-    expect(wordKillBefore(atEnd)).toEqual({ line: "one two ", cursor: 8 });
   });
 });
 
