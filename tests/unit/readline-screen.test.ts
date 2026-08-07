@@ -6,7 +6,7 @@ import {
   lineKillBefore,
 } from "../../src/readline-screen.js";
 
-describe("readline control-char insertion repair (Issues #745/#747/#749/#751)", () => {
+describe("readline control-char insertion repair (Issues #745/#747/#749/#751/#753)", () => {
   it("repairs a form feed inserted at the end of the line", () => {
     const snapshot = { line: "abc def", cursor: 7 };
     const repaired = repairControlCharInsertion(snapshot, { line: "abc def\f", cursor: 8 }, "\f");
@@ -63,6 +63,18 @@ describe("readline control-char insertion repair (Issues #745/#747/#749/#751)", 
       "\u001a",
     );
     expect(repaired).toEqual(snapshot);
+  });
+
+  it("repairs the Ctrl+A and Ctrl+E bytes (0x01/0x05) with the same verified shape", () => {
+    // Under TERM=dumb these keystrokes have no effect beyond the pollution
+    // (Node 24's readline is append-only there), so the repair IS the fix.
+    const snapshot = { line: "alpha beta", cursor: 10 };
+    expect(
+      repairControlCharInsertion(snapshot, { line: "alpha beta\u0001", cursor: 11 }, "\u0001"),
+    ).toEqual(snapshot);
+    expect(
+      repairControlCharInsertion(snapshot, { line: "alpha beta\u0005", cursor: 11 }, "\u0005"),
+    ).toEqual(snapshot);
   });
 
   it("reports the state as-is when the byte never reached the buffer", () => {
