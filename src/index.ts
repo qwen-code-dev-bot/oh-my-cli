@@ -43,6 +43,7 @@ import { runAgent, createConsoleSink } from "./agent.js";
 import type { AgentResult } from "./agent.js";
 import type { ApprovalMode } from "./approval.js";
 import type { SessionMessage } from "./session.js";
+import type { SessionLock, SessionLockInfo } from "./session-lock.js";
 import {
   defaultCommands,
   formatPalettePickerLines,
@@ -3205,6 +3206,22 @@ program
           process.stderr.write(`Error: no such session "${id}"\n`);
           process.exit(2);
         }
+        // Advisory lock (Issue #741): undo/redo rewrites the whole session,
+        // so a live holder fails closed instead of being rewritten under.
+        const undoLock = store.openLock(id);
+        const undoLockResult = undoLock.acquire();
+        if (!undoLockResult.acquired) {
+          const msg =
+            `Cannot ${op}: session ${shortSessionId(id)} appears to be in use by process ${undoLockResult.holder.pid}. ` +
+            `Try again when it exits, or if that process is gone, remove ${undoLock.filePath} and retry.`;
+          if (format === "json") {
+            process.stdout.write(JSON.stringify({ op, ok: false, reason: msg }) + "\n");
+          } else {
+            process.stderr.write(msg + "\n");
+          }
+          process.exit(1);
+        }
+        process.once("exit", () => undoLock.release());
         // Restore against the workspace the turn ran in (recorded in the session
         // meta) so undo is correct regardless of the current directory; fall
         // back to the current directory for sessions without a recorded one.
@@ -4946,8 +4963,23 @@ program
       // not. Shown on stderr for every resume path (picker, --resume,
       // --continue) and surfaced in the TUI transcript below.
       let resumeGoalNotice: string | null = null;
+      // Advisory session lock (Issue #741): acquired before the session is
+      // read or written so a concurrent opener fails fast and honestly
+      // instead of interleaving writers. Released on process exit; a stale
+      // lock (dead holder) self-heals on acquire.
+      let sessionLock: SessionLock | null = null;
+      const failLockClosed = (lock: SessionLock, result: { holder: SessionLockInfo }): void => {
+        process.stderr.write(
+          `Cannot resume: session ${shortSessionId(sessionId)} appears to be in use by process ${result.holder.pid}.\n` +
+            `Resume a different session, or if that process is gone, remove ${lock.filePath} and retry.\n`,
+        );
+        process.exit(1);
+      };
       if (resumeId) {
         sessionId = resumeId;
+        sessionLock = store.openLock(sessionId);
+        const lockResult = sessionLock.acquire();
+        if (!lockResult.acquired) failLockClosed(sessionLock, lockResult);
         // Heal an interrupted checkpoint before loading (promotes a complete temp
         // left by an interrupted write). Recovery is scoped to this session and
         // never touches sibling sessions. A checkpoint that cannot be healed fails
@@ -4998,7 +5030,18 @@ program
           workspace: workspace.root,
           createdAt: Date.now(),
         });
+        // Lock fresh sessions too: a second process must not be able to
+        // resume this id while this run is still writing it.
+        sessionLock = store.openLock(sessionId);
+        const lockResult = sessionLock.acquire();
+        if (!lockResult.acquired) failLockClosed(sessionLock, lockResult);
       }
+      // Release the advisory lock on any exit path (normal exit, process.exit
+      // from signal handlers). A kill -9 leaves a stale lock, which the next
+      // opener self-heals via the pid-liveness check.
+      process.once("exit", () => {
+        sessionLock?.release();
+      });
 
       const onMessage = (msg: SessionMessage) => {
         store.append(sessionId, msg);
@@ -5674,6 +5717,9 @@ program
             approvalMode = shellExit.approvalMode;
             runtimeSlashContext.approvalMode = approvalMode;
             sealSession();
+            // Lock handover (Issue #741): the sealed session's lock is
+            // released; the fresh session locks before any write.
+            sessionLock?.release();
             sessionId = store.newId();
             store.writeMeta(sessionId, {
               model: config.model,
@@ -5681,6 +5727,9 @@ program
               workspace: workspace.root,
               createdAt: Date.now(),
             });
+            sessionLock = store.openLock(sessionId);
+            const restartLockResult = sessionLock.acquire();
+            if (!restartLockResult.acquired) failLockClosed(sessionLock, restartLockResult);
             resumeNoticeForShell = undefined;
           }
           return;

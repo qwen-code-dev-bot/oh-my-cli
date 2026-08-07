@@ -3,6 +3,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { parseTaskSnapshot, serializeTaskSnapshot } from "./task-runtime.js";
 import type { TaskSnapshot } from "./task-runtime.js";
+import { openSessionLock, sessionLockPath } from "./session-lock.js";
+import type { SessionLock } from "./session-lock.js";
 
 export interface SessionMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -186,6 +188,17 @@ export class SessionStore {
   // enumerated exactly once.
   compactPath(id: string): string {
     return path.join(this.dir, `${id}.compact.json`);
+  }
+
+  // Advisory lock sidecar (Issue #741). The `.lock` extension likewise keeps
+  // it out of listIds(). See session-lock.ts for the acquire/release
+  // semantics (exclusive create, live-holder report, stale self-heal).
+  lockPath(id: string): string {
+    return sessionLockPath(this.dir, id);
+  }
+
+  openLock(id: string): SessionLock {
+    return openSessionLock(this.lockPath(id));
   }
 
   goalPath(id: string): string {
