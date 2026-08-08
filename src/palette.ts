@@ -187,6 +187,31 @@ export interface PaletteResult {
   cancelled: boolean;
 }
 
+// Split a raw input chunk into palette keys (Issue #773). One chunk can
+// carry several keys — fast typing, a pasted filter, or a coalesced read —
+// and arrow keys arrive as 3-byte escape sequences that must stay grouped.
+// Every other byte is one key; unknown escapes group as a bare Escape.
+export function splitPaletteKeys(text: string): string[] {
+  const keys: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "\x1b") {
+      const seq = text.slice(i, i + 3);
+      if (seq === "\x1b[A" || seq === "\x1b[B" || seq === "\x1bOA" || seq === "\x1bOB") {
+        keys.push(seq);
+        i += 3;
+        continue;
+      }
+      keys.push("\x1b");
+      i += 1;
+      continue;
+    }
+    keys.push(text[i]);
+    i += 1;
+  }
+  return keys;
+}
+
 export async function runPalette(
   commands: PaletteCommand[],
   stdin: NodeJS.ReadStream,
@@ -209,6 +234,15 @@ export async function runPalette(
       );
       const totalLines = lines.length;
       stdout.write(`${MOVE_UP(renderedLines)}${lines.join("\n")}\n`);
+      // Filtering can shrink the list below the previous render; erase the
+      // stale trailing rows and restore the cursor to the end of the new
+      // render so cleanup()'s line accounting stays correct (Issue #773).
+      if (totalLines < renderedLines) {
+        for (let i = totalLines; i < renderedLines; i++) {
+          stdout.write(`${CLEAR_LINE}\n`);
+        }
+        stdout.write(MOVE_UP(renderedLines - totalLines));
+      }
       renderedLines = totalLines;
     }
 
@@ -228,15 +262,26 @@ export async function runPalette(
     }
 
     function onKey(data: Buffer) {
-      const key = data.toString();
+      // A chunk can carry several keys at once — fast typing, a pasted
+      // filter, or a terminal that coalesces reads (Issue #773: the old
+      // length-1 assumption silently discarded every multi-byte chunk, so
+      // typed characters never reached the filter and Enter ran the
+      // pre-typing highlight). Split the chunk into keys and apply each.
+      for (const key of splitPaletteKeys(data.toString())) {
+        if (handleKey(key)) return;
+      }
+    }
 
+    // Handle one parsed key. Returns true when the palette closed (the
+    // caller must stop processing the rest of the chunk).
+    function handleKey(key: string): boolean {
       // Escape or Ctrl+C
       if (key === "\x1b" || key === "\x03") {
         cleanup();
         stdin.setRawMode(false);
         stdin.removeListener("data", onKey);
         resolve({ selected: null, cancelled: true });
-        return;
+        return true;
       }
 
       // Enter
@@ -249,7 +294,7 @@ export async function runPalette(
             // executing; the palette stays open (Issue #566).
             notice = `${target.name} unavailable — ${reason}`;
             render();
-            return;
+            return false;
           }
         }
         cleanup();
@@ -260,7 +305,7 @@ export async function runPalette(
         } else {
           resolve({ selected: null, cancelled: true });
         }
-        return;
+        return true;
       }
 
       // Arrow up
@@ -268,7 +313,7 @@ export async function runPalette(
         notice = "";
         if (selected > 0) selected--;
         render();
-        return;
+        return false;
       }
 
       // Arrow down
@@ -276,7 +321,7 @@ export async function runPalette(
         notice = "";
         if (selected < filtered.length - 1) selected++;
         render();
-        return;
+        return false;
       }
 
       // Backspace
@@ -286,7 +331,7 @@ export async function runPalette(
         filtered = filterCommands(commands, query);
         selected = 0;
         render();
-        return;
+        return false;
       }
 
       // Printable character
@@ -296,8 +341,9 @@ export async function runPalette(
         filtered = filterCommands(commands, query);
         selected = 0;
         render();
-        return;
+        return false;
       }
+      return false;
     }
 
     stdin.setRawMode(true);

@@ -8,6 +8,7 @@ import {
   commandDisabledReason,
   formatPalettePickerLines,
   parsePaletteSelection,
+  splitPaletteKeys,
 } from "../../src/palette.js";
 import type { PaletteCommand } from "../../src/palette.js";
 
@@ -354,5 +355,34 @@ describe("Palette: line-based picker (Issue #717)", () => {
         expect(decision.message).toContain("1 and 3");
       }
     }
+  });
+});
+
+describe("Palette: chunk key splitting (Issue #773)", () => {
+  it("splits a multi-character typed chunk into one key per character", () => {
+    expect(splitPaletteKeys("help")).toEqual(["h", "e", "l", "p"]);
+  });
+
+  it("keeps 3-byte arrow sequences grouped", () => {
+    expect(splitPaletteKeys("\x1b[A\x1b[B")).toEqual(["\x1b[A", "\x1b[B"]);
+    expect(splitPaletteKeys("\x1bOA\x1bOB")).toEqual(["\x1bOA", "\x1bOB"]);
+  });
+
+  it("splits mixed chunks of typing and navigation in order", () => {
+    expect(splitPaletteKeys("he\x1b[Bp")).toEqual(["h", "e", "\x1b[B", "p"]);
+  });
+
+  it("groups an unknown escape as a bare Escape", () => {
+    expect(splitPaletteKeys("\x1bX")).toEqual(["\x1b", "X"]);
+    expect(splitPaletteKeys("\x1b")).toEqual(["\x1b"]);
+  });
+
+  it("keeps Enter and Backspace as single keys inside a chunk", () => {
+    expect(splitPaletteKeys("ab\r")).toEqual(["a", "b", "\r"]);
+    expect(splitPaletteKeys("a\x7f")).toEqual(["a", "\x7f"]);
+  });
+
+  it("returns an empty list for an empty chunk", () => {
+    expect(splitPaletteKeys("")).toEqual([]);
   });
 });
