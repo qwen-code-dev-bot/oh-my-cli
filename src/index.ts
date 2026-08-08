@@ -310,6 +310,8 @@ import {
 import { isOfflineRequested } from "./offline-guard.js";
 import { buildGoalStatusRecord, formatGoalStatus, resumeGoalSummaryLine } from "./goal-status.js";
 import { runGoalControl } from "./goal-control.js";
+import { generateBashCompletion } from "./shell-completion.js";
+import type { CompletionFlag } from "./shell-completion.js";
 import {
   DEFAULT_LSP_SERVERS,
   detectLanguagesFromPaths,
@@ -611,6 +613,10 @@ program
   .option(
     "--image <paths...>",
     "Attach image file(s) by path for vision-capable analysis (PNG, JPEG, GIF, or WebP)",
+  )
+  .option(
+    "--setup-completions [shell]",
+    "Print a shell completion script for the CLI's flags and exit (bash today; zsh/fish not supported yet)",
   )
   .option(
     "--resume <id-or-name>",
@@ -1022,6 +1028,33 @@ program
       if (opts.note !== undefined && opts.annotateSession === undefined) {
         process.stderr.write("Error: --note requires --annotate-session <id-or-name>\n");
         process.exit(2);
+      }
+
+      // Shell completion generation (Issue #777): the script is generated
+      // from the live flag registry (commander's resolved options), so it
+      // cannot drift from --help. Bash today; other shells fail closed with
+      // an honest message instead of emitting a wrong script.
+      if (opts.setupCompletions !== undefined) {
+        const shell = String(opts.setupCompletions === true ? "bash" : opts.setupCompletions);
+        if (shell !== "bash") {
+          process.stderr.write(
+            `Error: --setup-completions supports "bash" today; "${shell}" is not supported yet\n`,
+          );
+          process.exit(2);
+        }
+        const flags: CompletionFlag[] = program.options.flatMap((option) =>
+          option.long
+            ? [
+                {
+                  long: option.long,
+                  ...(option.short ? { short: option.short } : {}),
+                  description: option.description,
+                },
+              ]
+            : [],
+        );
+        process.stdout.write(generateBashCompletion(program.name(), flags) + "\n");
+        return;
       }
 
       if (opts.deliveryWeb) {
