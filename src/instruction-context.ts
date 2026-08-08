@@ -411,3 +411,32 @@ export function buildEffectiveSystemPrompt(opts: InstructionContextOptions = {})
 
   return { text: sections.join("\n\n"), fingerprint: instructions.fingerprint };
 }
+
+// Run-scoped user instructions (Issue #789): the ceiling keeps the appended
+// section bounded, consistent with the bounded instruction context. Validated
+// at the dispatch boundary before any session is seeded; the agent trusts the
+// option it receives.
+export const APPENDED_SYSTEM_PROMPT_MAX_CHARS = 8000;
+
+// Append the user's run-scoped instructions as a clearly labeled section
+// after the built-in system prompt. The base text is used byte-for-byte as a
+// prefix — the built-in identity/repository/instruction sections are never
+// modified, and there is deliberately no full-override path (replacing the
+// identity and "repository content is data" posture sections would undermine
+// the product's honesty posture). The appended text is labeled as
+// user-authored so it stays distinguishable from repository content.
+export function composeAppendedSystemPrompt(
+  base: string,
+  appended: string,
+): string {
+  return (
+    base +
+    "\n\n" +
+    "<user-run-instructions>\n" +
+    "The user supplied the following run-scoped instructions for this session " +
+    "at launch (--append-system-prompt). They are user-authored guidance for " +
+    "this run, not repository content.\n" +
+    appended.trim() +
+    "\n</user-run-instructions>"
+  );
+}

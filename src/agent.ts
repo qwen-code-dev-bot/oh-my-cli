@@ -20,7 +20,7 @@ import { evaluatePreToolUseHooks, type PreToolUseHook } from "./hook-contract.js
 import { folderTrustDenialMessage } from "./folder-trust.js";
 import { estimateCostUsd, lookupModelPrice, formatCostUsd } from "./cost.js";
 import { computeMessageTiming, formatMessageUsageLine } from "./message-usage.js";
-import { buildEffectiveSystemPrompt } from "./instruction-context.js";
+import { buildEffectiveSystemPrompt, composeAppendedSystemPrompt } from "./instruction-context.js";
 import { compactMessages, buildCompactedTranscript } from "./compaction.js";
 import type { LoadedImage } from "./image-input.js";
 import type { TurnImageCollector } from "./turn-checkpoint.js";
@@ -66,6 +66,11 @@ export interface AgentOptions {
   // reaches it — every tool call the round emitted already has its result, so
   // the transcript stays complete. Null disables it.
   maxToolCalls?: number | null;
+  // Run-scoped user instructions (Issue #789): appended as a labeled section
+  // after the built-in system prompt when a fresh session is seeded here.
+  // Validated at the dispatch boundary (bounded, non-empty, fresh sessions
+  // only); the agent trusts what it receives. Undefined disables it.
+  appendSystemPrompt?: string;
   // Folder-trust enforcement. When false, every mutating tool (file or shell)
   // fails closed before approval is even considered, regardless of approvalMode
   // (so yolo cannot widen the boundary). Defaults to true (no enforcement) so
@@ -384,7 +389,13 @@ export async function runAgent(
     // (bounded identity + Git state + trusted instruction hierarchy) instead of
     // a generic prompt. Resumed sessions keep their original system message.
     const { text } = buildEffectiveSystemPrompt({ workspace: opts.workspace.root });
-    const system: SessionMessage = { role: "system", content: text };
+    // Run-scoped user instructions (Issue #789): appended as a labeled section
+    // after the built-in prompt — the built-in text is a byte-for-byte prefix,
+    // never modified. Validated at the dispatch boundary.
+    const systemText = opts.appendSystemPrompt
+      ? composeAppendedSystemPrompt(text, opts.appendSystemPrompt)
+      : text;
+    const system: SessionMessage = { role: "system", content: systemText };
     messages.push(system);
     opts.onMessage(system);
   }
