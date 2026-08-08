@@ -2808,6 +2808,10 @@ export interface ConversationShellOptions {
   // to the composer. Off by default; the terminal maps BEL to sound or a
   // visual highlight per its own configuration.
   bell?: boolean;
+  // Run-scoped user instructions (Issue #789): forwarded to the agent, which
+  // appends them to the built-in system prompt when seeding a fresh session.
+  // Undefined when absent; the dispatch boundary validates everything else.
+  appendSystemPrompt?: string;
   color: boolean;
   // The terminal's advertised color depth, so the shell renders with a palette the
   // terminal can actually display (basic 16-color on reduced-color terminals).
@@ -4349,6 +4353,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
       const result = await runAgent(text, history, {
         config: opts.config,
         workspace: opts.workspace,
+        appendSystemPrompt: opts.appendSystemPrompt,
         approvalMode: turnApprovalMode,
         sessionId: opts.sessionId,
         onMessage: opts.onMessage,

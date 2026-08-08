@@ -203,7 +203,7 @@ import { collectDoctorReport, doctorRecord, formatDoctorReport } from "./doctor.
 import { collectRepoReadiness, formatRepoReadiness } from "./repo-readiness.js";
 import { collectRepoContext, formatRepoContext } from "./repo-context.js";
 import { collectRepoMap, formatRepoMap, tokensToBudgetChars } from "./repo-map.js";
-import { collectInstructionContext, formatInstructionContext } from "./instruction-context.js";
+import { collectInstructionContext, formatInstructionContext, APPENDED_SYSTEM_PROMPT_MAX_CHARS } from "./instruction-context.js";
 import { planTask, formatTaskPlan } from "./task-plan.js";
 import { verifyTask, formatVerifyReport } from "./task-verify.js";
 import { reviewChange, formatChangeReviewReport } from "./change-review.js";
@@ -626,6 +626,10 @@ program
     "Set the terminal title at interactive startup: explicit text, or derived from the session name, workspace folder, or product default (off by default; headless runs never emit it)",
   )
   .option(
+    "--append-system-prompt <text>",
+    "Append run-scoped instructions as a labeled section after the built-in system prompt on a fresh session (bounded; never applies to resumed, continued, or forked sessions)",
+  )
+  .option(
     "--setup-completions [shell]",
     "Print a shell completion script for the CLI's flags and exit (bash, zsh, and fish today)",
   )
@@ -1040,6 +1044,32 @@ program
         process.stderr.write("Error: --note requires --annotate-session <id-or-name>\n");
         process.exit(2);
       }
+      // --append-system-prompt applies to fresh sessions only (Issue #789):
+      // resumed, continued, and forked sessions carry their durable system
+      // message — stored history is never rewritten, so the combination fails
+      // closed before any surface runs. The text is bounded and non-empty here
+      // so nothing partial can ever reach the seeding point.
+      if (opts.appendSystemPrompt !== undefined) {
+        if (opts.resume !== undefined || opts.continue || opts.forkSession !== undefined) {
+          process.stderr.write(
+            "Error: --append-system-prompt applies to fresh sessions only; resumed, continued, and forked sessions keep their original system message\n",
+          );
+          process.exit(2);
+        }
+        const appended = String(opts.appendSystemPrompt).trim();
+        if (appended.length === 0) {
+          process.stderr.write("Error: --append-system-prompt requires non-empty text to append\n");
+          process.exit(2);
+        }
+        if (appended.length > APPENDED_SYSTEM_PROMPT_MAX_CHARS) {
+          process.stderr.write(
+            `Error: --append-system-prompt text exceeds the ${APPENDED_SYSTEM_PROMPT_MAX_CHARS}-character ceiling (got ${appended.length})\n`,
+          );
+          process.exit(2);
+        }
+      }
+      const appendSystemPrompt =
+        opts.appendSystemPrompt !== undefined ? String(opts.appendSystemPrompt).trim() : undefined;
 
       // Shell completion generation (Issues #777, #779, #781): the script is
       // generated from the live flag registry (commander's resolved
@@ -5283,6 +5313,7 @@ program
               workspace,
               approvalMode,
               sessionId,
+              appendSystemPrompt,
               onMessage,
               sink,
               budgetUsd,
@@ -5415,6 +5446,7 @@ program
           workspace,
           approvalMode,
           sessionId,
+          appendSystemPrompt,
           onMessage,
           // Opt-in per-message usage line (#241); off by default so the default
           // conversation output is unchanged. The headless JSON stream always
@@ -5828,6 +5860,9 @@ program
             // Terminal bell on normal turn completion (Issue #783): opt-in,
             // off by default; the shell rings when a turn completes normally.
             bell: opts.bell === true,
+            // Run-scoped user instructions (Issue #789): the shell forwards
+            // them to the agent, which seeds fresh sessions only.
+            appendSystemPrompt,
             color: useColor,
             colorDepth,
             paletteCommands,
@@ -6582,6 +6617,7 @@ program
                   workspace,
                   approvalMode,
                   sessionId,
+                  appendSystemPrompt,
                   // Approval questions are asked on this surface's own
                   // interface (Issue #767) — the terminal fallback's second
                   // readline Interface used to end the session on any
