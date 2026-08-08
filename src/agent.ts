@@ -21,6 +21,8 @@ import { folderTrustDenialMessage } from "./folder-trust.js";
 import { estimateCostUsd, lookupModelPrice, formatCostUsd } from "./cost.js";
 import { computeMessageTiming, formatMessageUsageLine } from "./message-usage.js";
 import { buildEffectiveSystemPrompt, composeAppendedSystemPrompt } from "./instruction-context.js";
+import { promptWithTextAttachments } from "./text-attachment.js";
+import type { LoadedTextAttachment } from "./text-attachment.js";
 import { compactMessages, buildCompactedTranscript } from "./compaction.js";
 import type { LoadedImage } from "./image-input.js";
 import type { TurnImageCollector } from "./turn-checkpoint.js";
@@ -85,6 +87,11 @@ export interface AgentOptions {
   // as multimodal content parts; only a non-secret reference is persisted (the
   // data URL never reaches the session log).
   images?: LoadedImage[];
+  // Text-file attachments for the initial user prompt (Issue #797): pinned
+  // verbatim into the next user message as delimited, path-labeled sections.
+  // One-shot: the surface consumes its pending attachments when the turn
+  // submits.
+  textAttachments?: LoadedTextAttachment[];
   // Optional collector for safe turn undo/redo. When present, the pre-image of
   // each file a mutating-file tool touches is captured before the tool runs, so
   // the turn's workspace mutations can later be reversed without a Git reset.
@@ -401,7 +408,14 @@ export async function runAgent(
   }
 
   if (opts.appendUserMessage !== false) {
-    const userMsg: SessionMessage = { role: "user", content: userPrompt };
+    // Text attachments (Issue #797) ride inside the message content itself —
+    // unlike image bytes there is no out-of-band channel, and what the model
+    // sees is exactly what the session persists. No attachments → the prompt
+    // is used byte-for-byte.
+    const userMsg: SessionMessage = {
+      role: "user",
+      content: promptWithTextAttachments(userPrompt, opts.textAttachments ?? []),
+    };
     if (opts.images && opts.images.length > 0) {
       // In-memory copy carries the data URLs the provider needs.
       userMsg.images = opts.images.map((img) => ({
