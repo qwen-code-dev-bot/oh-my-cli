@@ -19,6 +19,7 @@ import { goalExecutionRequest } from "./session-goal.js";
 import type { AgentSink, AgentUsage, AgentRetry, AgentFallback, AgentResult } from "./agent.js";
 import { runAgent } from "./agent.js";
 import { TurnImageCollector } from "./turn-checkpoint.js";
+import { ringTurnBell, shouldRingTurnBell } from "./turn-bell.js";
 import type { ShellFailureDetail } from "./tools.js";
 import { loadImageAttachments } from "./image-input.js";
 import type { LoadedImage } from "./image-input.js";
@@ -2802,6 +2803,11 @@ export interface ConversationShellOptions {
   // interactive shell too (criterion 1 requires the distinction in interactive
   // mode). Defaults to true so a non-enforcing run is unchanged.
   mutatingAllowed?: boolean;
+  // Terminal bell on normal turn completion (Issue #783): opt-in attention
+  // signal (one BEL byte) when a turn completes normally and control returns
+  // to the composer. Off by default; the terminal maps BEL to sound or a
+  // visual highlight per its own configuration.
+  bell?: boolean;
   color: boolean;
   // The terminal's advertised color depth, so the shell renders with a palette the
   // terminal can actually display (basic 16-color on reduced-color terminals).
@@ -4391,6 +4397,13 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
       accumulateRuntime(result, Date.now() - turnStart);
       state.composer.mode = result.ok ? "focused" : "error";
       state.turn = advanceTurn(state.turn, { type: result.ok ? "complete" : "fail" });
+      // Terminal bell on normal turn completion (Issue #783): the composer
+      // just re-enabled — that is the "response is ready" moment. The bare
+      // BEL byte is not part of any escape sequence, so the terminal rings
+      // it regardless of the alternate screen.
+      if (shouldRingTurnBell(opts.bell === true, result.ok)) {
+        ringTurnBell(write);
+      }
       // An operator run-cap stop is surfaced like the spend-budget stop (Issue
       // #515): a visible notice naming the bound, no simulated continuation.
       if (result.reason === "max_turns_reached") {
