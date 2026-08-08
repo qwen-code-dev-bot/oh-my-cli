@@ -7,6 +7,7 @@ import {
   previewArtifact,
   formatArtifactPreview,
   DEFAULT_PREVIEW_POLICY,
+  defaultDeliverablePath,
 } from "../../src/artifact-preview.js";
 
 // Fixture-based coverage for the safe static HTML artifact preview (Issue
@@ -263,5 +264,24 @@ describe("read-only guarantee", () => {
     previewArtifact(ws, "a.html");
 
     expect(fs.readFileSync(path.join(tmpDir, "a.html"), "utf-8")).toBe(before);
+  });
+});
+
+describe("defaultDeliverablePath (Issue #803)", () => {
+  it("strips one .html/.htm extension and appends .safe.html beside the artifact", () => {
+    expect(defaultDeliverablePath("artifact.html")).toBe("artifact.safe.html");
+    expect(defaultDeliverablePath("artifact.htm")).toBe("artifact.safe.html");
+    expect(defaultDeliverablePath("artifact.HTML")).toBe("artifact.safe.html");
+  });
+
+  it("keeps the deliverable beside the artifact in subdirectories", () => {
+    expect(defaultDeliverablePath("sub/dir/artifact.html")).toBe(
+      path.join("sub/dir", "artifact.safe.html"),
+    );
+  });
+
+  it("appends .safe.html when there is no html extension to strip", () => {
+    expect(defaultDeliverablePath("artifact.txt")).toBe("artifact.txt.safe.html");
+    expect(defaultDeliverablePath("artifact.html.bak")).toBe("artifact.html.bak.safe.html");
   });
 });

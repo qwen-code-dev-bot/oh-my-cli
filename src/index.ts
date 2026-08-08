@@ -361,7 +361,7 @@ import {
   defaultTrustStorePath,
   workspaceTrustKey,
 } from "./folder-trust.js";
-import { previewArtifact, formatArtifactPreview } from "./artifact-preview.js";
+import { previewArtifact, formatArtifactPreview, defaultDeliverablePath } from "./artifact-preview.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { installSigintCancel, SIGINT_EXIT_CODE } from "./sigint-cancel.js";
 import { redactSecrets, redactHomePath, analyzeImpact, formatImpact } from "./permission-impact.js";
@@ -5975,6 +5975,52 @@ program
                 trust.decision.state === "trusted" ||
                 trust.decision.state === "sandbox-enforced";
               return formatArtifactPreview(previewArtifact(workspace, target, { trusted }));
+            },
+          },
+          {
+            // /export-artifact (Issue #803): interactive parity with the
+            // headless --preview-artifact --out deliverable (#801). Same
+            // engine, same fail-closed contract: refused previews write
+            // nothing; the output path is workspace-confined (resolveSafe)
+            // and never overwritten; the original artifact stays untouched.
+            name: "/export-artifact",
+            description: "Export the safe deliverable of a workspace HTML artifact (audit + one new file)",
+            action: (args?: string) => {
+              const parts = String(args ?? "").trim().split(/\s+/).filter(Boolean);
+              if (parts.length === 0 || parts.length > 2) {
+                return "Usage: /export-artifact <path> [out] — deliver the sanitized artifact (default: <basename>.safe.html beside it)";
+              }
+              const [target, explicitOut] = parts;
+              const trust = resolveFolderTrust({
+                workspacePath: workspace.root,
+                env: process.env,
+                trustThisRun: Boolean(opts.trust),
+              });
+              const trusted =
+                trust.decision.state === "trusted" ||
+                trust.decision.state === "sandbox-enforced";
+              const result = previewArtifact(workspace, target, { trusted });
+              const report = formatArtifactPreview(result);
+              if (result.renderStatus !== "ok") {
+                // Nothing safe exists to deliver; the refusal block says why.
+                return report;
+              }
+              const outTarget = explicitOut ?? defaultDeliverablePath(target);
+              let absOut: string;
+              try {
+                absOut = workspace.resolveSafe(outTarget);
+              } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                return `${report}\n\nDeliverable failed: ${msg}`;
+              }
+              if (fs.existsSync(absOut)) {
+                return `${report}\n\nDeliverable failed: target already exists: ${outTarget} (refusing to overwrite)`;
+              }
+              // Byte-faithful deliverable: the engine's sanitized lines,
+              // joined with a single trailing newline (files end with a
+              // newline) — the same rule as the headless --out path (#801).
+              fs.writeFileSync(absOut, `${result.sanitizedLines.join("\n")}\n`, "utf8");
+              return `${report}\n\nDeliverable: ${outTarget} (safe to open in a browser)`;
             },
           },
         ];
