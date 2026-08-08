@@ -23,6 +23,8 @@ import { ringTurnBell, shouldRingTurnBell } from "./turn-bell.js";
 import type { ShellFailureDetail } from "./tools.js";
 import { loadImageAttachments } from "./image-input.js";
 import type { LoadedImage } from "./image-input.js";
+import { loadMixedAttachments } from "./text-attachment.js";
+import type { LoadedTextAttachment } from "./text-attachment.js";
 import { filterCommands, runPalette, slashPreviewQuery, commandDisabledReason } from "./palette.js";
 import type { PaletteCommand } from "./palette.js";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
@@ -4108,10 +4110,14 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
   // Images staged via /attach are sent with the next submitted prompt, then
   // cleared so they are not re-attached to later turns.
   const pendingImages: LoadedImage[] = [];
+  // Text files staged via /attach are pinned into the next prompt, then
+  // cleared (Issue #797) — same one-shot contract as images.
+  const pendingTexts: LoadedTextAttachment[] = [];
 
   function queuePrompt(
     text: string,
     images: LoadedImage[] = [],
+    texts: LoadedTextAttachment[] = [],
     goalRevision?: number,
   ): void {
     state.composer.mode = "submitting";
@@ -4133,7 +4139,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
     }
     state.hintsLearned = true;
     scheduleRender();
-    submitChain = submitChain.then(() => runOne(text, images, goalRevision));
+    submitChain = submitChain.then(() => runOne(text, images, texts, goalRevision));
   }
 
   function submit(): void {
@@ -4193,7 +4199,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
           if (!succeeded || slash.name !== "/goal" || !opts.loadGoal) return;
           const request = goalExecutionRequest(slash.args, opts.loadGoal());
           if (!request) return;
-          queuePrompt(request.prompt, pendingImages.splice(0), request.revision);
+          queuePrompt(request.prompt, pendingImages.splice(0), pendingTexts.splice(0), request.revision);
         });
       } else {
         state.transcript.push({
@@ -4210,14 +4216,31 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
       slashPreviewDismissedFor = null;
       const paths = text.slice("/attach".length).split(/\s+/).filter(Boolean);
       if (paths.length === 0) {
-        state.transcript.push({ kind: "notice", text: "usage: /attach <image-path> [more-paths...]" });
+        state.transcript.push({
+          kind: "notice",
+          text: "usage: /attach <path> [more-paths...] — images and text files (text pins verbatim into the next prompt)",
+        });
       } else {
         try {
-          const loaded = loadImageAttachments(paths, opts.workspace);
-          pendingImages.push(...loaded);
+          const mixed = loadMixedAttachments(paths, opts.workspace);
+          pendingImages.push(...mixed.images);
+          pendingTexts.push(...mixed.texts);
+          const parts: string[] = [];
+          if (mixed.images.length > 0) {
+            parts.push(
+              `${mixed.images.length} image(s): ` +
+                mixed.images.map((i) => `${i.name} (${i.mediaType})`).join(", "),
+            );
+          }
+          if (mixed.texts.length > 0) {
+            parts.push(
+              `${mixed.texts.length} text file(s): ` +
+                mixed.texts.map((t) => `${t.name} (${t.bytes} bytes)`).join(", "),
+            );
+          }
           state.transcript.push({
             kind: "notice",
-            text: `attached ${loaded.length} image(s): ${loaded.map((i) => `${i.name} (${i.mediaType})`).join(", ")}`,
+            text: `attached ${parts.join(" · ")}`,
           });
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -4250,7 +4273,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
     state.composer.text = "";
     state.slashPreview = undefined;
     slashPreviewDismissedFor = null;
-    queuePrompt(text, pendingImages.splice(0));
+    queuePrompt(text, pendingImages.splice(0), pendingTexts.splice(0));
   }
 
   // While a turn is in flight, read-only allowlisted commands run immediately
@@ -4327,6 +4350,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
   async function runOne(
     text: string,
     images: LoadedImage[] = [],
+    texts: LoadedTextAttachment[] = [],
     goalRevision?: number,
   ): Promise<void> {
     const generation = ++runGeneration;
@@ -4367,6 +4391,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
         fallbackModel: opts.config.fallbackModel ?? null,
         mutatingAllowed: opts.mutatingAllowed ?? true,
         images,
+        textAttachments: texts,
         turnImages,
         // Ctrl+C bumps runGeneration (onCtrlC); polling it here lets the run
         // stop at the next cancel boundary with a truthful persisted outcome

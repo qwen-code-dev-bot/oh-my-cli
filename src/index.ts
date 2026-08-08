@@ -369,6 +369,8 @@ import { createBottleneckCollector, formatBottleneckReport } from "./run-bottlen
 import { createFailureTaxonomyCollector, formatFailureTaxonomyReport } from "./run-failure-taxonomy.js";
 import { readTaskFixtureFile, fixtureStreamProvider, type TaskFixture } from "./task-fixture.js";
 import { loadImageAttachments, imageRef } from "./image-input.js";
+import { loadMixedAttachments } from "./text-attachment.js";
+import type { LoadedTextAttachment } from "./text-attachment.js";
 import type { LoadedImage } from "./image-input.js";
 import { createTools } from "./tools.js";
 import { parseBudgetUsd } from "./cost.js";
@@ -616,6 +618,10 @@ program
   .option(
     "--image <paths...>",
     "Attach image file(s) by path for vision-capable analysis (PNG, JPEG, GIF, or WebP)",
+  )
+  .option(
+    "--attach <paths...>",
+    "Attach file(s) by path for the next run: images route to the vision path, text files are pinned verbatim into the prompt (bounded, UTF-8 validated)",
   )
   .option(
     "--bell",
@@ -5316,7 +5322,23 @@ program
             process.exit(1);
           }
         }
-        const attachmentRefs = images.map(imageRef);
+        // Mixed attachments (Issue #797): --attach accepts images and text
+      // files; images route through the existing path, texts pin verbatim
+      // into the next user message. Failures stay honest and exit before any
+      // provider spend.
+      let textAttachments: LoadedTextAttachment[] = [];
+      if (opts.attach && opts.attach.length > 0) {
+        try {
+          const mixed = loadMixedAttachments(opts.attach, workspace);
+          images = images.concat(mixed.images);
+          textAttachments = mixed.texts;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`Error: ${msg}\n`);
+          process.exit(1);
+        }
+      }
+      const attachmentRefs = images.map(imageRef);
 
         // The run summary (opt-in) points at the session log as its evidence,
         // with the host home directory collapsed to ~ so the path stays private.
@@ -5367,6 +5389,7 @@ program
               fallbackModel: replayFixture ? null : (config.fallbackModel ?? null),
               mutatingAllowed,
               images,
+              textAttachments,
               turnImages,
               preToolUseHooks,
               bottleneck: bottleneck?.collector,
@@ -5502,6 +5525,7 @@ program
           fallbackModel: replayFixture ? null : (config.fallbackModel ?? null),
           mutatingAllowed,
           images,
+          textAttachments,
           turnImages,
           preToolUseHooks,
           bottleneck: bottleneck?.collector,
@@ -6314,6 +6338,9 @@ program
 
         // Images staged via /attach are sent with the next prompt, then cleared.
         const pendingImages: LoadedImage[] = [];
+        // Text files staged via /attach are pinned into the next prompt, then
+        // cleared (Issue #797).
+        const pendingTexts: LoadedTextAttachment[] = [];
 
         // Idempotent prompt: a settling turn and the palette picker can both
         // reach for a fresh prompt; readline supports exactly one pending
@@ -6590,15 +6617,28 @@ program
             if (answer.trim().startsWith("/attach")) {
               const paths = answer.trim().slice("/attach".length).split(/\s+/).filter(Boolean);
               if (paths.length === 0) {
-                process.stderr.write("Usage: /attach <image-path> [more-paths...]\n");
+                process.stderr.write(
+                  "Usage: /attach <path> [more-paths...] — images and text files (text pins verbatim into the next prompt)\n",
+                );
               } else {
                 try {
-                  const loaded = loadImageAttachments(paths, workspace);
-                  pendingImages.push(...loaded);
-                  process.stderr.write(
-                    `Attached ${loaded.length} image(s): ` +
-                      `${loaded.map((i) => `${i.name} (${i.mediaType})`).join(", ")}\n`,
-                  );
+                  const mixed = loadMixedAttachments(paths, workspace);
+                  pendingImages.push(...mixed.images);
+                  pendingTexts.push(...mixed.texts);
+                  const parts: string[] = [];
+                  if (mixed.images.length > 0) {
+                    parts.push(
+                      `${mixed.images.length} image(s): ` +
+                        mixed.images.map((i) => `${i.name} (${i.mediaType})`).join(", "),
+                    );
+                  }
+                  if (mixed.texts.length > 0) {
+                    parts.push(
+                      `${mixed.texts.length} text file(s): ` +
+                        mixed.texts.map((t) => `${t.name} (${t.bytes} bytes)`).join(", "),
+                    );
+                  }
+                  process.stderr.write(`Attached ${parts.join(" · ")}\n`);
                 } catch (err: unknown) {
                   const msg = err instanceof Error ? err.message : String(err);
                   process.stderr.write(`Error: ${msg}\n`);
@@ -6639,6 +6679,7 @@ program
               const messageCountBefore = store.load(sessionId).length;
               const turnImages = new TurnImageCollector();
               const images = pendingImages.splice(0);
+              const textAttachments = pendingTexts.splice(0);
               // Cooperative SIGINT cancel on the readline surface (Issue
               // #743), same contract as the headless plain path (#552): one
               // bounded interruption notice, a stop at the next cancel
@@ -6674,6 +6715,7 @@ program
                   fallbackModel: config.fallbackModel ?? null,
                   mutatingAllowed,
                   images,
+                  textAttachments,
                   turnImages,
                   preToolUseHooks,
                   cancelRequested: sigint.cancelRequested,
