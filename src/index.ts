@@ -361,6 +361,7 @@ import {
   defaultTrustStorePath,
   workspaceTrustKey,
 } from "./folder-trust.js";
+import { previewArtifact, formatArtifactPreview } from "./artifact-preview.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { installSigintCancel, SIGINT_EXIT_CODE } from "./sigint-cancel.js";
 import { redactSecrets, redactHomePath, analyzeImpact, formatImpact } from "./permission-impact.js";
@@ -817,6 +818,10 @@ program
   .option(
     "--inspect-session <id-or-name>",
     "Show a read-only health card for a session (integrity verdict, sidecar inventory, meta provenance, next-step hints), by exact id or user-owned name (add --output json for automation) and exit",
+  )
+  .option(
+    "--preview-artifact <path>",
+    "Render a safe read-only preview of a workspace HTML artifact (no provider, no writes; refuses untrusted/out-of-scope/non-HTML/oversized input)",
   )
   .option(
     "--annotate-session <id-or-name>",
@@ -2167,6 +2172,43 @@ program
           process.stdout.write(renderReportLines(formatSessionInspect(record), opts.ascii));
         }
         process.exit(0);
+      }
+
+      // Artifact preview mode (Issue #799): the first surface for the built
+      // safe-preview engine (#344). Strictly read-only — no provider, no
+      // session, no writes; the engine is fail-closed by construction
+      // (scripts, network, navigation, filesystem, and form submission all
+      // disabled, and every blocked item reported), so this surface only
+      // resolves the trust posture and prints the result. The preview is
+      // refused for untrusted workspaces (exit 1) exactly as the engine
+      // dictates; the trust decision follows the folder-trust posture
+      // (--trust opts in for this run only).
+      if (opts.previewArtifact !== undefined) {
+        const format = String(opts.output ?? "text");
+        if (format !== "text" && format !== "json") {
+          process.stderr.write(`Error: invalid output format "${format}"\n`);
+          process.exit(2);
+        }
+        const target = String(opts.previewArtifact).trim();
+        if (target === "") {
+          process.stderr.write("Error: --preview-artifact requires a non-empty path\n");
+          process.exit(2);
+        }
+        const workspace = new Workspace(opts.workspace);
+        const trust = resolveFolderTrust({
+          workspacePath: workspace.root,
+          env: process.env,
+          trustThisRun: opts.trust === true,
+        });
+        const trusted =
+          trust.decision.state === "trusted" || trust.decision.state === "sandbox-enforced";
+        const result = previewArtifact(workspace, target, { trusted });
+        if (format === "json") {
+          process.stdout.write(`${JSON.stringify(result)}\n`);
+        } else {
+          process.stdout.write(renderReportLines(formatArtifactPreview(result).split("\n"), opts.ascii));
+        }
+        process.exit(result.renderStatus === "ok" ? 0 : 1);
       }
 
       // Session-annotate mode (Issue #602): append one durable note to a
@@ -5863,6 +5905,30 @@ program
             name: "/activity",
             description: "Show the activity stream as progressive-disclosure cards (read-only)",
             action: () => formatActivityView([], initialActivityViewState()).join("\n"),
+          },
+          {
+            // /preview-artifact (Issue #799): the interactive surface for the
+            // built safe-preview engine (#344) — the same read-only, trust-gated,
+            // fail-closed contract as the headless flag. The engine returns the
+            // refusal block for untrusted/out-of-scope/non-HTML/oversized input;
+            // the surface only prints it. No provider, no writes, no session.
+            name: "/preview-artifact",
+            description: "Preview a workspace HTML artifact safely (read-only)",
+            action: (args?: string) => {
+              const target = String(args ?? "").trim();
+              if (target === "") {
+                return "Usage: /preview-artifact <path> — safe read-only preview of a workspace HTML artifact";
+              }
+              const trust = resolveFolderTrust({
+                workspacePath: workspace.root,
+                env: process.env,
+                trustThisRun: Boolean(opts.trust),
+              });
+              const trusted =
+                trust.decision.state === "trusted" ||
+                trust.decision.state === "sandbox-enforced";
+              return formatArtifactPreview(previewArtifact(workspace, target, { trusted }));
+            },
           },
         ];
 
