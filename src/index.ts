@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import { resolveSettingsPath, describeResolvedConfig } from "./settings.js";
+import { resolveSettingsPath, describeResolvedConfig, resolveModelOverride } from "./settings.js";
 import {
   RUNTIME_SLASH_COMMANDS,
   RUNTIME_SLASH_COMMAND_DESCRIPTORS,
@@ -844,6 +844,10 @@ program
     "--fallback-model <model>",
     "Degrade at most once to this model for the rest of the run when the primary model fails with a retryable provider error; validated fail-closed before any work starts (env: OMC_FALLBACK_MODEL)",
   )
+  .option(
+    "--model <id>",
+    "Override the configured model for this run only — every surface sees the override and it never persists (resolved alongside the profile, settings, and env chain)",
+  )
   .option("--goal-status <id-or-name>", "Show a session's read-only durable Goal checkpoint (status, objective, timestamps, revision), by exact id or user-owned name (add --output json for automation) and exit")
   .option("--goal <args>", "Control a session's durable Goal headlessly against --session: an objective sets it; pause / resume / achieve / clear / status behave like the TUI /goal command (add --output json for automation) and exit")
   .option("--lsp-status", "Show the read-only, workspace-bound language-server discovery and readiness view for the current workspace (add --output json for automation) and exit")
@@ -1070,6 +1074,18 @@ program
       }
       const appendSystemPrompt =
         opts.appendSystemPrompt !== undefined ? String(opts.appendSystemPrompt).trim() : undefined;
+      // Per-run model selection (Issue #791): validate at the dispatch
+      // boundary so an empty override fails closed (exit 2) before any
+      // surface runs or any provider call is possible.
+      if (opts.model !== undefined) {
+        try {
+          resolveModelOverride(String(opts.model));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`${msg}\n`);
+          process.exit(2);
+        }
+      }
 
       // Shell completion generation (Issues #777, #779, #781): the script is
       // generated from the live flag registry (commander's resolved
@@ -4719,6 +4735,14 @@ program
         process.stderr.write(describeResolvedConfig(resolved) + "\n");
         // Offline posture is reported without any network probe (Issue #576).
         if (offlineRequested) resolved.config.offline = true;
+        // Per-run model selection (Issue #791): --model wins over the
+        // configured model for this run only — never persisted. Applied
+        // before the fallback resolution so #590 keys off the selected
+        // primary; validated at the dispatch boundary above.
+        const preflightModelOverride = resolveModelOverride(opts.model);
+        if (preflightModelOverride !== undefined) {
+          resolved.config.model = preflightModelOverride;
+        }
         // One-shot fallback model (Issue #590): resolved and validated
         // alongside the primary; an invalid override fails closed.
         try {
@@ -4761,6 +4785,13 @@ program
           "Offline mode: provider routes are restricted to loopback endpoints.\n",
         );
       }
+      // Per-run model selection (Issue #791): --model wins over the
+      // configured model for this run only — never persisted. Applied before
+      // the fallback resolution so #590 keys off the selected primary;
+      // validated at the dispatch boundary above.
+      const modelOverride = resolveModelOverride(opts.model);
+      if (modelOverride !== undefined) config.model = modelOverride;
+
       // One-shot fallback model (Issue #590): --fallback-model wins over
       // OMC_FALLBACK_MODEL; an invalid override fails closed before any work.
       try {
