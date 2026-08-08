@@ -125,4 +125,111 @@ describe("Integration: --preview-artifact surface (Issue #799)", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("non-empty path");
   });
+
+  describe("--out deliverable mode (Issue #801)", () => {
+    const outPath = () => path.join(workspaceDir, "deliverable.html");
+
+    it("writes the sanitized artifact byte-faithful and reports alongside", async () => {
+      const before = listWorkspace();
+      const r = await runCli(
+        [
+          "--preview-artifact", "artifact.html", "--trust",
+          "--out", "deliverable.html", "--output", "json",
+          "--workspace", workspaceDir,
+        ],
+        baseEnv,
+      );
+      expect(r.code).toBe(0);
+      const rec = JSON.parse(r.stdout);
+      expect(rec.renderStatus).toBe("ok");
+      expect(rec.outPath).toBe("deliverable.html");
+      // Byte-faithful: file == sanitizedLines joined, plus the trailing newline.
+      const expected = `${rec.sanitizedLines.join("\n")}\n`;
+      expect(fs.readFileSync(outPath(), "utf8")).toBe(expected);
+      // The deliverable carries the BLOCKED markers, never the raw script.
+      expect(fs.readFileSync(outPath(), "utf8")).toContain("BLOCKED: script");
+      expect(fs.readFileSync(outPath(), "utf8")).not.toContain("<script>alert");
+      // The workspace gained exactly the deliverable (sorted listing).
+      expect(listWorkspace()).toBe(
+        [...before.split("\n"), "deliverable.html"].sort().join("\n"),
+      );
+      fs.rmSync(outPath());
+    });
+
+    it("prints the report alongside the deliverable in text mode", async () => {
+      const textOut = path.join(workspaceDir, "deliverable-text.html");
+      const r = await runCli(
+        [
+          "--preview-artifact", "artifact.html", "--trust",
+          "--out", "deliverable-text.html",
+          "--workspace", workspaceDir,
+        ],
+        baseEnv,
+      );
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("Artifact Preview");
+      expect(r.stdout).toContain("Deliverable: deliverable-text.html (safe to open in a browser)");
+      fs.rmSync(textOut);
+    });
+
+    it("never overwrites an existing target (honest error, exit 2, original untouched)", async () => {
+      fs.writeFileSync(outPath(), "ORIGINAL BYTES");
+      const r = await runCli(
+        [
+          "--preview-artifact", "artifact.html", "--trust",
+          "--out", "deliverable.html",
+          "--workspace", workspaceDir,
+        ],
+        baseEnv,
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("already exists");
+      expect(r.stderr).toContain("refusing to overwrite");
+      expect(fs.readFileSync(outPath(), "utf8")).toBe("ORIGINAL BYTES");
+      fs.rmSync(outPath());
+    });
+
+    it("writes nothing for a refused preview (exit 1, report still prints)", async () => {
+      const r = await runCli(
+        [
+          "--preview-artifact", "artifact.html",
+          "--out", "deliverable.html",
+          "--workspace", workspaceDir,
+        ],
+        baseEnv,
+      );
+      expect(r.code).toBe(1);
+      expect(r.stdout).toContain("Artifact Preview — REFUSED");
+      expect(fs.existsSync(outPath())).toBe(false);
+    });
+
+    it("fails closed (exit 2) when the output path escapes the workspace", async () => {
+      const r = await runCli(
+        [
+          "--preview-artifact", "artifact.html", "--trust",
+          "--out", "../escape-out.html",
+          "--workspace", workspaceDir,
+        ],
+        baseEnv,
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--out");
+      expect(fs.existsSync(path.join(workspaceDir, "..", "escape-out.html"))).toBe(false);
+    });
+
+    it("records outPath null in the JSON record for a refused preview", async () => {
+      const r = await runCli(
+        [
+          "--preview-artifact", "artifact.html",
+          "--out", "deliverable.html", "--output", "json",
+          "--workspace", workspaceDir,
+        ],
+        baseEnv,
+      );
+      expect(r.code).toBe(1);
+      const rec = JSON.parse(r.stdout);
+      expect(rec.renderStatus).toBe("refused");
+      expect(rec.outPath).toBeNull();
+    });
+  });
 });
