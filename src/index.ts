@@ -865,7 +865,7 @@ program
   .option("--tasks <id-or-name>", "Show a session's read-only background-task center with durable receipts, reconciled against real process state, by exact id or user-owned name (add --output json for automation) and exit")
   .option("--browse-sessions", "Interactively browse, search, and resume a previous session (requires a terminal)")
   .option("--export-session <id-or-name>", "Export a session locally as redacted Markdown + a deterministic JSON manifest, by exact id or user-owned name, and exit")
-  .option("--out <dir>", "Output directory for --export-session (default: current directory)")
+  .option("--out <dir>", "Output for --export-session (a directory; default: current directory) or --preview-artifact (a workspace file path for the sanitized deliverable; never overwritten)")
   .option("--force", "Overwrite existing output files (--export-session, --summary-out)")
   .option(
     "--bundle-session <id-or-name>",
@@ -2203,10 +2203,57 @@ program
         const trusted =
           trust.decision.state === "trusted" || trust.decision.state === "sandbox-enforced";
         const result = previewArtifact(workspace, target, { trusted });
+        // Deliverable mode (Issue #801): --out writes the engine's sanitized
+        // output — the only safe form of the artifact — to a workspace path
+        // the user can open in a real browser. Honest gates first: usage
+        // errors exit 2 before anything is written or printed; a refused
+        // preview has nothing safe to deliver, so it prints its report and
+        // exits 1 without writing. The write itself is confined by the same
+        // resolveSafe contract as the input and never overwrites.
+        let outPath: string | undefined;
+        if (opts.out !== undefined) {
+          const outTarget = String(opts.out).trim();
+          if (outTarget === "") {
+            process.stderr.write("Error: --out requires a non-empty path\n");
+            process.exit(2);
+          }
+          if (result.renderStatus !== "ok") {
+            // Nothing safe exists to deliver; the report below says why.
+            if (format === "json") {
+              process.stdout.write(`${JSON.stringify({ ...result, outPath: null })}\n`);
+            } else {
+              process.stdout.write(renderReportLines(formatArtifactPreview(result).split("\n"), opts.ascii));
+            }
+            process.exit(1);
+          }
+          let absOut: string;
+          try {
+            absOut = workspace.resolveSafe(outTarget);
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            process.stderr.write(`Error: --out ${msg}\n`);
+            process.exit(2);
+          }
+          if (fs.existsSync(absOut)) {
+            process.stderr.write(
+              `Error: --out target already exists: ${outTarget} (refusing to overwrite)\n`,
+            );
+            process.exit(2);
+          }
+          // Byte-faithful deliverable: the engine's sanitized lines, joined
+          // with a single trailing newline (files end with a newline).
+          fs.writeFileSync(absOut, `${result.sanitizedLines.join("\n")}\n`, "utf8");
+          outPath = outTarget;
+        }
         if (format === "json") {
-          process.stdout.write(`${JSON.stringify(result)}\n`);
+          const record = outPath !== undefined ? { ...result, outPath } : result;
+          process.stdout.write(`${JSON.stringify(record)}\n`);
         } else {
-          process.stdout.write(renderReportLines(formatArtifactPreview(result).split("\n"), opts.ascii));
+          const lines = formatArtifactPreview(result).split("\n");
+          if (outPath !== undefined) {
+            lines.push(``, `Deliverable: ${outPath} (safe to open in a browser)`);
+          }
+          process.stdout.write(renderReportLines(lines, opts.ascii));
         }
         process.exit(result.renderStatus === "ok" ? 0 : 1);
       }
