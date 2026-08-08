@@ -209,4 +209,19 @@ describe("Integration: session journal follow (--follow, Issue #688)", () => {
       expect(fs.readFileSync(path.join(sessionsDir(), f), "utf-8")).toBe(content);
     }
   });
+
+  it("exits 0 on SIGTERM across repeated cycles — the timing window stays covered (Issue #795)", async () => {
+    // The CI flake was load-dependent: the follow process died by signal
+    // instead of its clean-exit handler. Repeating the spawn -> snapshot ->
+    // SIGTERM cycle keeps the timing window covered on every run. The
+    // assertion stays strict: clean exit is 0, never signal death.
+    const CYCLES = 10;
+    for (let cycle = 0; cycle < CYCLES; cycle += 1) {
+      const follow = spawnFollow(["--session-journal", sessionId, "--follow", "--poll-ms", "100"]);
+      await waitFor(() => follow.stdout().includes("Session journal —"));
+      follow.proc.kill("SIGTERM");
+      const code = await follow.exitCode();
+      expect(code, `cycle ${cycle} exited ${code}`).toBe(0);
+    }
+  }, 120_000);
 });
