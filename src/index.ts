@@ -40,7 +40,7 @@ import {
   settleGoalExecution,
 } from "./session-goal.js";
 import { runAgent, createConsoleSink } from "./agent.js";
-import type { AgentResult } from "./agent.js";
+import type { AgentResult, AgentSink } from "./agent.js";
 import type { ApprovalMode } from "./approval.js";
 import type { SessionMessage } from "./session.js";
 import type { SessionLock, SessionLockInfo } from "./session-lock.js";
@@ -359,7 +359,7 @@ import {
 } from "./folder-trust.js";
 import { HeadlessWriter, createHeadlessSink, startEvent } from "./headless-protocol.js";
 import { installSigintCancel, SIGINT_EXIT_CODE } from "./sigint-cancel.js";
-import { redactSecrets, redactHomePath } from "./permission-impact.js";
+import { redactSecrets, redactHomePath, analyzeImpact, formatImpact } from "./permission-impact.js";
 import { buildRunSummary, formatRunSummary, writeRunSummaryFile } from "./run-summary.js";
 import { createBottleneckCollector, formatBottleneckReport } from "./run-bottleneck.js";
 import { createFailureTaxonomyCollector, formatFailureTaxonomyReport } from "./run-failure-taxonomy.js";
@@ -6263,6 +6263,26 @@ program
         };
         process.stdin.on("data", ctrlKHandler);
 
+        // The readline surface owns its approval questions (Issue #767), the
+        // same way the full-screen shell coordinates approvals within its own
+        // input model: ask on the main interface. The agent's terminal
+        // fallback (promptApproval) creates a second readline Interface over
+        // this very stdin and closes it after the answer — that ended the
+        // session regardless of the decision. Same prompt text and impact
+        // classification as the fallback; only the owner changes.
+        const readlineApprovalSink: AgentSink = {
+          ...createConsoleSink(),
+          requestApproval: ({ name, args }) => {
+            const summary = formatImpact(analyzeImpact(name, args));
+            return new Promise<boolean>((resolve) => {
+              rl.question(
+                `\n⚠ Tool "${name}" requires approval.\n${summary}\nAllow? (y/N) `,
+                (answer) => resolve(answer.toLowerCase() === "y"),
+              );
+            });
+          },
+        };
+
         // One dispatch path for typed lines and palette selections (Issue
         // #717): whatever the palette advertises executes with exactly the
         // semantics and visible output of typing it.
@@ -6422,6 +6442,11 @@ program
                   workspace,
                   approvalMode,
                   sessionId,
+                  // Approval questions are asked on this surface's own
+                  // interface (Issue #767) — the terminal fallback's second
+                  // readline Interface used to end the session on any
+                  // decision.
+                  sink: readlineApprovalSink,
                   onMessage,
                   budgetUsd,
                   maxTurns,
