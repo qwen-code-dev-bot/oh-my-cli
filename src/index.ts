@@ -313,6 +313,7 @@ import { runGoalControl } from "./goal-control.js";
 import { generateBashCompletion, generateZshCompletion, generateFishCompletion } from "./shell-completion.js";
 import type { CompletionFlag } from "./shell-completion.js";
 import { ringTurnBell, shouldRingTurnBell } from "./turn-bell.js";
+import { composeTerminalTitle, titleEscapeSequences } from "./terminal-title.js";
 import {
   DEFAULT_LSP_SERVERS,
   detectLanguagesFromPaths,
@@ -618,6 +619,10 @@ program
   .option(
     "--bell",
     "Ring the terminal bell when a turn completes normally and control returns (off by default)",
+  )
+  .option(
+    "--title [text]",
+    "Set the terminal title at interactive startup: explicit text, or derived from the session name, workspace folder, or product default (off by default; headless runs never emit it)",
   )
   .option(
     "--setup-completions [shell]",
@@ -5485,6 +5490,22 @@ program
         if (!process.stdin.isTTY) {
           process.stderr.write("Error: interactive mode requires a TTY. Use -p for non-interactive.\n");
           process.exit(1);
+        }
+
+        // Terminal title (Issue #785): opt-in, interactive-only, written
+        // once at startup before either surface renders — it orients the
+        // user's tab/window/multiplexer pane, naming it after the running
+        // session. Headless paths never reach this branch, so pipes never
+        // see title bytes; a piped stdout is left untouched too. No attempt
+        // to restore a previous title on exit — the terminal owns title
+        // lifetime and the prior title is not portably readable.
+        if (opts.title !== undefined && process.stdout.isTTY) {
+          const title = composeTerminalTitle({
+            ...(typeof opts.title === "string" ? { explicitText: opts.title } : {}),
+            sessionName: store.readName(sessionId),
+            workspaceRoot: workspace.root,
+          });
+          process.stdout.write(titleEscapeSequences(title, process.env));
         }
 
         const useColor = colorEnabled({ noColor: opts.color === false, env: process.env });
