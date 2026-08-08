@@ -312,6 +312,7 @@ import { buildGoalStatusRecord, formatGoalStatus, resumeGoalSummaryLine } from "
 import { runGoalControl } from "./goal-control.js";
 import { generateBashCompletion, generateZshCompletion, generateFishCompletion } from "./shell-completion.js";
 import type { CompletionFlag } from "./shell-completion.js";
+import { ringTurnBell, shouldRingTurnBell } from "./turn-bell.js";
 import {
   DEFAULT_LSP_SERVERS,
   detectLanguagesFromPaths,
@@ -613,6 +614,10 @@ program
   .option(
     "--image <paths...>",
     "Attach image file(s) by path for vision-capable analysis (PNG, JPEG, GIF, or WebP)",
+  )
+  .option(
+    "--bell",
+    "Ring the terminal bell when a turn completes normally and control returns (off by default)",
   )
   .option(
     "--setup-completions [shell]",
@@ -5379,6 +5384,11 @@ program
             rounds: result.rounds,
             reason: result.reason,
           });
+          // Terminal bell on normal completion (Issue #783): stderr here so
+          // the stdout NDJSON protocol stays parseable byte-for-byte.
+          if (shouldRingTurnBell(opts.bell === true, result.ok)) {
+            ringTurnBell((chunk) => process.stderr.write(chunk));
+          }
           process.exit(exitCode);
         }
 
@@ -5463,6 +5473,11 @@ program
           process.stdout.write(
             "\n" + formatFailureTaxonomyReport(failureTaxonomy.build(Date.now() - startedAt, result.reason)) + "\n",
           );
+        }
+        // Terminal bell on normal completion (Issue #783): the response is
+        // ready; stdout carries the conversation the user is watching.
+        if (shouldRingTurnBell(opts.bell === true, result.ok)) {
+          ringTurnBell((chunk) => process.stdout.write(chunk));
         }
         process.exit(exitCode);
       } else {
@@ -5788,6 +5803,9 @@ program
             maxToolCalls,
             compactThreshold,
             mutatingAllowed,
+            // Terminal bell on normal turn completion (Issue #783): opt-in,
+            // off by default; the shell rings when a turn completes normally.
+            bell: opts.bell === true,
             color: useColor,
             colorDepth,
             paletteCommands,
@@ -6555,6 +6573,11 @@ program
               }
               if (result.reason === "cancelled") {
                 process.stderr.write("Turn cancelled.\n");
+              }
+              // Terminal bell on normal turn completion (Issue #783): this
+              // surface writes its UI to stderr, so the bell lands there.
+              if (shouldRingTurnBell(opts.bell === true, result.ok)) {
+                ringTurnBell((chunk) => process.stderr.write(chunk));
               }
               // /context facts for the readline surface (Issue #721): the
               // same live facts the full-screen shell tracks.
