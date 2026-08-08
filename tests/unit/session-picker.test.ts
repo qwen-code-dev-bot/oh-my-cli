@@ -573,6 +573,43 @@ describe("session picker: resolveSessionTarget (Issue #536)", () => {
     expect(t.ok).toBe(false);
     expect(t.reason).toContain("no session named");
   });
+
+  it("resolves a unique id prefix (Issue #771)", () => {
+    const id = namedSession("prefixed");
+    const t = resolveSessionTarget(id.slice(0, 8), store);
+    expect(t.ok).toBe(true);
+    if (t.ok) expect(t.sessionId).toBe(id);
+  });
+
+  it("keeps exact-id and name precedence over the prefix tier (Issue #771)", () => {
+    const id = namedSession("alpha");
+    // A name that is itself a prefix of the id still resolves by name rules.
+    const t = resolveSessionTarget(id, store);
+    expect(t.ok).toBe(true);
+    if (t.ok) expect(t.sessionId).toBe(id);
+  });
+
+  it("fails closed on an ambiguous id prefix with candidates (Issue #771)", () => {
+    // Two sessions sharing a prefix: uuids are random, so craft the store.
+    const one = "aaaaaaaa-0000-4000-8000-000000000001";
+    const two = "aaaaaaaa-0000-4000-8000-000000000002";
+    for (const id of [one, two]) {
+      store.writeMeta(id, { model: "m", workspace: tmpDir, createdAt: 1 });
+      store.append(id, { role: "user", content: "hi" });
+    }
+    const t = resolveSessionTarget("aaaaaaaa", store);
+    expect(t.ok).toBe(false);
+    expect(t.reason).toContain("2 sessions match the id prefix");
+    expect(t.reason).toContain("aaaaaaaa");
+  });
+
+  it("does not let a prefix resurrect a corrupt session (Issue #771)", () => {
+    const corrupt = "bbbbbbbb-0000-4000-8000-000000000001";
+    fs.writeFileSync(path.join(tmpDir, `${corrupt}.jsonl`), "{bad}\n{bad}\n");
+    const t = resolveSessionTarget("bbbbbbbb", store);
+    expect(t.ok).toBe(false);
+    expect(t.reason).toContain("corrupt");
+  });
 });
 
 describe("session picker: collectSessionPickerRows", () => {

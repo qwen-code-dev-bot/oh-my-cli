@@ -287,4 +287,33 @@ describe("resolveArchiveTarget (Issue #598)", () => {
     expect(resolved.ok).toBe(false);
     if (!resolved.ok) expect(resolved.reason).toContain("no session named");
   });
+
+  it("resolves a unique id prefix without heal side effects (Issue #771)", () => {
+    const id = "cccccccc-0000-4000-8000-000000000001";
+    store.checkpoint(id, [{ role: "user", content: "hi" }], { createdAt: 1 });
+    const resolved = resolveArchiveTarget("cccccccc", store);
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) expect(resolved.sessionId).toBe(id);
+  });
+
+  it("resolves a corrupt session by id prefix — archive targets stay metadata-only (Issue #771)", () => {
+    writeCorrupt("dddddddd-corrupt-prefix-target");
+    const resolved = resolveArchiveTarget("dddddddd", store);
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) expect(resolved.sessionId).toBe("dddddddd-corrupt-prefix-target");
+  });
+
+  it("fails closed on an ambiguous id prefix with candidates (Issue #771)", () => {
+    const one = "eeeeeeee-0000-4000-8000-000000000001";
+    const two = "eeeeeeee-0000-4000-8000-000000000002";
+    for (const id of [one, two]) {
+      store.checkpoint(id, [{ role: "user", content: "hi" }], { createdAt: 1 });
+    }
+    const resolved = resolveArchiveTarget("eeeeeeee", store);
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) {
+      expect(resolved.reason).toContain("2 sessions match the id prefix");
+      expect(resolved.reason).toContain("resolve by exact session id");
+    }
+  });
 });
