@@ -310,7 +310,7 @@ import {
 import { isOfflineRequested } from "./offline-guard.js";
 import { buildGoalStatusRecord, formatGoalStatus, resumeGoalSummaryLine } from "./goal-status.js";
 import { runGoalControl } from "./goal-control.js";
-import { generateBashCompletion, generateZshCompletion } from "./shell-completion.js";
+import { generateBashCompletion, generateZshCompletion, generateFishCompletion } from "./shell-completion.js";
 import type { CompletionFlag } from "./shell-completion.js";
 import {
   DEFAULT_LSP_SERVERS,
@@ -616,7 +616,7 @@ program
   )
   .option(
     "--setup-completions [shell]",
-    "Print a shell completion script for the CLI's flags and exit (bash and zsh today; fish not supported yet)",
+    "Print a shell completion script for the CLI's flags and exit (bash, zsh, and fish today)",
   )
   .option(
     "--resume <id-or-name>",
@@ -1030,16 +1030,16 @@ program
         process.exit(2);
       }
 
-      // Shell completion generation (Issues #777, #779): the script is
+      // Shell completion generation (Issues #777, #779, #781): the script is
       // generated from the live flag registry (commander's resolved
-      // options), so it cannot drift from --help. Bash and zsh today; other
-      // shells fail closed with an honest message instead of emitting a
-      // wrong script.
+      // options), so it cannot drift from --help. Bash, zsh, and fish today;
+      // other shells fail closed with an honest message instead of emitting
+      // a wrong script.
       if (opts.setupCompletions !== undefined) {
         const shell = String(opts.setupCompletions === true ? "bash" : opts.setupCompletions);
-        if (shell !== "bash" && shell !== "zsh") {
+        if (shell !== "bash" && shell !== "zsh" && shell !== "fish") {
           process.stderr.write(
-            `Error: --setup-completions supports "bash" and "zsh" today; "${shell}" is not supported yet\n`,
+            `Error: --setup-completions supports "bash", "zsh", and "fish" today; "${shell}" is not supported yet\n`,
           );
           process.exit(2);
         }
@@ -1057,7 +1057,9 @@ program
         const script =
           shell === "zsh"
             ? generateZshCompletion(program.name(), flags)
-            : generateBashCompletion(program.name(), flags);
+            : shell === "fish"
+              ? generateFishCompletion(program.name(), flags)
+              : generateBashCompletion(program.name(), flags);
         process.stdout.write(script + "\n");
         return;
       }
