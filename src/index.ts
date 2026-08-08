@@ -383,8 +383,9 @@ import type { RegressionThresholds } from "./run-scorecard.js";
 import type { RunSummary } from "./run-summary.js";
 import { colorEnabled, createColorPalette } from "./color.js";
 import { detectColorDepth, formatProductBanner, VERSION } from "./product-banner.js";
-import { runConversationShell, isFullScreenCapable } from "./tui-shell.js";
+import { runConversationShell, isFullScreenCapable, sideAnswerClipboardEscape } from "./tui-shell.js";
 import type { ShellContextFacts } from "./tui-shell.js";
+import { copyPayloadForMessages } from "./readline-copy.js";
 import { formatContextView } from "./context-view.js";
 import {
   parseDeliveryWebPort,
@@ -6430,9 +6431,16 @@ program
             }
             let promptText = answer;
             let goalRevision: number | undefined;
+            // /copy is readline-surface-only (Issue #787): it exists outside
+            // the shared palette registry, so extend the known-name list and
+            // the /help listing here rather than registering a palette entry.
+            const readlineCommandNames = [
+              ...paletteCommands.map((command) => command.name),
+              "/copy",
+            ];
             const slash = answer.trim().startsWith("/attach")
               ? { kind: "prompt" as const }
-              : resolveSlashCommand(answer, paletteCommands.map((command) => command.name));
+              : resolveSlashCommand(answer, readlineCommandNames);
             if (slash.kind === "unknown") {
               process.stderr.write(`${slash.message}\n`);
               prompt();
@@ -6448,9 +6456,28 @@ program
               prompt();
               return;
             }
+            if (slash.kind === "command" && slash.name === "/copy") {
+              // Readline-surface clipboard path (Issue #787): the last
+              // assistant response, verbatim, via the same OSC 52 escape
+              // contract the TUI trusts. Best-effort by construction —
+              // terminals without clipboard support ignore the escape.
+              const payload = copyPayloadForMessages(store.load(sessionId));
+              if (payload === null) {
+                process.stderr.write(
+                  "Nothing to copy yet — /copy copies the last assistant response.\n",
+                );
+              } else {
+                process.stderr.write(sideAnswerClipboardEscape(payload));
+                process.stderr.write(
+                  "Copied the last assistant response to the terminal clipboard (OSC 52).\n",
+                );
+              }
+              prompt();
+              return;
+            }
             if (slash.kind === "command" && slash.name === "/help") {
               process.stderr.write(
-                `${formatSlashCommandHelp(paletteCommands.map((command) => command.name))}\n`,
+                `${formatSlashCommandHelp(readlineCommandNames)}\n`,
               );
               prompt();
               return;
