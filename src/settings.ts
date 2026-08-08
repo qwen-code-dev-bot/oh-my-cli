@@ -321,3 +321,17 @@ export function describeResolvedConfig(resolved: ResolvedConfig): string {
   }
   return lines.join("\n");
 }
+
+
+// Per-run primary model selection (Issue #791): --model wins over the
+// configured model for this run only; the override never persists. An absent
+// flag returns undefined (config untouched). A present-but-empty value is a
+// usage error and throws so the dispatch boundary can fail closed.
+export function resolveModelOverride(flag: string | undefined): string | undefined {
+  if (flag === undefined) return undefined;
+  const model = flag.trim();
+  if (model === "") {
+    throw new Error("Error: --model requires a non-empty model name");
+  }
+  return model;
+}
