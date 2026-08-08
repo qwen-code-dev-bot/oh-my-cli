@@ -1552,6 +1552,20 @@ program
           // Baseline: everything that exists right now is "already seen",
           // including entries the bounded snapshot elided.
           const seen = new Set<string>(buildUnbounded().entries.map(journalEntryIdentity));
+          // Clean exit on SIGTERM/SIGINT (Issues #688, #795): registered
+          // before the first output byte is written, so handler presence is
+          // order-independent — SIGTERM must always exit 0 via this handler,
+          // never die by signal. Follow owns Ctrl-C for its lifetime: the
+          // default handler exits 130 with a session-saved message that does
+          // not apply here.
+          let timer: ReturnType<typeof setInterval> | null = null;
+          const stop = (): void => {
+            if (timer !== null) clearInterval(timer);
+            process.exit(0);
+          };
+          process.removeListener("SIGINT", defaultSigintHandler);
+          process.on("SIGINT", stop);
+          process.on("SIGTERM", stop);
           // Initial snapshot: byte-identical to the non-follow surface.
           let snapshot: WorkspaceJournalRecord;
           try {
@@ -1583,7 +1597,7 @@ program
           }
           const stamp = (at: number): string =>
             relative ? formatRelativeAge(at, Date.now()) : new Date(at).toISOString();
-          const timer = setInterval(() => {
+          timer = setInterval(() => {
             const fresh = diffNewEntries(seen, buildUnbounded().entries);
             for (const entry of fresh) {
               seen.add(journalEntryIdentity(entry));
@@ -1594,15 +1608,6 @@ program
               );
             }
           }, pollMs);
-          const stop = (): void => {
-            clearInterval(timer);
-            process.exit(0);
-          };
-          // Follow owns Ctrl-C for its lifetime: the default handler exits
-          // 130 with a session-saved message that does not apply here.
-          process.removeListener("SIGINT", defaultSigintHandler);
-          process.on("SIGINT", stop);
-          process.on("SIGTERM", stop);
           return;
         }
         if (opts.bySession === true) {
@@ -2328,6 +2333,20 @@ program
           // Baseline: everything that exists right now is "already seen",
           // including entries the bounded snapshot elided.
           const seen = new Set<string>(buildUnbounded().entries.map(sessionJournalEntryIdentity));
+          // Clean exit on SIGTERM/SIGINT (Issues #688, #795): registered
+          // before the first output byte is written, so handler presence is
+          // order-independent — SIGTERM must always exit 0 via this handler,
+          // never die by signal. Follow owns Ctrl-C for its lifetime: the
+          // default handler exits 130 with a session-saved message that does
+          // not apply here.
+          let timer: ReturnType<typeof setInterval> | null = null;
+          const stop = (): void => {
+            if (timer !== null) clearInterval(timer);
+            process.exit(0);
+          };
+          process.removeListener("SIGINT", defaultSigintHandler);
+          process.on("SIGINT", stop);
+          process.on("SIGTERM", stop);
           // Initial snapshot: byte-identical to the non-follow surface.
           const snapshotBuilt = buildSessionJournal(store, sessionId, {
             kinds,
@@ -2357,7 +2376,7 @@ program
           }
           const stamp = (at: number): string =>
             opts.relative === true ? formatRelativeAge(at, Date.now()) : new Date(at).toISOString();
-          const timer = setInterval(() => {
+          timer = setInterval(() => {
             const current = buildUnbounded();
             const fresh = sessionDiffNewEntries(seen, current.entries);
             for (const entry of fresh) {
@@ -2372,15 +2391,6 @@ program
               );
             }
           }, pollMs);
-          const stop = (): void => {
-            clearInterval(timer);
-            process.exit(0);
-          };
-          // Follow owns Ctrl-C for its lifetime: the default handler exits
-          // 130 with a session-saved message that does not apply here.
-          process.removeListener("SIGINT", defaultSigintHandler);
-          process.on("SIGINT", stop);
-          process.on("SIGTERM", stop);
           return;
         }
         if (opts.byDay === true) {
