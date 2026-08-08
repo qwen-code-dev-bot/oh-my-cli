@@ -18,6 +18,7 @@ import type { SessionGoalCheckpoint, SessionMessage } from "./session.js";
 import { goalExecutionRequest } from "./session-goal.js";
 import type { AgentSink, AgentUsage, AgentRetry, AgentFallback, AgentResult } from "./agent.js";
 import { runAgent } from "./agent.js";
+import { TurnImageCollector } from "./turn-checkpoint.js";
 import type { ShellFailureDetail } from "./tools.js";
 import { loadImageAttachments } from "./image-input.js";
 import type { LoadedImage } from "./image-input.js";
@@ -2809,6 +2810,14 @@ export interface ConversationShellOptions {
   paletteCommands: PaletteCommand[];
   loadGoal?: () => SessionGoalCheckpoint;
   settleGoal?: (revision: number, succeeded: boolean) => string | null;
+  // Raw transcript length before the turn (Issue #775): checkpoints count
+  // raw store lines (the compaction view can be shorter), so the caller
+  // supplies the authoritative count at turn start.
+  storeMessageCount?: () => number;
+  // Record the turn checkpoint once the run settles (Issue #775) — the
+  // collector carries the turn's pre-turn file images and the count anchors
+  // the transcript slice. Same contract as the headless paths.
+  recordCheckpoint?: (collector: TurnImageCollector, messageCountBefore: number) => void;
   // Computes the read-only language-server view on demand for the `/lsp` overlay
   // (Issue #202): a workspace-trust-gated discovery report plus any live servers.
   // The shell never installs a binary or performs edits; the supplier does the
@@ -4324,6 +4333,13 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
       // every turn (and dropped the compaction summary on resumed compacted
       // sessions). Issue #719.
       const history = opts.loadHistory();
+      // Turn checkpoint inputs (Issue #775): the raw store count anchors the
+      // transcript slice; the collector captures pre-turn file images as
+      // mutating tools run.
+      const messageCountBefore = opts.storeMessageCount
+        ? opts.storeMessageCount()
+        : history.length;
+      const turnImages = new TurnImageCollector();
       const result = await runAgent(text, history, {
         config: opts.config,
         workspace: opts.workspace,
@@ -4340,6 +4356,7 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
         fallbackModel: opts.config.fallbackModel ?? null,
         mutatingAllowed: opts.mutatingAllowed ?? true,
         images,
+        turnImages,
         // Ctrl+C bumps runGeneration (onCtrlC); polling it here lets the run
         // stop at the next cancel boundary with a truthful persisted outcome
         // (Issue #550) instead of running the whole turn to completion.
@@ -4348,6 +4365,18 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
         // (Issue #574); persistence lives with the session, not the shell.
         onShellFailure: opts.onShellFailure,
       });
+      // Record the turn checkpoint once the run settles (Issue #775) — for
+      // completed and interrupted runs alike, same as the headless paths. A
+      // persistence failure surfaces as a transcript notice and never fails
+      // the turn itself.
+      if (opts.recordCheckpoint) {
+        try {
+          opts.recordCheckpoint(turnImages, messageCountBefore);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          state.transcript.push({ kind: "error", text: redactSecrets(msg).text });
+        }
+      }
       if (generation !== runGeneration) {
         // Interrupted mid-run: its remaining output is discarded. Settle the
         // interruption in place (the indicator reads "cancelled") and restore the

@@ -5692,6 +5692,29 @@ program
           },
         ];
 
+        // Turn checkpoints for interactive turns (Issue #775): the same
+        // sequence as the headless plain path — pre-turn raw count, post-turn
+        // slice, build, append — so --undo-turn/--redo-turn restore turns
+        // made from the interactive surfaces too. The raw count anchors the
+        // transcript slice (a compaction sidecar can make the resume view
+        // shorter than the raw log).
+        const recordInteractiveCheckpoint = (
+          collector: TurnImageCollector,
+          messageCountBefore: number,
+        ): void => {
+          const turnMessages = store.load(sessionId).slice(messageCountBefore);
+          const log = loadTurnLog(store, sessionId);
+          const checkpoint = buildTurnCheckpoint(collector, {
+            workspace,
+            sessionId,
+            turnIndex: log.checkpoints.length,
+            messageCountBefore,
+            messages: turnMessages,
+            head: currentRepoHead(workspace.root) || null,
+          });
+          if (checkpoint) appendCheckpoint(store, sessionId, checkpoint);
+        };
+
         // Prefer the stable full-screen conversation shell (regions + fixed
         // composer) when the terminal supports it. Reduced color still uses it
         // (without ANSI); only a non-TTY, missing/dumb terminal, or a too-small
@@ -5731,6 +5754,11 @@ program
             loadGoal: () => store.readGoal(sessionId),
             settleGoal: (revision, succeeded) =>
               settleGoalExecution(store, sessionId, revision, succeeded),
+            // Turn checkpoints (Issue #775): the shell supplies the raw
+            // pre-turn count and the collector; recording is the same
+            // contract as the headless paths.
+            storeMessageCount: () => store.load(sessionId).length,
+            recordCheckpoint: recordInteractiveCheckpoint,
             loadLsp: () => buildLspView(workspace.root),
             loadTasks: () => buildTaskView(store, sessionId, workspace.root),
             // Mission lifecycle source (Issue #314). Until a live mission source
@@ -6422,6 +6450,12 @@ program
               // turn from the context on every turn (Issue #719) — the
               // headless paths already pass the full transcript.
               existingMessages = loadSessionMessages(store, sessionId);
+              // Turn checkpoint inputs (Issue #775), same contract as the
+              // headless plain path: the raw store count before the turn
+              // anchors the transcript slice; the collector captures the
+              // pre-turn file images as mutating tools run.
+              const messageCountBefore = store.load(sessionId).length;
+              const turnImages = new TurnImageCollector();
               const images = pendingImages.splice(0);
               // Cooperative SIGINT cancel on the readline surface (Issue
               // #743), same contract as the headless plain path (#552): one
@@ -6457,6 +6491,7 @@ program
                   fallbackModel: config.fallbackModel ?? null,
                   mutatingAllowed,
                   images,
+                  turnImages,
                   preToolUseHooks,
                   cancelRequested: sigint.cancelRequested,
                   onShellFailure: (detail) =>
@@ -6467,6 +6502,16 @@ program
               } finally {
                 sigint.dispose();
                 process.on("SIGINT", defaultSigintHandler);
+              }
+              // Record the turn checkpoint once the turn settles (Issue #775) —
+              // for completed and cancelled turns alike, mirroring the
+              // headless paths. A persistence failure is surfaced honestly
+              // and never fails the turn itself.
+              try {
+                recordInteractiveCheckpoint(turnImages, messageCountBefore);
+              } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                process.stderr.write(`Error: ${redactSecrets(msg).text}\n`);
               }
               if (result.reason === "cancelled") {
                 process.stderr.write("Turn cancelled.\n");
