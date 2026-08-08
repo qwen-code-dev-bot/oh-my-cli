@@ -203,6 +203,16 @@ export interface PreviewOptions {
   maxBytes?: number;
 }
 
+// Default deliverable path for an exported artifact (Issue #803): strip one
+// trailing .html/.htm extension from the basename and append ".safe.html",
+// keeping the file beside the original. Pure: no filesystem access.
+export function defaultDeliverablePath(relPath: string): string {
+  const dir = path.dirname(relPath);
+  const base = path.basename(relPath).replace(/\.(html|htm)$/i, "");
+  const name = `${base}.safe.html`;
+  return dir === "." ? name : path.join(dir, name);
+}
+
 // Produce a safe static preview of a local HTML artifact. The artifact is
 // resolved within the workspace, validated, sanitized (scripts, network,
 // navigation, forms disabled), and returned with a full policy report and
