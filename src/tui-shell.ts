@@ -4050,6 +4050,15 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
               /* not raw */
             }
             stdin.on("data", onData);
+            // The approval prompt's readline interface pauses stdin when it
+            // closes (Issue #769): without resuming, no data event ever
+            // fires again and the shell goes deaf after any approval
+            // round-trip. Resume the stream so input flows as it did before.
+            try {
+              stdin.resume();
+            } catch {
+              /* not resumable */
+            }
           }
         }
         if (mine()) {
