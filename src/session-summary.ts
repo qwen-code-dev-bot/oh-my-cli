@@ -12,6 +12,7 @@ import { redactSecrets } from "./permission-impact.js";
 import { workspaceTrustKey } from "./folder-trust.js";
 import type { SessionStore } from "./session.js";
 import { readSessionNotes } from "./session-notes.js";
+import { readSessionLock, isPidAlive } from "./session-lock.js";
 
 export interface SessionSummary {
   id: string;
@@ -29,6 +30,14 @@ export interface SessionSummary {
   name?: string;
   createdAt: number | null;
   lastModified: number;
+  // Advisory lock state (Issue #793): the lock sidecar exists for this
+  // session. `lockPid` is the holder pid; `lockStale` is true when the
+  // holder is no longer alive per isPidAlive semantics. The listing is
+  // strictly read-only: it reports the store's advisory state as-is and
+  // never creates, removes, or heals locks (healing stays on open, #741).
+  locked: boolean;
+  lockPid?: number;
+  lockStale?: boolean;
   ageMs: number;
   corrupt: boolean;
   // Archived out of discovery (Issue #598); resumable by exact id/name.
@@ -114,6 +123,15 @@ function summarize(store: SessionStore, id: string, now: number): SessionSummary
     ...((): { noteCount: number } => {
       const notes = readSessionNotes(store, id);
       return { noteCount: notes.corrupt ? 0 : notes.notes.length };
+    })(),
+    // Advisory lock state (Issue #793): read-only — the sidecar is read,
+    // never created/removed/healed here. Staleness follows the existing
+    // isPidAlive semantics; PID reuse remains the documented advisory
+    // limitation (a reused pid reads as alive, same as on the open path).
+    ...((): { locked: boolean; lockPid?: number; lockStale?: boolean } => {
+      const lock = readSessionLock(store.lockPath(id));
+      if (lock === null) return { locked: false };
+      return { locked: true, lockPid: lock.pid, lockStale: !isPidAlive(lock.pid) };
     })(),
   };
 }
@@ -209,6 +227,12 @@ export interface SessionListEntry {
   lastModified: number;
   ageMs: number;
   corrupt: boolean;
+  /** Advisory lock state (Issue #793): always present; explicit false when unlocked. */
+  locked: boolean;
+  /** Lock holder pid (Issue #793); present only when locked. */
+  lockPid?: number;
+  /** Holder no longer alive per isPidAlive (Issue #793); present only when locked. */
+  lockStale?: boolean;
   /** True when the entry is archived and shown via --include-archived (#598). */
   archived?: boolean;
   /** True when the entry is pinned (listed first, Issue #610). */
@@ -343,6 +367,8 @@ export function sessionListRecord(
       lastModified: s.lastModified,
       ageMs: s.ageMs,
       corrupt: s.corrupt,
+      locked: s.locked,
+      ...(s.locked ? { lockPid: s.lockPid, lockStale: s.lockStale } : {}),
       ...(s.archived ? { archived: true } : {}),
       ...(s.pinned
         ? { pinned: true, ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}) }
@@ -424,11 +450,18 @@ function formatSessionLines(s: SessionSummary): string[] {
   // Durable notes presence (Issue #624): counts only, never content.
   const notesFlag =
     s.noteCount > 0 ? `  (${s.noteCount} note${s.noteCount === 1 ? "" : "s"})` : "";
+  // Advisory lock state (Issue #793): marks a session another process holds,
+  // distinguishing a live holder from a stale lock (the next open self-heals).
+  const lockedFlag = s.locked
+    ? s.lockStale
+      ? `  (locked by pid ${s.lockPid} — stale)`
+      : `  (locked by pid ${s.lockPid})`
+    : "";
   // The user-owned name (#249) renders next to the id (Issue #530), redacted
   // exactly like the picker renders it — so the discovery surface and the
   // resume surfaces agree.
   const namePart = s.name ? `  "${redact(s.name)}"` : "";
-  const head = `  ${symbol} ${s.id}${namePart}${flag}${archivedFlag}${pinnedFlag}${notesFlag}`;
+  const head = `  ${symbol} ${s.id}${namePart}${flag}${archivedFlag}${pinnedFlag}${notesFlag}${lockedFlag}`;
   const provenance = `model ${redact(s.model)}  ·  repo ${redactPath(s.workspace)}`;
   const usage =
     `${s.messageCount} msgs, ${s.userTurns + s.assistantTurns} turns, ` +
