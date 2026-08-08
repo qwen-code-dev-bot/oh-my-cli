@@ -12,7 +12,7 @@
 // session that is not archived.
 
 import type { SessionStore } from "./session.js";
-import { shortSessionId } from "./session-picker.js";
+import { shortSessionId, sessionIdsWithPrefix } from "./session-picker.js";
 import { redactSecrets } from "./permission-impact.js";
 
 export interface ArchiveOutcome {
@@ -60,7 +60,9 @@ export function unarchiveSession(store: SessionStore, id: string): ArchiveOutcom
 // quarantines a corrupt checkpoint aside, and archiving is metadata-only — it
 // must never mutate its target. Corrupt sessions are valid archive targets,
 // so they resolve here exactly like healthy ones; ambiguous name matches fail
-// closed.
+// closed. The unambiguous id-prefix tier (Issue #771) matches the picker's
+// contract — the archive flow itself prints the short id and tells users to
+// restore with it — with the same corrupt-is-valid semantics.
 export function resolveArchiveTarget(
   value: string,
   store: SessionStore,
@@ -87,6 +89,22 @@ export function resolveArchiveTarget(
     return {
       ok: false,
       reason: `${matches.length} sessions are named "${display}"; resolve by exact session id (${shorts})`,
+    };
+  }
+  // Id-prefix tier (Issue #771), mirroring the exact-id tier above: a
+  // session whose transcript is missing cannot be targeted, while corrupt
+  // transcripts remain archive-valid metadata targets.
+  const prefixMatches = sessionIdsWithPrefix(raw, store).filter(
+    (id) => store.integrity(id).status !== "missing",
+  );
+  if (prefixMatches.length === 1) {
+    return { ok: true, sessionId: prefixMatches[0] };
+  }
+  if (prefixMatches.length > 1) {
+    const shorts = prefixMatches.map((id) => shortSessionId(id)).join(", ");
+    return {
+      ok: false,
+      reason: `${prefixMatches.length} sessions match the id prefix "${display}"; resolve by exact session id (${shorts})`,
     };
   }
   return { ok: false, reason: `no session named "${display}" was found` };

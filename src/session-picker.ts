@@ -322,13 +322,66 @@ export function resolveResumeByName(name: string, store: SessionStore): ResumeTa
 
 // Resolve a session-targeted flag value (Issue #536): exact session id first
 // (the pre-existing semantics, unchanged), then the user-owned name fallback
-// (#534). Every session-targeted flag shares this one contract — names are
-// first-class across all surfaces. Fail-closed; never substitutes a different
-// session.
+// (#534), then an unambiguous id-prefix tier (Issue #771). Every
+// session-targeted flag shares this one contract — names are first-class
+// across all surfaces. Fail-closed; never substitutes a different session.
 export function resolveSessionTarget(value: string, store: SessionStore): ResumeTarget {
   const target = resolveResumeFlagTarget(value, store);
   if (target.ok) return target;
-  return resolveResumeByName(value, store);
+  const named = resolveResumeByName(value, store);
+  if (named.ok) return named;
+  // Id-prefix tier (Issue #771): the product displays 8-char short ids and
+  // tells users to feed them back (the archive flow's restore hint, stale
+  // reports, search matches), so a prefix that matches exactly one healthy
+  // session resolves to it. Ambiguity fails closed listing the candidates;
+  // corrupt/missing matches are skipped exactly like the name tier; no match
+  // keeps the honest not-found reason above.
+  const display = redactSecrets(value.trim()).text;
+  const healthy: string[] = [];
+  const corrupt: string[] = [];
+  for (const id of sessionIdsWithPrefix(value, store)) {
+    const status = store.integrity(id).status;
+    if (status === "corrupt" || status === "missing") corrupt.push(id);
+    else healthy.push(id);
+  }
+  if (healthy.length === 1) {
+    const sessionId = healthy[0];
+    const workspace = store.readMeta(sessionId)?.workspace;
+    return { ok: true, sessionId, workspace };
+  }
+  if (healthy.length > 1) {
+    const shorts = healthy.map((id) => shortSessionId(id)).join(", ");
+    return {
+      ok: false,
+      sessionId: value,
+      reason: `${healthy.length} sessions match the id prefix "${display}"; use the exact session id (${shorts})`,
+    };
+  }
+  if (corrupt.length > 0) {
+    return {
+      ok: false,
+      sessionId: value,
+      reason: `the session${corrupt.length > 1 ? "s" : ""} matching "${display}" ${
+        corrupt.length > 1 ? "are" : "is"
+      } corrupt and cannot be resumed safely`,
+    };
+  }
+  return named;
+}
+
+// Session ids that begin with the given prefix (Issue #771),
+// case-insensitively — ids are lowercase UUIDs and surfaces display the
+// 8-char short form. Returns every match; health/corrupt classification is
+// the caller's, because the resolvers legitimately differ on whether corrupt
+// sessions are valid targets (resume: no; archive: yes).
+export function sessionIdsWithPrefix(prefix: string, store: SessionStore): string[] {
+  const needle = prefix.trim().toLowerCase();
+  if (!needle) return [];
+  const matches: string[] = [];
+  for (const id of store.listIds()) {
+    if (id.toLowerCase().startsWith(needle)) matches.push(id);
+  }
+  return matches;
 }
 
 // Workspace-binding verdict for a resolved `--resume` target (Issue #554).
