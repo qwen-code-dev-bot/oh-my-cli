@@ -79,9 +79,13 @@ describe("smoke: --repo-map", () => {
     expect(snap.usedChars).toBeLessThanOrEqual(snap.budgetChars);
   });
 
-  it("rejects an invalid --map-tokens value", async () => {
-    const r = await runCli(["--repo-map", "--workspace", ws, "--map-tokens", "abc"], env);
-    expect(r.code).not.toBe(0);
-    expect(r.stderr).toContain("invalid --map-tokens");
+  it("rejects malformed --map-tokens values fail-closed (Issue #806)", async () => {
+    // parseInt previously coerced "10abc" to 10 and "3.9" to 3; strict
+    // validation now fails closed like the other numeric flags.
+    for (const bad of ["abc", "10abc", "3.9", "-5", "0"]) {
+      const r = await runCli(["--repo-map", "--workspace", ws, "--map-tokens", bad], env);
+      expect(r.code, `--map-tokens=${bad} stderr: ${r.stderr}`).not.toBe(0);
+      expect(r.stderr, `--map-tokens=${bad}`).toContain("invalid --map-tokens");
+    }
   });
 });

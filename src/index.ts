@@ -3583,9 +3583,16 @@ program
         }
         let budgetChars: number | undefined;
         if (opts.mapTokens !== undefined) {
-          const tokens = Number.parseInt(String(opts.mapTokens), 10);
-          if (!Number.isFinite(tokens) || tokens <= 0) {
-            process.stderr.write(`Error: invalid --map-tokens "${String(opts.mapTokens)}"\n`);
+          // Strict fail-closed validation (Issue #806): accept only a pure
+          // positive integer string, matching the codebase convention
+          // (parsePositiveCount for --limit/--skip, Number.isInteger for
+          // --stale-sessions). parseInt previously coerced "10abc" to 10 and
+          // "3.9" to 3 silently; those now fail closed like every other flag.
+          const mapTokensRaw = String(opts.mapTokens);
+          const mapTokensText = mapTokensRaw.trim();
+          const tokens = /^\d+$/.test(mapTokensText) ? Number(mapTokensText) : NaN;
+          if (!Number.isSafeInteger(tokens) || tokens <= 0) {
+            process.stderr.write(`Error: invalid --map-tokens "${mapTokensRaw}"\n`);
             process.exit(1);
           }
           budgetChars = tokensToBudgetChars(tokens);
