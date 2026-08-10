@@ -3863,8 +3863,13 @@ program
         let timeoutMs: number | undefined;
         if (opts.invokeTimeout !== undefined) {
           timeoutMs = Number(opts.invokeTimeout);
-          if (!Number.isFinite(timeoutMs)) {
-            process.stderr.write(`Error: invalid --invoke-timeout "${opts.invokeTimeout}"\n`);
+          // Fail closed (Issue #814): require a positive integer, matching
+          // --stale-sessions. isFinite previously accepted 0/negative/fractional
+          // values, which were then silently clamped to the 50ms minimum.
+          if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+            process.stderr.write(
+              `Error: --invoke-timeout must be a positive integer (got "${opts.invokeTimeout}")\n`,
+            );
             process.exit(2);
           }
         }
@@ -3915,8 +3920,13 @@ program
         let timeoutMs: number | undefined;
         if (opts.invokeTimeout !== undefined) {
           timeoutMs = Number(opts.invokeTimeout);
-          if (!Number.isFinite(timeoutMs)) {
-            process.stderr.write(`Error: invalid --invoke-timeout "${opts.invokeTimeout}"\n`);
+          // Fail closed (Issue #814): require a positive integer, matching
+          // --stale-sessions. isFinite previously accepted 0/negative/fractional
+          // values, which were then silently clamped to the 50ms minimum.
+          if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+            process.stderr.write(
+              `Error: --invoke-timeout must be a positive integer (got "${opts.invokeTimeout}")\n`,
+            );
             process.exit(2);
           }
         }
@@ -3979,8 +3989,13 @@ program
         let timeoutMs: number | undefined;
         if (opts.invokeTimeout !== undefined) {
           timeoutMs = Number(opts.invokeTimeout);
-          if (!Number.isFinite(timeoutMs)) {
-            process.stderr.write(`Error: invalid --invoke-timeout "${opts.invokeTimeout}"\n`);
+          // Fail closed (Issue #814): require a positive integer, matching
+          // --stale-sessions. isFinite previously accepted 0/negative/fractional
+          // values, which were then silently clamped to the 50ms minimum.
+          if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+            process.stderr.write(
+              `Error: --invoke-timeout must be a positive integer (got "${opts.invokeTimeout}")\n`,
+            );
             process.exit(2);
           }
         }

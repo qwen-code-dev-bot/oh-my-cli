@@ -131,6 +131,44 @@ describe("Integration: tool extension invocation", () => {
     expect(report.exitCode).toBeNull();
   });
 
+  it("rejects a non-positive or fractional --invoke-timeout fail-closed (Issue #814)", async () => {
+    const home = homeWith({ tools: { contractVersion: 1, entries: [] } });
+    // Validation runs before tool/MCP/provider resolution, so no server setup is
+    // needed to reach it. Cover every invoke surface.
+    const cases: Array<[string, string[]]> = [
+      ["--invoke-tool", ["0", "-100", "1.5"]],
+      ["--invoke-mcp", ["0"]],
+      ["--invoke-provider", ["0"]],
+    ];
+    for (const [surface, badValues] of cases) {
+      for (const bad of badValues) {
+        const r = await runCli(
+          [surface, "--approval-mode", "yolo", "--workspace", workspace(), "--invoke-timeout", bad],
+          { HOME: home },
+        );
+        expect(r.code, `${surface} --invoke-timeout=${bad} stderr: ${r.stderr}`).toBe(2);
+        expect(r.stderr, `${surface} --invoke-timeout=${bad}`).toContain(
+          "--invoke-timeout must be a positive integer",
+        );
+      }
+    }
+  });
+
+  it("accepts a valid positive-integer --invoke-timeout (Issue #814)", async () => {
+    const home = homeWith({
+      tools: {
+        contractVersion: 1,
+        entries: [{ id: "echo", command: NODE_BIN, args: ["-e", "process.stdout.write('ok')"] }],
+      },
+    });
+    const r = await runCli(
+      ["--invoke-tool", "--approval-mode", "yolo", "--workspace", workspace(), "--invoke-timeout", "5000", "--output", "json"],
+      { HOME: home },
+    );
+    expect(r.code).toBe(0);
+    expect(r.stderr).not.toContain("--invoke-timeout must be a positive integer");
+  });
+
   it("maps a non-zero tool exit to a runtime failure (exit 1)", async () => {
     const home = homeWith({
       tools: { contractVersion: 1, entries: [{ id: "fail", command: NODE_BIN, args: ["-e", "process.exit(3)"] }] },
