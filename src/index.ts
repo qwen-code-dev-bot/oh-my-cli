@@ -5118,7 +5118,10 @@ program
       const compactRaw = opts.compactThreshold ?? process.env.OMC_COMPACT_THRESHOLD;
       if (compactRaw !== undefined && String(compactRaw).trim() !== "") {
         const parsed = Number(String(compactRaw));
-        if (!Number.isFinite(parsed) || parsed <= 0) {
+        // Fail closed (Issue #817): require a positive integer, matching the other
+        // numeric flags. isFinite previously accepted fractional values (e.g. 100.5)
+        // and silently floored them despite the "positive integer" message.
+        if (!Number.isInteger(parsed) || parsed <= 0) {
           process.stderr.write(`Error: invalid compact threshold "${compactRaw}" (expected a positive integer)\n`);
           process.exit(1);
         }

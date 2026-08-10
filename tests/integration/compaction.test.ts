@@ -206,4 +206,32 @@ describe("Integration: session compaction", () => {
     );
     expect(anyCompacted).toBe(false);
   });
+
+  it("rejects a fractional --compact-threshold fail-closed (Issue #817)", async () => {
+    const result = await runCli(
+      ["-p", "Do a task", "--approval-mode", "yolo", "--workspace", tmpDir, "--compact-threshold", "100.5"],
+      baseEnv,
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('invalid compact threshold "100.5" (expected a positive integer)');
+  });
+
+  it("rejects a fractional OMC_COMPACT_THRESHOLD env value fail-closed (Issue #817)", async () => {
+    const result = await runCli(
+      ["-p", "Do a task", "--approval-mode", "yolo", "--workspace", tmpDir],
+      { ...baseEnv, OMC_COMPACT_THRESHOLD: "7.5" },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('invalid compact threshold "7.5" (expected a positive integer)');
+  });
+
+  it("accepts a valid positive-integer --compact-threshold (Issue #817)", async () => {
+    server.setResponses([{ type: "text", content: "Done." }]);
+    const result = await runCli(
+      ["-p", "Do a task", "--approval-mode", "yolo", "--workspace", tmpDir, "--compact-threshold", "100000"],
+      baseEnv,
+    );
+    expect(result.code).toBe(0);
+    expect(result.stderr).not.toContain("invalid compact threshold");
+  });
 });
