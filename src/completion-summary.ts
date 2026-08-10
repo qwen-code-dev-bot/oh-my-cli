@@ -138,7 +138,8 @@ export function buildCompletionSummary(
 // --- formatting -------------------------------------------------------------
 
 function formatDuration(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
+  // Issue #810: clamp negative elapsed ms (clock skew) to 0, matching activity-render.
+  const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const remainSeconds = seconds % 60;

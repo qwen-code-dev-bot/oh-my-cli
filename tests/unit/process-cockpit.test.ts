@@ -245,3 +245,18 @@ describe("read-only guarantee", () => {
     expect(cockpit.get("p1")!.elapsedMs).toBe(0);
   });
 });
+
+// --- formatElapsed negative-elapsed clamp (Issue #810) ----------------------
+
+describe("formatElapsed negative-elapsed clamp (Issue #810)", () => {
+  it("renders a non-negative duration for negative elapsed ms (clock skew)", () => {
+    expect(formatElapsed(-5000)).toBe("0s");
+    expect(formatElapsed(-1)).toBe("0s");
+  });
+
+  it("leaves positive elapsed output unchanged (regression)", () => {
+    expect(formatElapsed(0)).toBe("0s");
+    expect(formatElapsed(5000)).toBe("5s");
+    expect(formatElapsed(95000)).toBe("1m35s");
+  });
+});

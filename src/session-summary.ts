@@ -486,7 +486,8 @@ function redactPath(p: string | undefined): string {
 // Human-friendly "last active" bucket. Exported so the interactive session
 // picker (session-picker.ts) renders the same age labels as the static list.
 export function formatSessionAge(ms: number): string {
-  const s = Math.floor(ms / 1000);
+  // Issue #810: clamp negative elapsed ms (clock skew) to 0, matching activity-render.
+  const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 60) return `${s}s ago`;
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ago`;
