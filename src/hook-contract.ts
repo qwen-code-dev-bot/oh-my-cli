@@ -28,6 +28,7 @@ import { spawn } from "node:child_process";
 import { z } from "zod";
 import { resolveSettingsPath } from "./settings.js";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const HOOK_CONTRACT_SCHEMA = "oh-my-cli.hook-contract";
 export const HOOK_CONTRACT_VERSION = 1;
@@ -496,7 +497,7 @@ function redactReason(reason: string | undefined): string | undefined {
   text = redactHomeOccurrences(text);
   text = text.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
   if (text === "") return undefined;
-  return text.length <= MAX_REASON ? text : `${text.slice(0, MAX_REASON - 1)}…`;
+  return text.length <= MAX_REASON ? text : `${text.slice(0, safeCutEnd(text, MAX_REASON - 1))}…`;
 }
 
 // Deep-copy a tool-call context with long strings truncated, so a tool with a large

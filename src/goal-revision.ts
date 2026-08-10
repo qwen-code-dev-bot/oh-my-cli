@@ -7,6 +7,7 @@
 // session-goal.ts without changing its JSON contract.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const GOAL_REVISION_SCHEMA = "oh-my-cli.goal-revision";
 export const GOAL_REVISION_VERSION = 1;
@@ -60,7 +61,7 @@ export function safeObjective(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= MAX_OBJECTIVE_LENGTH
     ? redacted
-    : `${redacted.slice(0, MAX_OBJECTIVE_LENGTH - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, MAX_OBJECTIVE_LENGTH - 1))}…`;
 }
 
 // --- transition reason safety -----------------------------------------------
@@ -77,7 +78,7 @@ export function safeReason(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= MAX_REASON_LENGTH
     ? redacted
-    : `${redacted.slice(0, MAX_REASON_LENGTH - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, MAX_REASON_LENGTH - 1))}…`;
 }
 
 // Validate a transition actor string.
@@ -100,7 +101,7 @@ export function safeTitle(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= MAX_TITLE_LENGTH
     ? redacted
-    : `${redacted.slice(0, MAX_TITLE_LENGTH - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, MAX_TITLE_LENGTH - 1))}…`;
 }
 
 // Auto-derive a concise title from the objective (first 80 chars).

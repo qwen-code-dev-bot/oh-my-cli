@@ -107,7 +107,7 @@ export function formatSurvivalBlock(block: CompactionSurvivalBlock): string {
 
   // Enforce max block size.
   if (output.length > MAX_BLOCK_CHARS) {
-    output = output.slice(0, MAX_BLOCK_CHARS - 20) + "\n… [truncated]\n[/GOAL CONTEXT]";
+    output = output.slice(0, safeCutEnd(output, MAX_BLOCK_CHARS - 20)) + "\n… [truncated]\n[/GOAL CONTEXT]";
   }
 
   return output;

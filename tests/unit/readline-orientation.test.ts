@@ -27,6 +27,18 @@ describe("readline orientation: excerpt bounding (Issue #737)", () => {
     const exact = "x".repeat(ORIENTATION_EXCERPT_CHARS);
     expect(excerptOneLine(exact)).toBe(exact);
   });
+
+  it("does not split an emoji/astral character at the cut boundary (Issue #821)", () => {
+    const text = "a".repeat(ORIENTATION_EXCERPT_CHARS - 2) + "😀" + "rest";
+    const out = excerptOneLine(text);
+    expect(out).not.toMatch(/[\ud800-\udfff]/);
+    expect(out.endsWith("…")).toBe(true);
+  });
+
+  it("regression: ASCII truncation is unchanged (Issue #821)", () => {
+    const out = excerptOneLine("b".repeat(ORIENTATION_EXCERPT_CHARS + 10));
+    expect(out).toBe("b".repeat(ORIENTATION_EXCERPT_CHARS - 1) + "…");
+  });
 });
 
 describe("readline orientation: line builder (Issue #737)", () => {

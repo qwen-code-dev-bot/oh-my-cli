@@ -17,6 +17,7 @@
 // rather than being re-counted from replayed history.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import { formatCostUsd } from "./cost.js";
 import type { SessionMessage } from "./session.js";
 import { CANCELLED_TOOL_CONTENT } from "./agent.js";
@@ -152,7 +153,7 @@ function safeToolName(name: unknown): string {
   const redacted = redactSecrets(raw).text.trim();
   const bounded =
     redacted.length > MAX_TOOL_NAME_CHARS
-      ? redacted.slice(0, MAX_TOOL_NAME_CHARS - 1) + "…"
+      ? redacted.slice(0, safeCutEnd(redacted, MAX_TOOL_NAME_CHARS - 1)) + "…"
       : redacted;
   return bounded === "" ? "(unknown)" : bounded;
 }

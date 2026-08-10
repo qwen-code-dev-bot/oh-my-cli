@@ -17,6 +17,7 @@ import fs from "node:fs";
 import type { SessionStore } from "./session.js";
 import { shortSessionId } from "./session-picker.js";
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const SESSION_NOTES_SCHEMA = "oh-my-cli.session-notes" as const;
 export const SESSION_NOTES_VERSION = 1 as const;
@@ -76,7 +77,7 @@ function sanitizeNoteText(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= SESSION_NOTE_MAX_CHARS
     ? redacted
-    : `${redacted.slice(0, SESSION_NOTE_MAX_CHARS - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, SESSION_NOTE_MAX_CHARS - 1))}…`;
 }
 
 export function readSessionNotes(store: SessionStore, id: string): SessionNotesLoad {

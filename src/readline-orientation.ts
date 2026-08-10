@@ -5,6 +5,8 @@
 // session messages: message count plus a single-line excerpt of the last
 // user prompt. No storage, no provider calls, no transcript mutation.
 
+import { safeCutEnd } from "./text-cut.js";
+
 export const ORIENTATION_EXCERPT_CHARS = 80;
 
 export interface OrientationMessage {
@@ -18,7 +20,7 @@ export interface OrientationMessage {
 export function excerptOneLine(text: string, maxChars: number = ORIENTATION_EXCERPT_CHARS): string {
   const flat = text.replace(/\s+/g, " ").trim();
   if (flat.length <= maxChars) return flat;
-  return `${flat.slice(0, maxChars - 1).replace(/\s+$/, "")}…`;
+  return `${flat.slice(0, safeCutEnd(flat, maxChars - 1)).replace(/\s+$/, "")}…`;
 }
 
 // Returns the orientation line for a resumed session. Always a string: an

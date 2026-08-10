@@ -7,6 +7,7 @@
 // and deterministic.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const PINNED_CONSTRAINTS_SCHEMA = "oh-my-cli.pinned-constraints";
 export const PINNED_CONSTRAINTS_VERSION = 1;
@@ -42,7 +43,7 @@ function safeConstraint(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= MAX_CONSTRAINT_LENGTH
     ? redacted
-    : `${redacted.slice(0, MAX_CONSTRAINT_LENGTH - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, MAX_CONSTRAINT_LENGTH - 1))}…`;
 }
 
 // --- pinned constraint tracker ----------------------------------------------

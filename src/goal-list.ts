@@ -10,6 +10,7 @@
 // touches persistence.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const GOAL_LIST_SCHEMA = "oh-my-cli.goal-list";
 export const GOAL_LIST_VERSION = 1;
@@ -76,7 +77,7 @@ function safeObjective(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= MAX_OBJECTIVE_LENGTH
     ? redacted
-    : `${redacted.slice(0, MAX_OBJECTIVE_LENGTH - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, MAX_OBJECTIVE_LENGTH - 1))}…`;
 }
 
 // --- assembly ------------------------------------------------------------------

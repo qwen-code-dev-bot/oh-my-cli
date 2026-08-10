@@ -11,6 +11,7 @@
 
 import fs from "node:fs";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import { collectSessionSummaries, formatSessionAge } from "./session-summary.js";
 import type { SessionSummary } from "./session-summary.js";
 import { sessionDisplayTitle } from "./session-name.js";
@@ -70,7 +71,7 @@ function redactModel(value: string | undefined): string {
 function clampTitle(text: string): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
   if (oneLine.length <= TITLE_MAX_LENGTH) return oneLine;
-  return oneLine.slice(0, TITLE_MAX_LENGTH - 1).trimEnd() + "…";
+  return oneLine.slice(0, safeCutEnd(oneLine, TITLE_MAX_LENGTH - 1)).trimEnd() + "…";
 }
 
 function workspaceExists(p: string): boolean {

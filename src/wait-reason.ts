@@ -6,6 +6,7 @@
 // and deterministic.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const WAIT_REASON_SCHEMA = "oh-my-cli.wait-reason";
 export const WAIT_REASON_VERSION = 1;
@@ -65,7 +66,7 @@ function safeDetail(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= MAX_DETAIL_LENGTH
     ? redacted
-    : `${redacted.slice(0, MAX_DETAIL_LENGTH - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, MAX_DETAIL_LENGTH - 1))}…`;
 }
 
 // --- wait state management --------------------------------------------------

@@ -17,6 +17,7 @@
 // byte-identical and rendering/redaction are unit-testable without a TTY.
 
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import { collectSessionSummaries, formatSessionAge } from "./session-summary.js";
 import type { SessionSummary } from "./session-summary.js";
 import { shortSessionId } from "./session-picker.js";
@@ -77,7 +78,7 @@ function sessionTitle(store: SessionStore, id: string): string {
   if (goal && goal.trim()) {
     const oneLine = redactSecrets(goal).text.replace(/\s+/g, " ").trim();
     if (oneLine.length <= MAX_TITLE_LENGTH) return oneLine;
-    return oneLine.slice(0, MAX_TITLE_LENGTH - 1).trimEnd() + "…";
+    return oneLine.slice(0, safeCutEnd(oneLine, MAX_TITLE_LENGTH - 1)).trimEnd() + "…";
   }
   return `Session ${shortId}`;
 }

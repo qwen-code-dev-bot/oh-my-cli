@@ -8,6 +8,7 @@
 // redacted, and deterministic.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const EXECUTION_OUTLINE_SCHEMA = "oh-my-cli.execution-outline";
 export const EXECUTION_OUTLINE_VERSION = 1;
@@ -70,7 +71,7 @@ export function safeStepDescription(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= MAX_STEP_LENGTH
     ? redacted
-    : `${redacted.slice(0, MAX_STEP_LENGTH - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, MAX_STEP_LENGTH - 1))}…`;
 }
 
 // Generate an execution outline from a Goal objective using heuristic

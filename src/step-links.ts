@@ -5,6 +5,7 @@
 // are bounded (max 50 per step), redacted, and deterministic. Append-only.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const STEP_LINKS_SCHEMA = "oh-my-cli.step-links";
 export const STEP_LINKS_VERSION = 1;
@@ -44,7 +45,7 @@ function safeItemId(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= MAX_ITEM_ID_LENGTH
     ? redacted
-    : `${redacted.slice(0, MAX_ITEM_ID_LENGTH - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, MAX_ITEM_ID_LENGTH - 1))}…`;
 }
 
 // --- step link tracker ------------------------------------------------------

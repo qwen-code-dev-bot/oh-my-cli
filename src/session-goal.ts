@@ -1,4 +1,5 @@
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import type { SessionGoalCheckpoint, GoalHistoryEntry } from "./session.js";
 import { SessionStore } from "./session.js";
 
@@ -41,7 +42,7 @@ function safeTitle(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= GOAL_TITLE_MAX_CHARS
     ? redacted
-    : `${redacted.slice(0, GOAL_TITLE_MAX_CHARS - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, GOAL_TITLE_MAX_CHARS - 1))}…`;
 }
 
 /**
