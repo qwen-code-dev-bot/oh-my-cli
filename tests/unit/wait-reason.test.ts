@@ -136,3 +136,16 @@ describe("waitReasonLabel", () => {
     expect(waitReasonLabel("user-input")).toBe("Waiting for user input");
   });
 });
+
+// --- formatWaitState negative-elapsed clamp (Issue #810) ---------------------
+
+describe("formatWaitState negative-elapsed clamp (Issue #810)", () => {
+  it("renders a non-negative wait when the clock skews backward", () => {
+    const state = setWaitReason("model-response", 10_000);
+    const skewed = computeElapsed(state, 5_000); // now < startedAt -> negative elapsed
+    expect(skewed.elapsedMs).toBe(-5_000);
+    const output = formatWaitState(skewed);
+    expect(output).toContain("(0s)");
+    expect(output).not.toContain("-5s");
+  });
+});

@@ -4,6 +4,7 @@ import {
   collectSessionSummaries,
   filterSessionSummaries,
   formatSessionList,
+  formatSessionAge,
   pickContinueSession,
   sessionListRecord,
 } from "../../src/session-summary.js";
@@ -614,5 +615,20 @@ describe("session summary: filterSessionSummaries (Issue #548)", () => {
     const bare = mk({ id: "bare-3333", name: undefined, model: undefined, workspace: undefined });
     expect(filterSessionSummaries([bare], "bare-3333").map((s) => s.id)).toEqual(["bare-3333"]);
     expect(filterSessionSummaries([bare], "anything-else")).toEqual([]);
+  });
+});
+
+// --- formatSessionAge negative-elapsed clamp (Issue #810) -------------------
+
+describe("formatSessionAge negative-elapsed clamp (Issue #810)", () => {
+  it("renders a non-negative age for negative elapsed ms (clock skew)", () => {
+    expect(formatSessionAge(-5000)).toBe("0s ago");
+    expect(formatSessionAge(-1)).toBe("0s ago");
+  });
+
+  it("leaves positive age output unchanged (regression)", () => {
+    expect(formatSessionAge(0)).toBe("0s ago");
+    expect(formatSessionAge(5000)).toBe("5s ago");
+    expect(formatSessionAge(95000)).toBe("1m ago");
   });
 });
