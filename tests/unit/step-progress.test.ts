@@ -118,6 +118,16 @@ describe("renderProgressBar", () => {
     expect(bar).toContain("░");
     expect(bar.length).toBe(22); // 20 chars + 2 brackets
   });
+
+  it("clamps over-100% to a full bar instead of throwing (Issue #808)", () => {
+    expect(() => renderProgressBar(150)).not.toThrow();
+    expect(renderProgressBar(150)).toBe("[████████████████████]");
+  });
+
+  it("clamps negative pct to an empty bar instead of throwing (Issue #808)", () => {
+    expect(() => renderProgressBar(-10)).not.toThrow();
+    expect(renderProgressBar(-10)).toBe("[░░░░░░░░░░░░░░░░░░░░]");
+  });
 });
 
 // --- formatting -------------------------------------------------------------
