@@ -77,6 +77,27 @@ describe("reduced motion", () => {
   });
 });
 
+// --- out-of-range progress clamping (Issue #808) ---------------------------
+
+describe("renderProgress out-of-range clamping (Issue #808)", () => {
+  it("clamps over-100% to a full bar instead of throwing", () => {
+    const profile = buildAccessibilityProfile({ reducedMotion: false });
+    expect(() => renderProgress(150, profile)).not.toThrow();
+    expect(renderProgress(150, profile)).toBe(`[${"=".repeat(20)}>${" ".repeat(0)}]`);
+  });
+
+  it("clamps negative pct to an empty bar instead of throwing", () => {
+    const profile = buildAccessibilityProfile({ reducedMotion: false });
+    expect(() => renderProgress(-10, profile)).not.toThrow();
+    expect(renderProgress(-10, profile)).toBe(`[${"=".repeat(0)}>${" ".repeat(20)}]`);
+  });
+
+  it("leaves in-range output unchanged (regression)", () => {
+    const profile = buildAccessibilityProfile({ reducedMotion: false });
+    expect(renderProgress(50, profile)).toBe(`[${"=".repeat(10)}>${" ".repeat(10)}]`);
+  });
+});
+
 // --- screen-reader labels ---------------------------------------------------
 
 describe("screen-reader labels", () => {

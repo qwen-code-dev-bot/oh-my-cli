@@ -121,7 +121,10 @@ export function renderProgress(pct: number, profile: AccessibilityProfile): stri
     return profile.motion.staticProgress;
   }
   const width = 20;
-  const filled = Math.round((pct / 100) * width);
+  // Issue #808: clamp the fill into [0, width] so an out-of-range pct
+  // (over-100 or negative) renders a clamped bar instead of throwing a
+  // RangeError from a negative repeat count. In-range output is unchanged.
+  const filled = Math.max(0, Math.min(width, Math.round((pct / 100) * width)));
   return `[${"=".repeat(filled)}>${" ".repeat(width - filled)}]`;
 }
 

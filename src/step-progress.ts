@@ -84,7 +84,10 @@ const BAR_WIDTH = 20;
 
 // Render a compact progress bar.
 export function renderProgressBar(pct: number): string {
-  const filled = Math.round((pct / 100) * BAR_WIDTH);
+  // Issue #808: clamp the fill into [0, BAR_WIDTH] so an out-of-range pct
+  // (over-100 or negative) renders a clamped bar instead of throwing a
+  // RangeError from a negative repeat count. In-range output is unchanged.
+  const filled = Math.max(0, Math.min(BAR_WIDTH, Math.round((pct / 100) * BAR_WIDTH)));
   const empty = BAR_WIDTH - filled;
   return `[${"█".repeat(filled)}${"░".repeat(empty)}]`;
 }
