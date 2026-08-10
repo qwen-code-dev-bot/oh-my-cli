@@ -20,6 +20,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Workspace } from "./workspace.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const DISCOVERY_SCHEMA = "oh-my-cli.discovery";
 export const DISCOVERY_VERSION = 1;
@@ -467,7 +468,7 @@ function scanFile(
         matches.push({
           path: rel,
           lineNumber: i + 1,
-          line: truncatedLine ? line.slice(0, MAX_LINE_LENGTH) : line,
+          line: truncatedLine ? line.slice(0, safeCutEnd(line, MAX_LINE_LENGTH)) : line,
           truncatedLine,
         });
       }

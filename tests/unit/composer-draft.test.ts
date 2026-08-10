@@ -109,6 +109,21 @@ describe("composer draft store (Issue #556)", () => {
     if (loaded.status === "restored") expect(loaded.text.length).toBe(COMPOSER_DRAFT_MAX_CHARS);
   });
 
+  it("never splits a surrogate pair when truncating an oversized draft (Issue #812)", () => {
+    const ws = makeDir("ws");
+    const store = storeFor(ws);
+    // Position an emoji so its high surrogate sits at the cut boundary and its
+    // low surrogate just past it; the truncation must drop the pair whole.
+    const big = "a".repeat(COMPOSER_DRAFT_MAX_CHARS - 1) + "😀" + "tail";
+    store.save(big);
+    const loaded = store.load();
+    expect(loaded.status).toBe("restored");
+    if (loaded.status === "restored") {
+      expect(loaded.text).not.toMatch(/[\ud800-\udbff]$/);
+      expect(loaded.text).toBe("a".repeat(COMPOSER_DRAFT_MAX_CHARS - 1));
+    }
+  });
+
   it("fails closed to corrupt for an unparseable record, preserving the bytes", () => {
     const ws = makeDir("ws");
     const store = storeFor(ws);

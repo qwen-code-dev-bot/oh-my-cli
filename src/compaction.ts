@@ -24,6 +24,7 @@ import crypto from "node:crypto";
 import type { SessionMessage, SessionStore } from "./session.js";
 import { createTools } from "./tools.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const COMPACTION_SCHEMA = "oh-my-cli.compaction";
 export const COMPACTION_VERSION = 1;
@@ -84,7 +85,7 @@ function toolCategoryMap(): Map<string, string> {
 function clampText(value: string, max: number): string {
   const oneLine = value.replace(/\s+/g, " ").trim();
   if (oneLine.length <= max) return oneLine;
-  return `${oneLine.slice(0, max)} …[+${oneLine.length - max} chars]`;
+  return `${oneLine.slice(0, safeCutEnd(oneLine, max))} …[+${oneLine.length - max} chars]`;
 }
 
 function redactClamp(value: string, max: number): string {

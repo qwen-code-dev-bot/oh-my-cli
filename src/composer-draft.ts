@@ -13,6 +13,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { workspaceTrustKey } from "./folder-trust.js";
+import { safeCutEnd } from "./text-cut.js";
 
 // Bound a durable draft so a runaway composer cannot grow the file without
 // limit; oversized drafts are truncated rather than refused (the alternative
@@ -91,7 +92,7 @@ export function openComposerDraftStore(opts: OpenComposerDraftStoreOptions): Com
     if (typeof parsed.text !== "string") return { status: "corrupt" };
     const text =
       parsed.text.length > COMPOSER_DRAFT_MAX_CHARS
-        ? parsed.text.slice(0, COMPOSER_DRAFT_MAX_CHARS)
+        ? parsed.text.slice(0, safeCutEnd(parsed.text, COMPOSER_DRAFT_MAX_CHARS))
         : parsed.text;
     if (text.trim() === "") return { status: "none" };
     return { status: "restored", text };
@@ -107,7 +108,9 @@ export function openComposerDraftStore(opts: OpenComposerDraftStoreOptions): Com
       return;
     }
     const bounded =
-      text.length > COMPOSER_DRAFT_MAX_CHARS ? text.slice(0, COMPOSER_DRAFT_MAX_CHARS) : text;
+      text.length > COMPOSER_DRAFT_MAX_CHARS
+        ? text.slice(0, safeCutEnd(text, COMPOSER_DRAFT_MAX_CHARS))
+        : text;
     const dir = path.dirname(filePath);
     fs.mkdirSync(dir, { recursive: true });
     // Owner-only regardless of umask: drafts are private user content.
