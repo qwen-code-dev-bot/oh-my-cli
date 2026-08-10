@@ -7,6 +7,7 @@
 // redacted, and deterministic.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import type { ExecutionAuditTrail } from "./execution-audit.js";
 
 export const CANCELLED_ATTEMPT_SCHEMA = "oh-my-cli.cancelled-attempt";
@@ -44,7 +45,7 @@ function safeReason(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= MAX_REASON_LENGTH
     ? redacted
-    : `${redacted.slice(0, MAX_REASON_LENGTH - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, MAX_REASON_LENGTH - 1))}…`;
 }
 
 // --- cancellation tracker ---------------------------------------------------

@@ -6,6 +6,7 @@
 // and deterministic.
 
 import type { WorkSummary } from "./work-summary.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const COMPACTION_SURVIVAL_SCHEMA = "oh-my-cli.compaction-survival";
 export const COMPACTION_SURVIVAL_VERSION = 1;
@@ -38,7 +39,7 @@ const MAX_STEP_DISPLAY = 80;
 const MAX_CONSTRAINT_DISPLAY = 100;
 
 function truncate(text: string, max: number): string {
-  return text.length <= max ? text : text.slice(0, max - 1) + "…";
+  return text.length <= max ? text : text.slice(0, safeCutEnd(text, max - 1)) + "…";
 }
 
 // --- block builder ----------------------------------------------------------

@@ -21,6 +21,7 @@
 
 import path from "node:path";
 import { redactSecrets, redactHomePath, neutralizeSpoofing } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const COMMAND_POLICY_SCHEMA = "oh-my-cli.command-policy" as const;
 export const COMMAND_POLICY_VERSION = 1 as const;
@@ -714,7 +715,7 @@ function previewCommand(cmd: string): string {
   // U+FEFF (which \s would otherwise silently eat) becomes an observable marker.
   const redacted = redactSecrets(cmd).text;
   const oneLine = neutralizeSpoofing(redacted).text.replace(/\s+/g, " ").trim();
-  return oneLine.length > MAX_PREVIEW ? `${oneLine.slice(0, MAX_PREVIEW)}…` : oneLine;
+  return oneLine.length > MAX_PREVIEW ? `${oneLine.slice(0, safeCutEnd(oneLine, MAX_PREVIEW))}…` : oneLine;
 }
 
 // Human-readable rendering of a decision (used by the CLI diagnostic mode and

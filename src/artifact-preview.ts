@@ -15,6 +15,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Workspace } from "./workspace.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const ARTIFACT_PREVIEW_SCHEMA = "oh-my-cli.artifact-preview";
 export const ARTIFACT_PREVIEW_VERSION = 1;
@@ -181,7 +182,7 @@ function neutralize(line: string, reason: BlockedReason): string {
 
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…";
+  return s.slice(0, safeCutEnd(s, max - 1)) + "…";
 }
 
 // --- binary detection -------------------------------------------------------
