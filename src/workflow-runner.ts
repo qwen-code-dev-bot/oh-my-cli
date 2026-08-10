@@ -12,6 +12,7 @@
 
 import { spawn } from "node:child_process";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import { parseHeadlessStream, terminalRecord } from "./headless-protocol.js";
 import type { ColorDepth } from "./product-banner.js";
 import {
@@ -159,7 +160,7 @@ export function redactPromptForDisplay(prompt: string, workspace?: string): stri
   }
   const oneLine = text.replace(/\s+/g, " ").trim();
   if (oneLine.length <= MAX_PROMPT_DISPLAY) return oneLine;
-  return oneLine.slice(0, MAX_PROMPT_DISPLAY - 1) + "…";
+  return oneLine.slice(0, safeCutEnd(oneLine, MAX_PROMPT_DISPLAY - 1)) + "…";
 }
 
 export interface RunWorkflowOptions {

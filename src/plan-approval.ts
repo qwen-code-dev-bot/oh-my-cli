@@ -8,6 +8,7 @@
 // redacted, and deterministic.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import type { ExecutionOutline } from "./execution-outline.js";
 import { safeStepDescription } from "./execution-outline.js";
 
@@ -52,7 +53,7 @@ function safeReason(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= MAX_REASON_LENGTH
     ? redacted
-    : `${redacted.slice(0, MAX_REASON_LENGTH - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, MAX_REASON_LENGTH - 1))}…`;
 }
 
 // Create an approval request from an execution outline.

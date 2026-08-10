@@ -8,6 +8,8 @@
 // authority. The model is surface-independent: the same entries drive the
 // TUI view and a future Desktop panel.
 
+import { safeCutEnd } from "./text-cut.js";
+
 export const PROCESS_COCKPIT_SCHEMA = "oh-my-cli.process-cockpit";
 export const PROCESS_COCKPIT_VERSION = 1;
 
@@ -74,7 +76,7 @@ export function redactCommand(command: string): string {
     redacted = redacted.replace(re, replacement);
   }
   if (redacted.length > MAX_COMMAND_LEN) {
-    redacted = redacted.slice(0, MAX_COMMAND_LEN - 1) + "…";
+    redacted = redacted.slice(0, safeCutEnd(redacted, MAX_COMMAND_LEN - 1)) + "…";
   }
   return redacted;
 }
@@ -92,7 +94,7 @@ export function boundOutput(lines: string[]): {
   const truncated = total > MAX_OUTPUT_LINES;
   const bounded = lines.slice(-MAX_OUTPUT_LINES).map((line) => {
     if (line.length > MAX_OUTPUT_CHARS) {
-      return line.slice(0, MAX_OUTPUT_CHARS - 1) + "…";
+      return line.slice(0, safeCutEnd(line, MAX_OUTPUT_CHARS - 1)) + "…";
     }
     return line;
   });

@@ -6,6 +6,7 @@
 // (retry, edit plan, cancel). Read-only, bounded, and deterministic.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import type { GoalRevisionHistory } from "./goal-revision.js";
 import type { ExecutionAuditTrail, ExecutionEvent } from "./execution-audit.js";
 
@@ -52,7 +53,7 @@ function safeDiagnostic(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= MAX_DIAGNOSTIC_LENGTH
     ? redacted
-    : `${redacted.slice(0, MAX_DIAGNOSTIC_LENGTH - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, MAX_DIAGNOSTIC_LENGTH - 1))}…`;
 }
 
 // --- suggestion generation --------------------------------------------------

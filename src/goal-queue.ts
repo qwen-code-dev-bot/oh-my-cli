@@ -9,6 +9,7 @@
 // mutates its inputs, and never touches persistence.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const GOAL_QUEUE_SCHEMA = "oh-my-cli.goal-queue";
 export const GOAL_QUEUE_VERSION = 1;
@@ -66,7 +67,7 @@ function safeText(value: string, maxLength: number): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= maxLength
     ? redacted
-    : `${redacted.slice(0, maxLength - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, maxLength - 1))}…`;
 }
 
 // --- queue operations ---------------------------------------------------------

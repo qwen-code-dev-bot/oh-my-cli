@@ -18,6 +18,7 @@
 import type { SessionStore, SessionMessage } from "./session.js";
 import { shortSessionId } from "./session-picker.js";
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import { workspaceTrustKey } from "./folder-trust.js";
 
 export const SESSION_SEARCH_SCHEMA = "oh-my-cli.session-search" as const;
@@ -84,7 +85,7 @@ function snippetAround(haystack: string, index: number, needleLength: number): s
   const redacted = redactSecrets(window).text;
   return redacted.length <= SNIPPET_MAX_CHARS
     ? `${prefix}${redacted}${suffix}`
-    : `${prefix}${redacted.slice(0, SNIPPET_MAX_CHARS - 1)}…`;
+    : `${prefix}${redacted.slice(0, safeCutEnd(redacted, SNIPPET_MAX_CHARS - 1))}…`;
 }
 
 // Collect every match of `needle` inside one message's searchable text:

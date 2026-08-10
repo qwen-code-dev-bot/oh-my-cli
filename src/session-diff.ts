@@ -15,6 +15,7 @@
 import type { SessionStore, SessionMessage } from "./session.js";
 import { shortSessionId } from "./session-picker.js";
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const SESSION_DIFF_SCHEMA = "oh-my-cli.session-diff" as const;
 export const SESSION_DIFF_VERSION = 1 as const;
@@ -64,7 +65,7 @@ function snippet(message: SessionMessage): string {
   const redacted = redact(content);
   return redacted.length <= SNIPPET_MAX_CHARS
     ? redacted
-    : `${redacted.slice(0, SNIPPET_MAX_CHARS - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, SNIPPET_MAX_CHARS - 1))}…`;
 }
 
 function sameMessage(x: SessionMessage, y: SessionMessage): boolean {

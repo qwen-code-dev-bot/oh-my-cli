@@ -149,6 +149,19 @@ describe("redaction and bounding", () => {
     expect(safe).not.toContain("\u0000");
     expect(safe).not.toContain("\u001f");
   });
+
+  it("does not split an emoji/astral character at the truncation boundary (Issue #821)", () => {
+    const title = "a".repeat(78) + "😀" + "rest";
+    const safe = safeTitle(title);
+    expect(safe).not.toMatch(/[\ud800-\udfff]/);
+    expect(safe.endsWith("…")).toBe(true);
+  });
+
+  it("regression: ASCII bounding is unchanged (Issue #821)", () => {
+    const safe = safeTitle("b".repeat(500));
+    expect(safe.length).toBeLessThanOrEqual(80);
+    expect(safe.endsWith("…")).toBe(true);
+  });
 });
 
 // --- formatting -------------------------------------------------------------

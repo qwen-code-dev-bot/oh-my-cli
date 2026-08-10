@@ -9,6 +9,7 @@
 // pure and read-only: it never mutates audit trails, sessions, or Goal state.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const GOAL_PROVENANCE_SCHEMA = "oh-my-cli.goal-provenance";
 export const GOAL_PROVENANCE_VERSION = 1;
@@ -80,7 +81,7 @@ function safeText(value: string, maxLength: number): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= maxLength
     ? redacted
-    : `${redacted.slice(0, maxLength - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, maxLength - 1))}…`;
 }
 
 function normalizeRecord(record: ProvenanceRecord): NormalizedProvenanceRecord {

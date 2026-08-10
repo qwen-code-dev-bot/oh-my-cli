@@ -6,6 +6,7 @@
 // layer (append-only in first slice).
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const GOAL_CONSTRAINTS_SCHEMA = "oh-my-cli.goal-constraints";
 export const GOAL_CONSTRAINTS_VERSION = 1;
@@ -37,7 +38,7 @@ function safeConstraint(value: string): string {
   const redacted = redactSecrets(terminalSafe).text;
   return redacted.length <= MAX_CONSTRAINT_LENGTH
     ? redacted
-    : `${redacted.slice(0, MAX_CONSTRAINT_LENGTH - 1)}…`;
+    : `${redacted.slice(0, safeCutEnd(redacted, MAX_CONSTRAINT_LENGTH - 1))}…`;
 }
 
 // --- constraint tracker -----------------------------------------------------
