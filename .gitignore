@@ -4,3 +4,4 @@ dist/
 *.tsbuildinfo
 coverage/
 .oh-my-cli/
+.local/
