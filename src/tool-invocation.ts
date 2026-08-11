@@ -27,7 +27,7 @@ import { evaluateCommandPolicy, policyDenialMessage } from "./command-policy.js"
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
 import { resolveSelectedTool, type ResolvedTool } from "./tool-contract.js";
-import { safeByteCutEnd } from "./text-cut.js";
+import { createCappedUtf8Decoder, type OutputByteCapState } from "./utf8-cap.js";
 
 export const TOOL_INVOCATION_SCHEMA = "oh-my-cli.tool-invocation";
 export const TOOL_INVOCATION_VERSION = 1;
@@ -102,7 +102,6 @@ export const spawnCommandRunner: CommandRunner = (opts) =>
     const start = Date.now();
     let stdout = "";
     let stderr = "";
-    let total = 0;
     let timedOut = false;
     let outputCapped = false;
     let settled = false;
@@ -123,26 +122,20 @@ export const spawnCommandRunner: CommandRunner = (opts) =>
       kill();
     }, opts.timeoutMs);
 
+    // Reassemble multi-byte UTF-8 split across chunks and honor the shared byte
+    // cap (Issue #836); the cap bounds the combined stdout+stderr output.
+    const capState: OutputByteCapState = { total: 0, capped: false };
+    const decodeStdout = createCappedUtf8Decoder(capState, opts.maxOutputBytes);
+    const decodeStderr = createCappedUtf8Decoder(capState, opts.maxOutputBytes);
     const onData = (stream: "stdout" | "stderr") => (chunk: Buffer) => {
-      if (outputCapped || timedOut) return;
-      const text = chunk.toString("utf8");
-      const textBytes = Buffer.byteLength(text, "utf8");
-      if (total + textBytes > opts.maxOutputBytes) {
-        const remaining = Math.max(0, opts.maxOutputBytes - total);
-        // Honor the byte budget and never end the capped output on an unpaired
-        // high surrogate: cut at the largest boundary that fits `remaining` bytes
-        // without splitting a UTF-16 surrogate pair.
-        const cut = safeByteCutEnd(text, remaining);
-        if (stream === "stdout") stdout += text.slice(0, cut);
-        else stderr += text.slice(0, cut);
-        total = opts.maxOutputBytes;
-        outputCapped = true;
-        kill();
-        return;
-      }
+      if (capState.capped || timedOut) return;
+      const text = (stream === "stdout" ? decodeStdout : decodeStderr)(chunk);
       if (stream === "stdout") stdout += text;
       else stderr += text;
-      total += textBytes;
+      if (capState.capped) {
+        outputCapped = true;
+        kill();
+      }
     };
 
     proc.stdout.on("data", onData("stdout"));
