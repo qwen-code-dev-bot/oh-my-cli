@@ -9,6 +9,7 @@
 // terminal-control spoofing.
 
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const FATAL_EXIT_CODE = 1;
 // Stable runtime category for an unexpected process-level failure, carried in the
@@ -53,7 +54,9 @@ export function normalizeFatalError(value: unknown): string {
   const bounded =
     safe.length <= MAX_FATAL_MESSAGE
       ? safe
-      : `${safe.slice(0, MAX_FATAL_MESSAGE)} …[+${safe.length - MAX_FATAL_MESSAGE} chars]`;
+      // Issue #826: cut surrogate-safely so an emoji/astral char at the bound is
+      // dropped whole rather than split into an unpaired surrogate.
+      : `${safe.slice(0, safeCutEnd(safe, MAX_FATAL_MESSAGE))} …[+${safe.length - MAX_FATAL_MESSAGE} chars]`;
   return bounded || "unknown internal runtime failure";
 }
 

@@ -53,6 +53,14 @@ describe("normalizeFatalError (#246)", () => {
     expect(normalized).toContain("chars]");
   });
 
+  it("does not split an emoji/astral char at the fatal-message bound (Issue #826)", () => {
+    // MAX_FATAL_MESSAGE is 500; position the emoji so it straddles the bound.
+    const normalized = normalizeFatalError("y".repeat(499) + "🚀" + "more");
+    expect(normalized).toContain("chars]");
+    const prefix = normalized.split(" …[+")[0];
+    expect(prefix).not.toMatch(/[\ud800-\udbff]$/);
+  });
+
   it("falls back when there is no usable detail", () => {
     expect(normalizeFatalError("")).toBe("unknown internal runtime failure");
   });

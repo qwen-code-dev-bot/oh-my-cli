@@ -16,6 +16,7 @@
 // chain-of-thought and never fabricates a status an event does not actually have.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const EVENT_PRESENTATION_SCHEMA = "oh-my-cli.event-presentation";
 export const EVENT_PRESENTATION_VERSION = 1;
@@ -128,7 +129,11 @@ export function presentEvent(event: RuntimeEvent): PresentedEvent {
   const summary = sanitize(event.summary ?? "");
   const rawDetail = sanitize(event.detail ?? "");
   const detailTruncated = rawDetail.length > DETAIL_BOUND;
-  const detail = detailTruncated ? `${rawDetail.slice(0, DETAIL_BOUND)}…` : rawDetail;
+  // Issue #826: cut surrogate-safely so an emoji/astral char at the bound is
+  // dropped whole rather than split into an unpaired surrogate.
+  const detail = detailTruncated
+    ? `${rawDetail.slice(0, safeCutEnd(rawDetail, DETAIL_BOUND))}…`
+    : rawDetail;
   const elapsedMs =
     typeof event.elapsedMs === "number" && Number.isFinite(event.elapsedMs)
       ? Math.max(0, Math.floor(event.elapsedMs))
