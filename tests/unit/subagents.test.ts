@@ -58,6 +58,34 @@ describe("SubagentManager: state transitions", () => {
     expect(rec.result).toBeUndefined();
   });
 
+  it("clamps a result at the cap without orphaning an astral character (Issue #840)", async () => {
+    // MAX_RESULT is 4096 (src/subagents.ts); position 🚀 so it straddles the cap.
+    const mgr = new SubagentManager();
+    const id = mgr.spawn(async () => "a".repeat(4095) + "🚀");
+    await flush();
+    const rec = mgr.get(id)!;
+    expect(rec.state).toBe("completed");
+    const result = rec.result ?? "";
+    expect(result.endsWith("…[truncated]")).toBe(true);
+    // No unpaired surrogate anywhere (a naive slice would orphan the high half).
+    expect(result).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/);
+    expect(result).toBe("a".repeat(4095) + "…[truncated]");
+  });
+
+  it("clamps an error message at the cap without orphaning an astral character (Issue #840)", async () => {
+    const mgr = new SubagentManager();
+    const id = mgr.spawn(async () => {
+      throw new Error("e".repeat(4095) + "🚀");
+    });
+    await flush();
+    const rec = mgr.get(id)!;
+    expect(rec.state).toBe("failed");
+    const error = rec.error ?? "";
+    expect(error.endsWith("…[truncated]")).toBe(true);
+    expect(error).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/);
+    expect(error).toBe("e".repeat(4095) + "…[truncated]");
+  });
+
   it("normalizes a non-Error rejection to a string message", async () => {
     const mgr = new SubagentManager();
     const id = mgr.spawn(async () => {

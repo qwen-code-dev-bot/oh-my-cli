@@ -16,6 +16,7 @@
 import type { Config } from "./config.js";
 import type { SessionMessage } from "./session.js";
 import { streamChat } from "./provider.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const SIDE_QUESTION_SCHEMA = "oh-my-cli.side-question" as const;
 export const SIDE_QUESTION_VERSION = 1 as const;
@@ -52,7 +53,9 @@ export interface SideContext {
 function clampContent(content: string | null | undefined, maxChars: number): string | null {
   if (content == null) return null;
   if (content.length <= maxChars) return content;
-  return `${content.slice(0, maxChars)}…`;
+  // Cut on a surrogate-pair boundary so an astral character at the cap is
+  // dropped whole rather than orphaned (Issue #840).
+  return `${content.slice(0, safeCutEnd(content, maxChars))}…`;
 }
 
 /**

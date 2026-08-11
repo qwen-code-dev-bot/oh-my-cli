@@ -9,6 +9,7 @@
 // overwrite or masquerade as a successful (or failed) outcome.
 
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import {
   evaluateWorkspaceGuard,
   SharedWorkspaceLaunchError,
@@ -120,7 +121,10 @@ function isTerminal(state: SubagentState): boolean {
 }
 
 function clamp(text: string): string {
-  return text.length > MAX_RESULT ? text.slice(0, MAX_RESULT) + "…[truncated]" : text;
+  if (text.length <= MAX_RESULT) return text;
+  // Cut on a surrogate-pair boundary so an astral character at the cap is
+  // dropped whole rather than orphaned (Issue #840).
+  return text.slice(0, safeCutEnd(text, MAX_RESULT)) + "…[truncated]";
 }
 
 function errorMessage(err: unknown): string {
