@@ -172,6 +172,31 @@ describe("formatPerfView", () => {
     expect(output).toContain("REGRESSED");
     expect(output).toContain("Read-only");
   });
+
+  it("clamps a negative duration to an empty bar instead of throwing (Issue #846)", () => {
+    // A clock-skewed elapsed (end < start) makes actualMs negative; the bar
+    // must render clamped (empty) rather than throw a RangeError from a
+    // negative repeat count.
+    const tracker = new PerformanceTracker();
+    tracker.record({ name: "skewed", budgetMs: 200, actualMs: -100 });
+
+    const view = assemblePerfView(tracker);
+    const output = formatPerfView(view);
+    const line = output.split("\n").find((l) => l.includes("skewed")) ?? "";
+    expect(line).not.toContain("█");
+    expect(line).toContain("░");
+  });
+
+  it("clamps an over-budget duration to a full bar (Issue #846)", () => {
+    const tracker = new PerformanceTracker();
+    tracker.record({ name: "overrun", budgetMs: 100, actualMs: 500 });
+
+    const view = assemblePerfView(tracker);
+    const output = formatPerfView(view);
+    const line = output.split("\n").find((l) => l.includes("overrun")) ?? "";
+    expect(line).not.toContain("░");
+    expect(line).toContain("█");
+  });
 });
 
 // --- read-only guarantee ----------------------------------------------------

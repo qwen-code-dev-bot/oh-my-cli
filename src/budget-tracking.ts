@@ -195,7 +195,10 @@ export function formatBudgetView(view: BudgetView): string {
 // Render a simple text progress bar.
 function utilizationBar(pct: number): string {
   const width = 20;
-  const filled = Math.min(width, Math.round((pct / 100) * width));
+  // Issue #846: clamp the fill into [0, width] so a negative pct renders an
+  // empty bar instead of throwing a RangeError from a negative repeat count,
+  // matching the fail-safe convention renderProgressBar adopted in #808.
+  const filled = Math.max(0, Math.min(width, Math.round((pct / 100) * width)));
   const empty = width - filled;
   return `[${"█".repeat(filled)}${"░".repeat(empty)}]`;
 }
