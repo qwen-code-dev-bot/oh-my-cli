@@ -28,6 +28,7 @@ import OpenAI from "openai";
 import type { Config } from "./config.js";
 import { isQuotaExhausted, quotaExhaustedGuidance } from "./provider.js";
 import { redactHomePath, redactSecrets, redactEndpointHost } from "./permission-impact.js";
+import { safeByteCutEnd } from "./text-cut.js";
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
 import {
@@ -239,8 +240,13 @@ export const openaiProviderRunner: ProviderRunner = async (opts) => {
 // Bound captured response text to the output cap so an unexpectedly large body
 // cannot flood the report.
 function capOutput(text: string, maxBytes: number): { text: string; capped: boolean } {
-  if (text.length <= maxBytes) return { text, capped: false };
-  return { text: text.slice(0, maxBytes), capped: true };
+  // Issue #848: decide "fits" by UTF-8 bytes (not UTF-16 code units, which
+  // under-count bytes for multi-byte text) and cut via safeByteCutEnd, which
+  // honors the byte budget without ever splitting a surrogate pair. Matches the
+  // byte-cap convention used elsewhere (Buffer.byteLength) and the surrogate-safe
+  // cuts in text-cut.ts.
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return { text, capped: false };
+  return { text: text.slice(0, safeByteCutEnd(text, maxBytes)), capped: true };
 }
 
 // Classify a thrown SDK/network error into a bounded outcome. The credential is

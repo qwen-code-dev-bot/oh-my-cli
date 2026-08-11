@@ -272,6 +272,36 @@ describe("openaiProviderRunner: bounded real request", () => {
     expect(r.outputCapped).toBe(true);
     expect(r.text.length).toBe(1_000);
   });
+
+  it("caps multi-byte output without splitting a surrogate pair (Issue #848)", async () => {
+    const r = await openaiProviderRunner({
+      config: config("flood-emoji"),
+      prompt: "hello",
+      maxTokens: DEFAULT_MAX_TOKENS,
+      timeoutMs: 5_000,
+      maxOutputBytes: 1_000,
+    });
+    expect(r.outcome).toBe("output-capped");
+    expect(r.outputCapped).toBe(true);
+    // The capped text honors the byte budget and never ends in an unpaired
+    // surrogate (the astral char straddling the boundary is dropped whole).
+    expect(Buffer.byteLength(r.text, "utf8")).toBeLessThanOrEqual(1_000);
+    expect(r.text).not.toMatch(/[\ud800-\udbff]$/);
+    expect(r.text).not.toMatch(/[\ud800-\udfff]/);
+  });
+
+  it("caps multi-byte output whose bytes exceed the cap even when code units do not (Issue #848)", async () => {
+    const r = await openaiProviderRunner({
+      config: config("flood-cjk"),
+      prompt: "hello",
+      maxTokens: DEFAULT_MAX_TOKENS,
+      timeoutMs: 5_000,
+      maxOutputBytes: 1_000,
+    });
+    expect(r.outcome).toBe("output-capped");
+    expect(r.outputCapped).toBe(true);
+    expect(Buffer.byteLength(r.text, "utf8")).toBeLessThanOrEqual(1_000);
+  });
 });
 
 describe("invokeProvider: readiness gating", () => {
