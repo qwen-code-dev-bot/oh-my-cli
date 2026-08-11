@@ -23,3 +23,14 @@ export function safeCutEnd(text: string, end: number): number {
   if (prev >= 0xd800 && prev <= 0xdbff) return end - 1;
   return end;
 }
+
+/**
+ * Remove the last code point from `text`, surrogate-aware (Issue #824). Unlike
+ * `text.slice(0, -1)` — which drops one UTF-16 code unit and orphans half of an
+ * emoji/astral surrogate pair — this drops the entire final code point. Returns
+ * `text` unchanged when it is empty.
+ */
+export function dropLastCodePoint(text: string): string {
+  if (text === "") return text;
+  return Array.from(text).slice(0, -1).join("");
+}

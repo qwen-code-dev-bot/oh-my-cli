@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { safeCutEnd } from "../../src/text-cut.js";
+import { safeCutEnd, dropLastCodePoint } from "../../src/text-cut.js";
 
 // Pure-function coverage for the surrogate-safe cut helper (Issue #812):
 // ASCII/in-range cuts pass through, out-of-range ends clamp to the bounds, and
@@ -37,5 +37,29 @@ describe("safeCutEnd", () => {
       const out = s.slice(0, safeCutEnd(s, n));
       expect(out, `cut=${n}`).not.toMatch(/[\ud800-\udbff]$/);
     }
+  });
+});
+
+// Surrogate-aware delete-last coverage (Issue #824): the composer backspace must
+// drop the whole final code point, never orphan half of a surrogate pair.
+describe("dropLastCodePoint (Issue #824)", () => {
+  it("removes a trailing emoji/astral character whole, leaving no unpaired surrogate", () => {
+    const out = dropLastCodePoint("deploy the 🚀");
+    expect(out).toBe("deploy the ");
+    expect(out).not.toMatch(/[\ud800-\udfff]/);
+  });
+
+  it("regression: removes exactly one ASCII/BMP character", () => {
+    expect(dropLastCodePoint("hello")).toBe("hell");
+    expect(dropLastCodePoint("a")).toBe("");
+  });
+
+  it("returns empty text unchanged (no-op)", () => {
+    expect(dropLastCodePoint("")).toBe("");
+  });
+
+  it("removes a trailing astral char even among astral chars", () => {
+    expect(dropLastCodePoint("🚀🚀")).toBe("🚀");
+    expect(dropLastCodePoint("🚀")).toBe("");
   });
 });
