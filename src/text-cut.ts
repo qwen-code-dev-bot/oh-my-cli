@@ -58,3 +58,15 @@ export function safeByteCutEnd(text: string, maxBytes: number): number {
   }
   return safeCutEnd(text, lo);
 }
+
+/**
+ * Truncate `text` to at most `maxChars` UTF-16 code units, appending `marker`
+ * when truncated (Issue #842). The cut is made via `safeCutEnd`, so an astral
+ * character straddling the cap is dropped whole rather than orphaned as an
+ * unpaired surrogate immediately before the marker. Returns `text` unchanged
+ * when it already fits.
+ */
+export function clampMarked(text: string, maxChars: number, marker: string): string {
+  if (text.length <= maxChars) return text;
+  return text.slice(0, safeCutEnd(text, maxChars)) + marker;
+}

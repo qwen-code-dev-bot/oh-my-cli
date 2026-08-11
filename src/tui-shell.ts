@@ -56,7 +56,7 @@ import {
 import { rejectCompactArgs } from "./compact-command.js";
 import { decodeUtf8Streaming, hasNonAscii } from "./utf8-chunks.js";
 import { pastedTextToComposer } from "./paste-transform.js";
-import { dropLastCodePoint } from "./text-cut.js";
+import { dropLastCodePoint, clampMarked, safeCutEnd } from "./text-cut.js";
 import { emptyLspView, formatLspView } from "./lsp-runtime.js";
 import type { LspView } from "./lsp-runtime.js";
 import { formatLifecycleView } from "./lifecycle-render.js";
@@ -956,8 +956,7 @@ export function seedTranscriptFromHistory(
       if (content.trim() !== "") out.push({ kind: "assistant", text: content });
     } else if (m.role === "tool") {
       if (content.trim() === "") continue;
-      const capped =
-        content.length > maxToolChars ? `${content.slice(0, maxToolChars)}\n… [truncated]` : content;
+      const capped = clampMarked(content, maxToolChars, "\n… [truncated]");
       out.push({ kind: "tool", text: capped });
     }
     // system messages are never shown in the transcript.
@@ -1125,9 +1124,12 @@ export function boundToolOutput(
   maxChars: number = MAX_TOOL_TRANSCRIPT_CHARS,
 ): { output: string; receipt?: string } {
   if (output.length <= maxChars) return { output };
-  const dropped = output.length - maxChars;
+  // Cut on a surrogate-pair boundary so an astral character at the cap is
+  // dropped whole; the dropped count reflects the surrogate-safe cut (Issue #842).
+  const cut = safeCutEnd(output, maxChars);
+  const dropped = output.length - cut;
   return {
-    output: `${output.slice(0, maxChars)}\n… [truncated ${dropped} char${dropped === 1 ? "" : "s"}]`,
+    output: `${output.slice(0, cut)}\n… [truncated ${dropped} char${dropped === 1 ? "" : "s"}]`,
     receipt: `full redacted result retained (${maxChars} char cap)`,
   };
 }
@@ -1160,7 +1162,7 @@ export function makeToolOperation(args: {
 function toolResultHint(op: ToolOperation, maxLen = 60): string {
   if (!op.output) return "";
   const firstLine = (op.output.split("\n").find((l) => l.trim() !== "") ?? "").trim();
-  return firstLine.length > maxLen ? `${firstLine.slice(0, maxLen)}…` : firstLine;
+  return clampMarked(firstLine, maxLen, "…");
 }
 
 // Collapsed summary row for a tool operation (criteria 1, 2): a stable state
@@ -1336,7 +1338,7 @@ export function renderDiffBody(diff: FileDiff): string[] {
 function firstMeaningfulLine(text: string, maxLen = MAX_FAILURE_CAUSE_CHARS): string {
   const line = (text.split("\n").find((l) => l.trim() !== "") ?? "").trim();
   const clean = sanitizeToolText(line);
-  return clean.length > maxLen ? `${clean.slice(0, maxLen)}…` : clean;
+  return clampMarked(clean, maxLen, "…");
 }
 
 // The action a failing tool was performing, named concisely from its (sanitized)
@@ -1346,7 +1348,7 @@ export function failureAction(name: string, args: Record<string, unknown>): stri
     const v = args[key];
     if (typeof v !== "string" || v.trim() === "") return undefined;
     const t = sanitizeToolText(v.trim());
-    return t.length > max ? `${t.slice(0, max)}…` : t;
+    return clampMarked(t, max, "…");
   };
   switch (name) {
     case "edit":

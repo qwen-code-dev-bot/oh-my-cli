@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { safeCutEnd, dropLastCodePoint, safeByteCutEnd } from "../../src/text-cut.js";
+import { safeCutEnd, dropLastCodePoint, safeByteCutEnd, clampMarked } from "../../src/text-cut.js";
 
 // Pure-function coverage for the surrogate-safe cut helper (Issue #812):
 // ASCII/in-range cuts pass through, out-of-range ends clamp to the bounds, and
@@ -102,6 +102,33 @@ describe("safeByteCutEnd (Issue #834)", () => {
       const out = s.slice(0, cut);
       expect(Buffer.byteLength(out, "utf8"), `bytes=${bytes}`).toBeLessThanOrEqual(bytes);
       expect(out, `bytes=${bytes}`).not.toMatch(/[\ud800-\udbff]$/);
+    }
+  });
+});
+
+describe("clampMarked (Issue #842)", () => {
+  const UNPAIRED = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+  it("returns text unchanged when it fits the cap", () => {
+    expect(clampMarked("hello", 10, "…")).toBe("hello");
+    expect(clampMarked("hello", 5, "…")).toBe("hello");
+    expect(clampMarked("", 5, "…")).toBe("");
+  });
+
+  it("truncates ASCII text and appends the marker", () => {
+    expect(clampMarked("abcdef", 3, "…")).toBe("abc…");
+  });
+
+  it("drops an astral character whole when it straddles the cap", () => {
+    const out = clampMarked("a".repeat(9) + "🚀", 10, "…");
+    expect(out).toBe("a".repeat(9) + "…");
+    expect(out).not.toMatch(UNPAIRED);
+  });
+
+  it("never leaves an unpaired surrogate for any cap across mixed text", () => {
+    const s = "ab你好🚀🚀cd";
+    for (let max = 0; max <= s.length + 2; max++) {
+      expect(clampMarked(s, max, "…"), `max=${max}`).not.toMatch(UNPAIRED);
     }
   });
 });
