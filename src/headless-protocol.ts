@@ -4,6 +4,7 @@ import type { RunSummary } from "./run-summary.js";
 import type { BottleneckReport } from "./run-bottleneck.js";
 import type { FailureTaxonomyReport } from "./run-failure-taxonomy.js";
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import { CANCELLED_TOOL_CONTENT } from "./agent.js";
 
 // A stable, versioned newline-delimited JSON protocol for core run lifecycle
@@ -141,11 +142,14 @@ function safeText(input: string, max: number): Redacted {
   const redacted = redactSecrets(input ?? "").text;
   const bytes = Buffer.byteLength(redacted, "utf-8");
   if (redacted.length <= max) return { text: redacted, truncated: false, bytes };
-  return { text: redacted.slice(0, max), truncated: true, bytes };
+  // Issue #828: cut surrogate-safely so an emoji/astral char at the bound is
+  // dropped whole rather than split into an unpaired surrogate.
+  return { text: redacted.slice(0, safeCutEnd(redacted, max)), truncated: true, bytes };
 }
 
 function safeName(name: string): string {
-  return redactSecrets(name ?? "").text.slice(0, MAX_NAME);
+  const redacted = redactSecrets(name ?? "").text;
+  return redacted.slice(0, safeCutEnd(redacted, MAX_NAME));
 }
 
 // Build the opening record with user-controlled fields redacted and bounded.
