@@ -56,6 +56,7 @@ import {
 import { rejectCompactArgs } from "./compact-command.js";
 import { decodeUtf8Streaming, hasNonAscii } from "./utf8-chunks.js";
 import { pastedTextToComposer } from "./paste-transform.js";
+import { dropLastCodePoint } from "./text-cut.js";
 import { emptyLspView, formatLspView } from "./lsp-runtime.js";
 import type { LspView } from "./lsp-runtime.js";
 import { formatLifecycleView } from "./lifecycle-render.js";
@@ -3411,7 +3412,9 @@ export function runConversationShell(opts: ConversationShellOptions): Promise<Sh
 
   function backspace(): void {
     if (!editable() || state.composer.text.length === 0) return;
-    state.composer.text = state.composer.text.slice(0, -1);
+    // Issue #824: drop the whole final code point so an emoji/astral character
+    // is removed cleanly instead of leaving an unpaired surrogate.
+    state.composer.text = dropLastCodePoint(state.composer.text);
     slashPreviewDismissedFor = null;
     referencePreviewDismissedFor = null;
     history = commitDraft(history, state.composer.text);
