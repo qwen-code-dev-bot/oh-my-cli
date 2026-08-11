@@ -449,3 +449,25 @@ describe("spawnHookRunner: output cap honors the byte budget (Issue #834)", () =
     expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThanOrEqual(1_000);
   });
 });
+
+describe("spawnHookRunner: reassembles split-chunk multi-byte output (Issue #836)", () => {
+  it("keeps a large multi-byte payload intact across chunk boundaries", async () => {
+    // 100000 CJK chars (3 UTF-8 bytes each) = 300KB, necessarily delivered as
+    // many stream chunks whose boundaries land mid-character. A standalone
+    // chunk.toString("utf8") would mojibake each boundary char into U+FFFD (and
+    // lengthen the output); streaming reassembly preserves every character.
+    const count = 100_000;
+    const result = await spawnHookRunner({
+      command: process.execPath,
+      args: ["-e", `process.stdout.write(String.fromCharCode(0x4f60).repeat(${count}))`],
+      input: "{}",
+      cwd: os.tmpdir(),
+      env: process.env,
+      timeoutMs: 30_000,
+      maxOutputBytes: 2_000_000, // well above 300KB so the cap does not trigger
+    });
+    expect(result.outputCapped).toBe(false);
+    expect(result.stdout).not.toContain("\ufffd");
+    expect(result.stdout.length).toBe(count);
+  });
+});
