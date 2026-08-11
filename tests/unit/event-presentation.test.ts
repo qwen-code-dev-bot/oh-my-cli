@@ -169,6 +169,16 @@ describe("presentEvent: detail bounding", () => {
     expect(presented.detailTruncated).toBe(false);
     expect(presented.detail).toBe("small");
   });
+
+  it("does not split an emoji/astral char at the detail bound (Issue #826)", () => {
+    // Position the emoji so it straddles DETAIL_BOUND.
+    const detail = "x".repeat(DETAIL_BOUND - 1) + "🚀" + "more detail";
+    const presented = presentEvent({ kind: "diff", status: "completed", detail });
+    expect(presented.detailTruncated).toBe(true);
+    expect(presented.detail.endsWith("…")).toBe(true);
+    const withoutEllipsis = presented.detail.slice(0, -1);
+    expect(withoutEllipsis).not.toMatch(/[\ud800-\udbff]$/);
+  });
 });
 
 describe("collectActivityModel / formatActivityModel", () => {
