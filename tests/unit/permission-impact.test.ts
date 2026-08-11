@@ -5,6 +5,7 @@ import {
   redactSecrets,
   neutralizeSpoofing,
   redactEndpointHost,
+  redactHomePath,
 } from "../../src/permission-impact.js";
 
 // Secret-bearing fixtures are assembled from parts at runtime so the committed
@@ -242,5 +243,51 @@ describe("redactEndpointHost", () => {
 
   it("returns a placeholder for an unparseable URL", () => {
     expect(redactEndpointHost("not-a-url")).toBe("<invalid-url>");
+  });
+});
+
+// Boundary-safe home collapse (Issue #844). The collapse must treat the home
+// prefix as a path *segment* boundary: a sibling directory that merely starts
+// with the home string (e.g. `/home/alice2` when home is `/home/alice`) must
+// NOT be rendered as `~2`. Home and separator are injected so the cases are
+// deterministic and platform-independent.
+describe("redactHomePath (Issue #844)", () => {
+  const home = "/home/alice";
+  const posixSep = "/";
+
+  it("collapses a path under the home directory", () => {
+    expect(redactHomePath("/home/alice/proj", home, posixSep)).toBe("~/proj");
+    expect(redactHomePath("/home/alice/a/b/c", home, posixSep)).toBe("~/a/b/c");
+  });
+
+  it("collapses the home directory itself to ~", () => {
+    expect(redactHomePath("/home/alice", home, posixSep)).toBe("~");
+  });
+
+  it("does not collapse a sibling directory that shares the home prefix", () => {
+    expect(redactHomePath("/home/alice2/proj", home, posixSep)).toBe("/home/alice2/proj");
+    expect(redactHomePath("/home/alicex", home, posixSep)).toBe("/home/alicex");
+  });
+
+  it("leaves paths outside the home untouched", () => {
+    expect(redactHomePath("/etc/passwd", home, posixSep)).toBe("/etc/passwd");
+    expect(redactHomePath("/var/log", home, posixSep)).toBe("/var/log");
+  });
+
+  it("normalizes a home value that carries a trailing separator", () => {
+    expect(redactHomePath("/home/alice/proj", "/home/alice/", posixSep)).toBe("~/proj");
+    expect(redactHomePath("/home/alice2/proj", "/home/alice/", posixSep)).toBe("/home/alice2/proj");
+  });
+
+  it("returns the path unchanged when home is unset", () => {
+    expect(redactHomePath("/home/alice/proj", undefined, posixSep)).toBe("/home/alice/proj");
+  });
+
+  it("is boundary-safe for a Windows-style home and separator", () => {
+    const winHome = "C:\\Users\\alice";
+    const winSep = "\\";
+    expect(redactHomePath("C:\\Users\\alice\\proj", winHome, winSep)).toBe("~\\proj");
+    expect(redactHomePath("C:\\Users\\alice2\\proj", winHome, winSep)).toBe("C:\\Users\\alice2\\proj");
+    expect(redactHomePath("C:\\Users\\alice", winHome, winSep)).toBe("~");
   });
 });

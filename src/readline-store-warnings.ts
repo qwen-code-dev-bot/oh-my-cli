@@ -5,6 +5,8 @@
 // the consequence (starting empty), and the preserved file path for
 // inspection — never store content.
 
+import { redactHomePath } from "./permission-impact.js";
+
 export type CorruptStoreKind = "composer draft" | "prompt history";
 
 // Same convention as the other diagnostics modules (home collapsed to ~).
@@ -12,10 +14,7 @@ export function redactStorePath(
   p: string,
   home: string | undefined = process.env.HOME ?? process.env.USERPROFILE,
 ): string {
-  if (home && p.startsWith(home)) {
-    return `~${p.slice(home.length)}`;
-  }
-  return p;
+  return redactHomePath(p, home);
 }
 
 export function corruptStoreWarning(kind: CorruptStoreKind, filePath: string): string {

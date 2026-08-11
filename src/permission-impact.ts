@@ -6,6 +6,8 @@
 // redacted and oversized payloads collapsed, but the requested target class
 // (the file path, the command) is preserved.
 
+import { sep } from "node:path";
+
 export interface PermissionImpact {
   tool: string;
   filesystem?: { access: "read" | "write"; paths: string[] };
@@ -244,12 +246,22 @@ function detectsNetwork(cmd: string): boolean {
 }
 
 // Collapse a leading home directory to ~ so an absolute path can be shared
-// (e.g. in a run summary) without leaking the host's home location.
-export function redactHomePath(p: string): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE;
-  if (home && p.startsWith(home)) {
-    return "~" + p.slice(home.length);
-  }
+// (e.g. in a run summary) without leaking the host's home location. The match
+// is boundary-safe (Issue #844): the home prefix counts only when it is the
+// whole path or is followed by a path separator, so a sibling directory that
+// merely *starts with* the home string (e.g. `/home/alice2` when home is
+// `/home/alice`) is left untouched instead of being misrendered as `~2`.
+// `home` and `separator` are injectable for deterministic tests; they default
+// to the environment home and the platform separator.
+export function redactHomePath(
+  p: string,
+  home: string | undefined = process.env.HOME ?? process.env.USERPROFILE,
+  separator: string = sep,
+): string {
+  if (!home) return p;
+  const base = home.length > 1 && home.endsWith(separator) ? home.slice(0, -1) : home;
+  if (p === base) return "~";
+  if (p.startsWith(base + separator)) return "~" + p.slice(base.length);
   return p;
 }
 

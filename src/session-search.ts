@@ -17,7 +17,7 @@
 
 import type { SessionStore, SessionMessage } from "./session.js";
 import { shortSessionId } from "./session-picker.js";
-import { redactSecrets } from "./permission-impact.js";
+import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import { safeCutEnd } from "./text-cut.js";
 import { workspaceTrustKey } from "./folder-trust.js";
 
@@ -213,10 +213,7 @@ export function searchSessions(
 
 // Collapse the home prefix for display, matching the sibling list surface.
 function redactWorkspacePath(p: string): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE;
-  let out = p;
-  if (home && out.startsWith(home)) out = "~" + out.slice(home.length);
-  return redactSecrets(out).text;
+  return redactSecrets(redactHomePath(p)).text;
 }
 
 export function formatSessionSearch(record: SessionSearchRecord): string {
