@@ -415,3 +415,37 @@ describe("spawnHookRunner: output cap surrogate safety (Issue #830)", () => {
     expect(result.stderr).toBe("ab");
   });
 });
+
+describe("spawnHookRunner: output cap honors the byte budget (Issue #834)", () => {
+  it("caps multi-byte output at the real UTF-8 byte budget, not code units", async () => {
+    // 20 CJK chars (U+4F60 = 3 UTF-8 bytes, 1 UTF-16 code unit each) = 60 bytes.
+    // With a 12-byte cap, byte accounting keeps at most 12 bytes (4 chars);
+    // code-unit accounting would have kept 12 code units = 36 bytes.
+    const result = await spawnHookRunner({
+      command: process.execPath,
+      args: ["-e", "process.stdout.write(String.fromCharCode(0x4f60).repeat(20))"],
+      input: "{}",
+      cwd: os.tmpdir(),
+      env: process.env,
+      timeoutMs: 10_000,
+      maxOutputBytes: 12,
+    });
+    expect(result.outputCapped).toBe(true);
+    expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThanOrEqual(12);
+    expect(result.stdout).not.toMatch(/[\ud800-\udbff]$/);
+  });
+
+  it("still caps ASCII output at the byte budget (behavior unchanged)", async () => {
+    const result = await spawnHookRunner({
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('x'.repeat(200000))"],
+      input: "{}",
+      cwd: os.tmpdir(),
+      env: process.env,
+      timeoutMs: 10_000,
+      maxOutputBytes: 1_000,
+    });
+    expect(result.outputCapped).toBe(true);
+    expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThanOrEqual(1_000);
+  });
+});

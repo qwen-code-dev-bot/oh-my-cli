@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { safeCutEnd, dropLastCodePoint } from "../../src/text-cut.js";
+import { safeCutEnd, dropLastCodePoint, safeByteCutEnd } from "../../src/text-cut.js";
 
 // Pure-function coverage for the surrogate-safe cut helper (Issue #812):
 // ASCII/in-range cuts pass through, out-of-range ends clamp to the bounds, and
@@ -61,5 +61,47 @@ describe("dropLastCodePoint (Issue #824)", () => {
   it("removes a trailing astral char even among astral chars", () => {
     expect(dropLastCodePoint("🚀🚀")).toBe("🚀");
     expect(dropLastCodePoint("🚀")).toBe("");
+  });
+});
+
+// Byte-budgeted, surrogate-safe cut coverage (Issue #834): the subprocess output
+// caps budget UTF-8 bytes, but String.length counts UTF-16 code units. The cut
+// must honor the byte budget for multi-byte text and still never orphan a
+// surrogate pair.
+describe("safeByteCutEnd (Issue #834)", () => {
+  it("returns the full length when the text fits the byte budget", () => {
+    expect(safeByteCutEnd("abc", 10)).toBe(3);
+    expect(safeByteCutEnd("abc", 3)).toBe(3);
+    expect(safeByteCutEnd("", 5)).toBe(0);
+  });
+
+  it("returns 0 for a non-positive budget", () => {
+    expect(safeByteCutEnd("abc", 0)).toBe(0);
+    expect(safeByteCutEnd("abc", -1)).toBe(0);
+  });
+
+  it("bounds the cut by real UTF-8 bytes for multi-byte BMP text", () => {
+    // 你 = 3 bytes; 你好 = 6 bytes.
+    expect(safeByteCutEnd("你好", 3)).toBe(1); // only 你 fits
+    expect(safeByteCutEnd("你好", 5)).toBe(1); // 你好 is 6 bytes > 5
+    expect(safeByteCutEnd("你好", 6)).toBe(2); // both fit exactly
+  });
+
+  it("drops an astral char whole rather than splitting it at the byte bound", () => {
+    // 🚀 = 4 bytes (2 code units). "a🚀" = 5 bytes.
+    expect(safeByteCutEnd("a🚀", 4)).toBe(1); // 🚀 (4B) won't fit after "a" (1B): keep "a"
+    expect(safeByteCutEnd("a🚀", 5)).toBe(3); // whole "a🚀" fits
+    expect(safeByteCutEnd("🚀", 3)).toBe(0); // 4-byte emoji does not fit in 3 bytes
+    expect(safeByteCutEnd("🚀", 4)).toBe(2); // fits exactly
+  });
+
+  it("never exceeds the byte budget nor leaves an unpaired surrogate across cuts", () => {
+    const s = "ab你好🚀🚀cd";
+    for (let bytes = 0; bytes <= Buffer.byteLength(s, "utf8") + 2; bytes++) {
+      const cut = safeByteCutEnd(s, bytes);
+      const out = s.slice(0, cut);
+      expect(Buffer.byteLength(out, "utf8"), `bytes=${bytes}`).toBeLessThanOrEqual(bytes);
+      expect(out, `bytes=${bytes}`).not.toMatch(/[\ud800-\udbff]$/);
+    }
   });
 });

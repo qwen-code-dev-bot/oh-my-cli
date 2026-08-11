@@ -27,7 +27,7 @@ import { evaluateCommandPolicy, policyDenialMessage } from "./command-policy.js"
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
 import { resolveSelectedTool, type ResolvedTool } from "./tool-contract.js";
-import { safeCutEnd } from "./text-cut.js";
+import { safeByteCutEnd } from "./text-cut.js";
 
 export const TOOL_INVOCATION_SCHEMA = "oh-my-cli.tool-invocation";
 export const TOOL_INVOCATION_VERSION = 1;
@@ -126,11 +126,13 @@ export const spawnCommandRunner: CommandRunner = (opts) =>
     const onData = (stream: "stdout" | "stderr") => (chunk: Buffer) => {
       if (outputCapped || timedOut) return;
       const text = chunk.toString("utf8");
-      if (total + text.length > opts.maxOutputBytes) {
+      const textBytes = Buffer.byteLength(text, "utf8");
+      if (total + textBytes > opts.maxOutputBytes) {
         const remaining = Math.max(0, opts.maxOutputBytes - total);
-        // Never end the capped output on an unpaired high surrogate: cut at the
-        // largest boundary that does not split a UTF-16 surrogate pair.
-        const cut = safeCutEnd(text, remaining);
+        // Honor the byte budget and never end the capped output on an unpaired
+        // high surrogate: cut at the largest boundary that fits `remaining` bytes
+        // without splitting a UTF-16 surrogate pair.
+        const cut = safeByteCutEnd(text, remaining);
         if (stream === "stdout") stdout += text.slice(0, cut);
         else stderr += text.slice(0, cut);
         total = opts.maxOutputBytes;
@@ -140,7 +142,7 @@ export const spawnCommandRunner: CommandRunner = (opts) =>
       }
       if (stream === "stdout") stdout += text;
       else stderr += text;
-      total += text.length;
+      total += textBytes;
     };
 
     proc.stdout.on("data", onData("stdout"));
