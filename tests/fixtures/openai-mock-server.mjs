@@ -11,6 +11,8 @@
 //   "ratelimit"— 429 rate limited
 //   "hang"     — never responds (the client's hard timeout aborts)
 //   "flood"    — 200, content larger than the output cap
+//   "flood-emoji" — 200, > cap bytes with an astral char straddling the cap
+//   "flood-cjk"   — 200, code units <= cap but UTF-8 bytes > cap
 //   "secret"   — 200, content carrying a secret to prove redaction
 //
 // startMockServer() resolves to { baseUrl, close }; baseUrl ends in `/v1` so the
@@ -76,6 +78,12 @@ function handle(model, prompt, res) {
       return; // never respond; the client's hard timeout aborts the request
     case "flood":
       return send(res, 200, completion(model, "x".repeat(200_000)));
+    case "flood-emoji":
+      // > cap bytes, with an astral char straddling the 1000-byte boundary.
+      return send(res, 200, completion(model, "a".repeat(999) + "🚀" + "b".repeat(2000)));
+    case "flood-cjk":
+      // 600 code units (<= a 1000-byte cap) but 1800 UTF-8 bytes (> the cap).
+      return send(res, 200, completion(model, "你".repeat(600)));
     case "secret":
       return send(res, 200, completion(model, "leak ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 here"));
     default:
