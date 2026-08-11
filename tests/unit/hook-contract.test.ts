@@ -12,6 +12,7 @@ import {
   evaluatePreToolUseHooks,
   collectHookList,
   formatHookList,
+  spawnHookRunner,
   type HookRunner,
   type HookRunResult,
   type HookRunOptions,
@@ -372,5 +373,45 @@ describe("collectHookList / formatHookList", () => {
     expect(text).toContain("PreToolUse: 1");
     expect(text).toContain("shell");
     expect(text).toContain("guard");
+  });
+});
+
+describe("spawnHookRunner: output cap surrogate safety (Issue #830)", () => {
+  // Emit "ab🚀" (a, b, then an astral char = a surrogate pair). With a
+  // maxOutputBytes that lands inside the pair, a naive code-unit slice would end
+  // the capped output on an unpaired high surrogate; safeCutEnd must drop the
+  // astral char whole instead.
+  const emit = (stream: "stdout" | "stderr") =>
+    `process.${stream}.write(String.fromCodePoint(97, 98, 0x1f680))`;
+
+  it("does not end capped stdout on an unpaired high surrogate", async () => {
+    const result = await spawnHookRunner({
+      command: process.execPath,
+      args: ["-e", emit("stdout")],
+      input: "{}",
+      cwd: os.tmpdir(),
+      env: process.env,
+      timeoutMs: 10_000,
+      maxOutputBytes: 3,
+    });
+    expect(result.outputCapped).toBe(true);
+    expect(result.stdout).not.toMatch(/[\ud800-\udbff]$/);
+    // The safe prefix is preserved; the astral char is dropped whole, not split.
+    expect(result.stdout).toBe("ab");
+  });
+
+  it("does not end capped stderr on an unpaired high surrogate", async () => {
+    const result = await spawnHookRunner({
+      command: process.execPath,
+      args: ["-e", emit("stderr")],
+      input: "{}",
+      cwd: os.tmpdir(),
+      env: process.env,
+      timeoutMs: 10_000,
+      maxOutputBytes: 3,
+    });
+    expect(result.outputCapped).toBe(true);
+    expect(result.stderr).not.toMatch(/[\ud800-\udbff]$/);
+    expect(result.stderr).toBe("ab");
   });
 });

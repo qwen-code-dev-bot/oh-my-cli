@@ -317,8 +317,11 @@ export const spawnHookRunner: HookRunner = (opts) =>
       const text = chunk.toString("utf8");
       if (total + text.length > opts.maxOutputBytes) {
         const remaining = Math.max(0, opts.maxOutputBytes - total);
-        if (stream === "stdout") stdout += text.slice(0, remaining);
-        else stderr += text.slice(0, remaining);
+        // Never end the capped output on an unpaired high surrogate: cut at the
+        // largest boundary that does not split a UTF-16 surrogate pair.
+        const cut = safeCutEnd(text, remaining);
+        if (stream === "stdout") stdout += text.slice(0, cut);
+        else stderr += text.slice(0, cut);
         total = opts.maxOutputBytes;
         outputCapped = true;
         kill();
