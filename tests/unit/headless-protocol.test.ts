@@ -415,3 +415,19 @@ describe("parseHeadlessStream and terminalRecord", () => {
     expect(terminalRecord(recs)).toBeNull();
   });
 });
+
+describe("surrogate-safe bounding (Issue #828)", () => {
+  it("does not split an emoji at the model-name bound", () => {
+    // MAX_NAME is 256; position the emoji so it straddles the bound.
+    const ev = startEvent({ sessionId: "s", model: "x".repeat(255) + "🚀", prompt: "p" });
+    expect(ev.model).not.toMatch(/[\ud800-\udbff]$/);
+    expect(ev.model).toBe("x".repeat(255));
+  });
+
+  it("does not split an emoji at the prompt bound", () => {
+    // MAX_TEXT is 32768; position the emoji so it straddles the bound.
+    const ev = startEvent({ sessionId: "s", model: "m", prompt: "x".repeat(32767) + "🚀" });
+    expect(ev.prompt).not.toMatch(/[\ud800-\udbff]$/);
+    expect(ev.prompt.length).toBeLessThanOrEqual(32768);
+  });
+});

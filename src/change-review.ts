@@ -18,6 +18,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const CHANGE_REVIEW_SCHEMA = "oh-my-cli.change-review";
 export const CHANGE_REVIEW_VERSION = 1;
@@ -120,11 +121,15 @@ export interface ChangeReviewOptions {
 // --- redaction helpers ------------------------------------------------------
 
 function redactPath(text: string): string {
-  return redactSecrets(text).text.slice(0, MAX_PATH_LEN);
+  const redacted = redactSecrets(text).text;
+  // Issue #828: cut surrogate-safely so an emoji/astral char at the bound is
+  // dropped whole rather than split into an unpaired surrogate.
+  return redacted.slice(0, safeCutEnd(redacted, MAX_PATH_LEN));
 }
 
 function redactName(text: string): string {
-  return redactSecrets(text).text.slice(0, MAX_NAME_LEN);
+  const redacted = redactSecrets(text).text;
+  return redacted.slice(0, safeCutEnd(redacted, MAX_NAME_LEN));
 }
 
 // A locale-independent comparator (UTF-16 code-unit order) for deterministic

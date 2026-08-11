@@ -337,3 +337,25 @@ describe("formatChangeReviewReport", () => {
     expect(text).toContain("AUTONOMY.md");
   });
 });
+
+describe("surrogate-safe bounding (Issue #828)", () => {
+  it("does not split an emoji at the path bound", () => {
+    // MAX_PATH_LEN is 200; position the emoji so it straddles the bound.
+    const longPath = "x".repeat(199) + "🚀rest";
+    const r = buildChangeReviewReport(
+      facts({ files: [{ path: longPath, status: "M", added: 3, removed: 1, binary: false }] }),
+    );
+    expect(r.files[0].path).not.toMatch(/[\ud800-\udbff]$/);
+    expect(r.files[0].path).toBe("x".repeat(199));
+  });
+
+  it("does not split an emoji at the dependency-name bound", () => {
+    // MAX_NAME_LEN is 200; position the emoji so it straddles the bound.
+    const longName = "x".repeat(199) + "🚀rest";
+    const r = buildChangeReviewReport(
+      facts({ dependencyChange: { added: [longName], removed: [] } }),
+    );
+    expect(r.signals.dependencies?.added[0]).not.toMatch(/[\ud800-\udbff]$/);
+    expect(r.signals.dependencies?.added[0]).toBe("x".repeat(199));
+  });
+});
