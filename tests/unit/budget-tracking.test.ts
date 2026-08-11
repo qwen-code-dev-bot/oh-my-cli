@@ -157,6 +157,35 @@ describe("formatBudgetView", () => {
     expect(output).toContain("OVER BUDGET");
     expect(output).toContain("Read-only");
   });
+
+  it("clamps a negative utilization to an empty bar instead of throwing (Issue #846)", () => {
+    // recordUsage performs no negative-token validation, so a negative
+    // utilization can reach the bar; it must render clamped (empty) rather
+    // than throw a RangeError from a negative repeat count.
+    const tracker = new BudgetTracker();
+    tracker.register({ agentId: "agent-neg", sessionId: "s1", tokenLimit: 100_000, model: "qwen3-max" });
+    tracker.recordUsage("agent-neg", -60_000, 0);
+    expect(tracker.get("agent-neg")!.utilizationPct).toBe(-60);
+
+    const view = assembleBudgetView(tracker);
+    const output = formatBudgetView(view);
+    const line = output.split("\n").find((l) => l.includes("agent-neg")) ?? "";
+    expect(line).not.toContain("█");
+    expect(line).toContain("░");
+  });
+
+  it("clamps an over-100 utilization to a full bar (Issue #846)", () => {
+    const tracker = new BudgetTracker();
+    tracker.register({ agentId: "agent-over", sessionId: "s1", tokenLimit: 10_000, model: "qwen3-max" });
+    tracker.recordUsage("agent-over", 15_000, 0);
+    expect(tracker.get("agent-over")!.utilizationPct).toBe(150);
+
+    const view = assembleBudgetView(tracker);
+    const output = formatBudgetView(view);
+    const line = output.split("\n").find((l) => l.includes("agent-over")) ?? "";
+    expect(line).not.toContain("░");
+    expect(line).toContain("█");
+  });
 });
 
 // --- read-only guarantee ----------------------------------------------------

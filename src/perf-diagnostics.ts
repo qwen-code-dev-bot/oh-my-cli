@@ -168,7 +168,10 @@ export function formatPerfView(view: PerfDiagnosticsView): string {
 function budgetBar(actual: number, budget: number): string {
   const width = 20;
   const ratio = budget > 0 ? actual / budget : 1;
-  const filled = Math.min(width, Math.round(ratio * width));
+  // Issue #846: clamp the fill into [0, width] so a negative actual (e.g. a
+  // clock-skewed elapsed duration) renders an empty bar instead of throwing a
+  // RangeError from a negative repeat count, matching #808's convention.
+  const filled = Math.max(0, Math.min(width, Math.round(ratio * width)));
   const empty = width - filled;
   return `[${"█".repeat(filled)}${"░".repeat(empty)}]`;
 }

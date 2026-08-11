@@ -107,4 +107,29 @@ describe("formatBudgetStatus", () => {
     const b = formatBudgetStatus(evaluation);
     expect(a).toBe(b);
   });
+
+  it("clamps a negative percentage to an empty bar instead of throwing (Issue #846)", () => {
+    // Clock-skewed time usage (end < start) drives the pct negative; the bar
+    // must clamp to empty rather than throw a RangeError from a negative
+    // repeat count.
+    const budget: GoalBudget = { maxTokens: 1000, maxTimeMs: 60_000, maxCostUsd: 10, maxToolCalls: 100 };
+    const usage: BudgetUsage = { tokensUsed: 0, timeMs: -30_000, costUsd: 0, toolCalls: 0 };
+    const evaluation = evaluateBudget(budget, usage);
+    expect(evaluation.usagePct.time).toBe(-50);
+    const output = formatBudgetStatus(evaluation);
+    const timeLine = output.split("\n").find((l) => l.includes("Time:")) ?? "";
+    expect(timeLine).not.toContain("█");
+    expect(timeLine).toContain("░");
+  });
+
+  it("clamps an over-100 percentage to a full bar (Issue #846)", () => {
+    const budget: GoalBudget = { maxTokens: 1000, maxTimeMs: 60_000, maxCostUsd: 10, maxToolCalls: 100 };
+    const usage: BudgetUsage = { tokensUsed: 0, timeMs: 120_000, costUsd: 0, toolCalls: 0 };
+    const evaluation = evaluateBudget(budget, usage);
+    expect(evaluation.usagePct.time).toBe(200);
+    const output = formatBudgetStatus(evaluation);
+    const timeLine = output.split("\n").find((l) => l.includes("Time:")) ?? "";
+    expect(timeLine).not.toContain("░");
+    expect(timeLine).toContain("█");
+  });
 });
