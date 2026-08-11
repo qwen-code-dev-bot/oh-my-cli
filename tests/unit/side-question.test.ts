@@ -70,6 +70,17 @@ describe("buildSideContext", () => {
     expect(ctx.messages[0].content?.endsWith("…")).toBe(true);
   });
 
+  it("clamps at a surrogate boundary without orphaning an astral character (Issue #840)", () => {
+    // Position 🚀 so it straddles the maxChars boundary (a naive slice would
+    // orphan the high half right before the ellipsis).
+    const messages: SessionMessage[] = [{ role: "user", content: "a".repeat(9) + "🚀" }];
+    const ctx = buildSideContext(messages, { maxChars: 10 });
+    const content = ctx.messages[0].content ?? "";
+    expect(content.endsWith("…")).toBe(true);
+    expect(content).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/);
+    expect(content).toBe("a".repeat(9) + "…");
+  });
+
   it("drops tool-call bookkeeping so a side turn cannot resume a tool plan", () => {
     const messages: SessionMessage[] = [
       {
