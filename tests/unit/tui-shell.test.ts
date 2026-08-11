@@ -680,6 +680,17 @@ describe("tui-shell: resume restores durable state without transient indicators"
     expect(seeded[0].text).toContain("[truncated]");
   });
 
+  it("bounds tool content at a surrogate boundary without orphaning an astral char (Issue #842)", () => {
+    // Position 🚀 so it straddles the maxToolChars cap (a naive slice would
+    // orphan the high half right before the marker).
+    const content = "a".repeat(9) + "🚀";
+    const seeded = seedTranscriptFromHistory([{ role: "tool", content }], 10);
+    const text = seeded[0].text;
+    expect(text.endsWith("\n… [truncated]")).toBe(true);
+    expect(text).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/);
+    expect(text).toBe("a".repeat(9) + "\n… [truncated]");
+  });
+
   it("shows the prior conversation with the turn idle (no stale streaming/approval indicator)", () => {
     const state = baseState({
       transcript: seedTranscriptFromHistory([{ role: "user", content: "prior question" }]),
@@ -1339,6 +1350,16 @@ describe("tui-shell: large tool output is bounded with a receipt (criterion 5)",
     const big = boundToolOutput("x".repeat(50), 10);
     expect(big.output).toContain("… [truncated 40 chars]");
     expect(big.receipt).toContain("10 char cap");
+  });
+
+  it("bounds at a surrogate boundary without orphaning an astral char (Issue #842)", () => {
+    // Position 🚀 so it straddles the cap; the dropped count reflects the
+    // surrogate-safe cut (the whole 2-code-unit char is dropped).
+    const content = "a".repeat(9) + "🚀";
+    const r = boundToolOutput(content, 10);
+    expect(r.output).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/);
+    expect(r.output).toBe("a".repeat(9) + "\n… [truncated 2 chars]");
+    expect(r.receipt).toContain("10 char cap");
   });
 
   it("carries the receipt into the expanded detail and never spills the full body", () => {
