@@ -27,6 +27,7 @@ import { evaluateCommandPolicy, policyDenialMessage } from "./command-policy.js"
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
 import { resolveSelectedTool, type ResolvedTool } from "./tool-contract.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const TOOL_INVOCATION_SCHEMA = "oh-my-cli.tool-invocation";
 export const TOOL_INVOCATION_VERSION = 1;
@@ -127,8 +128,11 @@ export const spawnCommandRunner: CommandRunner = (opts) =>
       const text = chunk.toString("utf8");
       if (total + text.length > opts.maxOutputBytes) {
         const remaining = Math.max(0, opts.maxOutputBytes - total);
-        if (stream === "stdout") stdout += text.slice(0, remaining);
-        else stderr += text.slice(0, remaining);
+        // Never end the capped output on an unpaired high surrogate: cut at the
+        // largest boundary that does not split a UTF-16 surrogate pair.
+        const cut = safeCutEnd(text, remaining);
+        if (stream === "stdout") stdout += text.slice(0, cut);
+        else stderr += text.slice(0, cut);
         total = opts.maxOutputBytes;
         outputCapped = true;
         kill();

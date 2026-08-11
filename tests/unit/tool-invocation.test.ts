@@ -213,6 +213,37 @@ describe("spawnCommandRunner: bounded real execution", () => {
     expect(r.stdout.length).toBeLessThanOrEqual(1_000);
   });
 
+  it("does not end capped stdout on an unpaired high surrogate (Issue #832)", async () => {
+    // Emit "ab🚀" (a, b, then an astral char = a surrogate pair). With maxOutputBytes
+    // landing inside the pair, a naive code-unit slice would end the capped output
+    // on an unpaired high surrogate; safeCutEnd must drop the astral char whole.
+    const r = await spawnCommandRunner({
+      command: NODE_BIN,
+      args: ["-e", "process.stdout.write(String.fromCodePoint(97, 98, 0x1f680))"],
+      cwd: tmpDir(),
+      env: process.env,
+      timeoutMs: 5_000,
+      maxOutputBytes: 3,
+    });
+    expect(r.outputCapped).toBe(true);
+    expect(r.stdout).not.toMatch(/[\ud800-\udbff]$/);
+    expect(r.stdout).toBe("ab");
+  });
+
+  it("does not end capped stderr on an unpaired high surrogate (Issue #832)", async () => {
+    const r = await spawnCommandRunner({
+      command: NODE_BIN,
+      args: ["-e", "process.stderr.write(String.fromCodePoint(97, 98, 0x1f680))"],
+      cwd: tmpDir(),
+      env: process.env,
+      timeoutMs: 5_000,
+      maxOutputBytes: 3,
+    });
+    expect(r.outputCapped).toBe(true);
+    expect(r.stderr).not.toMatch(/[\ud800-\udbff]$/);
+    expect(r.stderr).toBe("ab");
+  });
+
   it("reports a spawn error for a missing command without throwing", async () => {
     const r = await spawnCommandRunner({
       command: "definitely-not-a-real-binary-xyz-123",
