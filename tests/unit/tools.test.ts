@@ -284,6 +284,36 @@ describe("Tools", () => {
       expect(Buffer.byteLength(r.stdout, "utf-8")).toBeLessThanOrEqual(100);
     });
 
+    it("reassembles multi-byte output split across chunks (Issue #838)", async () => {
+      // 50000 CJK chars (3 UTF-8 bytes each = 150KB) necessarily spans several
+      // stream chunks whose boundaries land mid-character; a per-chunk
+      // toString("utf-8") would mojibake each boundary char into U+FFFD.
+      const count = 50_000;
+      const r = await runShellCommand({
+        command: `printf '你%.0s' {1..${count}}`,
+        timeoutMs: 30_000,
+      });
+      expect(r.status).toBe(0);
+      expect(r.outputTruncated).toBe(false);
+      expect(r.stdout).not.toContain("\ufffd");
+      expect(r.stdout).toBe("你".repeat(count));
+    });
+
+    it("caps multi-byte output on a character boundary, not mid-character (Issue #838)", async () => {
+      // 你 is 3 bytes; a 100-byte cap keeps exactly 33 chars (99 bytes) and must
+      // not leave a U+FFFD from slicing the raw buffer mid-character.
+      const r = await runShellCommand({
+        command: "printf '你%.0s' {1..5000}",
+        timeoutMs: 30_000,
+        maxOutput: 100,
+      });
+      expect(r.status).toBe(0);
+      expect(r.outputTruncated).toBe(true);
+      expect(Buffer.byteLength(r.stdout, "utf-8")).toBeLessThanOrEqual(100);
+      expect(r.stdout).not.toContain("\ufffd");
+      expect(r.stdout).toBe("你".repeat(33));
+    });
+
     it("preserves a non-zero exit code without flagging a timeout", async () => {
       const r = await runShellCommand({ command: "exit 3", timeoutMs: 5_000 });
       expect(r.status).toBe(3);

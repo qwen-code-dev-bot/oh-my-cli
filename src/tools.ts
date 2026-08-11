@@ -10,6 +10,7 @@ import {
   formatGlobResult,
   formatGrepResult,
 } from "./discovery.js";
+import { createCappedUtf8Decoder, type OutputByteCapState } from "./utf8-cap.js";
 
 export interface ToolResult {
   content: string;
@@ -357,43 +358,22 @@ export function runShellCommand(opts: ShellRunOptions): Promise<ShellRunResult> 
 
       let stdout = "";
       let stderr = "";
-      let stdoutBytes = 0;
-      let stderrBytes = 0;
       let outputTruncated = false;
       let timedOut = false;
       let settled = false;
 
+      // Reassemble multi-byte UTF-8 split across chunks and honor the per-stream
+      // byte cap without ever cutting through a character (Issue #838). stdout and
+      // stderr are each bounded by maxOutput, so each gets its own decoder + cap.
+      const stdoutCap: OutputByteCapState = { total: 0, capped: false };
+      const stderrCap: OutputByteCapState = { total: 0, capped: false };
+      const decodeStdout = createCappedUtf8Decoder(stdoutCap, maxOutput);
+      const decodeStderr = createCappedUtf8Decoder(stderrCap, maxOutput);
       const append = (target: "stdout" | "stderr", chunk: Buffer | string) => {
         const buf = typeof chunk === "string" ? Buffer.from(chunk, "utf-8") : chunk;
-        if (target === "stdout") {
-          if (stdoutBytes >= maxOutput) {
-            outputTruncated = true;
-            return;
-          }
-          const remaining = maxOutput - stdoutBytes;
-          if (buf.length <= remaining) {
-            stdout += buf.toString("utf-8");
-            stdoutBytes += buf.length;
-          } else {
-            stdout += buf.subarray(0, remaining).toString("utf-8");
-            stdoutBytes = maxOutput;
-            outputTruncated = true;
-          }
-        } else {
-          if (stderrBytes >= maxOutput) {
-            outputTruncated = true;
-            return;
-          }
-          const remaining = maxOutput - stderrBytes;
-          if (buf.length <= remaining) {
-            stderr += buf.toString("utf-8");
-            stderrBytes += buf.length;
-          } else {
-            stderr += buf.subarray(0, remaining).toString("utf-8");
-            stderrBytes = maxOutput;
-            outputTruncated = true;
-          }
-        }
+        if (target === "stdout") stdout += decodeStdout(buf);
+        else stderr += decodeStderr(buf);
+        outputTruncated = outputTruncated || stdoutCap.capped || stderrCap.capped;
       };
 
       child.stdout?.on("data", (d: Buffer) => append("stdout", d));
