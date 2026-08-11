@@ -12,7 +12,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { redactSecrets } from "./permission-impact.js";
+import { redactSecrets, redactHomePath } from "./permission-impact.js";
 
 export type HealthCategory = "healthy" | "unavailable" | "misconfigured" | "disabled";
 
@@ -420,9 +420,5 @@ function formatLine(i: IntegrationHealth): string {
 }
 
 function redactPath(p: string): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE;
-  if (home && p.startsWith(home)) {
-    return "~" + p.slice(home.length);
-  }
-  return p;
+  return redactHomePath(p);
 }

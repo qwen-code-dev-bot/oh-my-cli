@@ -10,7 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { redactSecrets } from "./permission-impact.js";
+import { redactSecrets, redactHomePath } from "./permission-impact.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -262,9 +262,5 @@ function defaultWritable(p: string): boolean {
 }
 
 function redactPath(p: string): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE;
-  if (home && p.startsWith(home)) {
-    return "~" + p.slice(home.length);
-  }
-  return p;
+  return redactHomePath(p);
 }

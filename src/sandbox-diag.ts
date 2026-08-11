@@ -1,3 +1,5 @@
+import { redactHomePath } from "./permission-impact.js";
+
 export interface SandboxDiagnostic {
   mode: "interactive" | "non-interactive" | "headless";
   approvalMode: string;
@@ -71,9 +73,5 @@ export function formatDiagnostic(diag: SandboxDiagnostic): string {
 
 function redactPath(p: string): string {
   // Replace home directory components with ~ to avoid leaking host paths
-  const home = process.env.HOME ?? process.env.USERPROFILE;
-  if (home && p.startsWith(home)) {
-    return "~" + p.slice(home.length);
-  }
-  return p;
+  return redactHomePath(p);
 }
