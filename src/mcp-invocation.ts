@@ -28,6 +28,7 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
+import { safeByteCutEnd } from "./text-cut.js";
 import { evaluateCommandPolicy, policyDenialMessage } from "./command-policy.js";
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
@@ -186,16 +187,21 @@ export const stdioMcpRunner: McpRunner = async (opts) => {
   proc.stdout.on("data", (chunk: Buffer) => {
     if (outputCapped || timedOut) return;
     const text = chunk.toString("utf8");
-    if (total + text.length > opts.maxOutputBytes) {
+    const textBytes = Buffer.byteLength(text, "utf8");
+    if (total + textBytes > opts.maxOutputBytes) {
       const remaining = Math.max(0, opts.maxOutputBytes - total);
-      buffer += text.slice(0, remaining);
+      // Honor the byte budget and never end the capped buffer on an unpaired
+      // high surrogate: cut at the largest boundary that fits `remaining` bytes
+      // without splitting a UTF-16 surrogate pair.
+      const cut = safeByteCutEnd(text, remaining);
+      buffer += text.slice(0, cut);
       total = opts.maxOutputBytes;
       outputCapped = true;
       kill();
       return;
     }
     buffer += text;
-    total += text.length;
+    total += textBytes;
     // Dispatch every complete newline-delimited JSON-RPC message; ignore partial
     // lines, non-JSON log noise, notifications, and responses to unknown ids.
     let nl: number;

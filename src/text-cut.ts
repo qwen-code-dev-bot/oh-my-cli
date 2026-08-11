@@ -34,3 +34,27 @@ export function dropLastCodePoint(text: string): string {
   if (text === "") return text;
   return Array.from(text).slice(0, -1).join("");
 }
+
+/**
+ * Return the largest cut index whose UTF-8 byte length is `<= maxBytes` and that
+ * does not split a UTF-16 surrogate pair (Issue #834). The subprocess output caps
+ * budget bytes, but `String.length` counts UTF-16 code units, which under-counts
+ * bytes for non-ASCII text; this helper finds a cut that honors the byte budget
+ * while staying surrogate-safe. Binary-searches the byte length (monotonic in the
+ * cut index), then defers to `safeCutEnd` so the final boundary never orphans a
+ * surrogate. Returns `0` for an empty budget or empty text, and `text.length`
+ * unchanged when the whole string already fits.
+ */
+export function safeByteCutEnd(text: string, maxBytes: number): number {
+  if (maxBytes <= 0 || text === "") return 0;
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text.length;
+  let lo = 0;
+  // Each code unit is at least one UTF-8 byte, so the answer is <= maxBytes.
+  let hi = Math.min(text.length, maxBytes);
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (Buffer.byteLength(text.slice(0, mid), "utf8") <= maxBytes) lo = mid;
+    else hi = mid - 1;
+  }
+  return safeCutEnd(text, lo);
+}
