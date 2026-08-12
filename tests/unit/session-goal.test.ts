@@ -138,4 +138,13 @@ describe("session goal", () => {
       goal: { objective: "preflight workspace readiness", status: "active" },
     });
   });
+
+  it("does not orphan a surrogate when a goal objective is truncated (Issue #868)", () => {
+    const input = "a".repeat(498) + "🚀 tail";
+    runGoalCommand(store, "a", input, 1000);
+    const objective = store.readGoal("a").goal?.objective ?? "";
+    const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    expect(objective).not.toMatch(LONE);
+    expect(objective.endsWith("…")).toBe(true);
+  });
 });

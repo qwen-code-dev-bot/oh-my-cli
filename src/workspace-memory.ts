@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import { workspaceTrustKey } from "./folder-trust.js";
 import { formatSessionAge } from "./session-summary.js";
 
@@ -158,7 +159,9 @@ export function addWorkspaceMemory(
   }
   let redactedText = redactSecrets(trimmed).text;
   if (redactedText.length > MEMORY_MAX_TEXT_CHARS) {
-    redactedText = `${redactedText.slice(0, MEMORY_MAX_TEXT_CHARS)}… [truncated]`;
+    // Issue #868: cut via safeCutEnd so an astral character straddling the bound
+    // is dropped whole rather than orphaned before the truncation marker.
+    redactedText = `${redactedText.slice(0, safeCutEnd(redactedText, MEMORY_MAX_TEXT_CHARS))}… [truncated]`;
   }
   const now = (opts.now ?? (() => Date.now()))();
   const entry: MemoryEntry = {
@@ -284,7 +287,8 @@ export function formatMemoryList(
     const head = entry.provenance.head ? `head ${entry.provenance.head.slice(0, 12)}` : "no git head";
     lines.push(`${entry.id}  ·  recorded ${age}  ·  ${head}`);
     const text = entry.text.length > DISPLAY_TEXT_CHARS
-      ? `${entry.text.slice(0, DISPLAY_TEXT_CHARS)}…`
+      // Issue #868: safeCutEnd keeps the display cut from orphaning a surrogate.
+      ? `${entry.text.slice(0, safeCutEnd(entry.text, DISPLAY_TEXT_CHARS))}…`
       : entry.text;
     for (const line of text.split("\n")) {
       lines.push(`    ${redactSecrets(line).text}`);
