@@ -160,6 +160,13 @@ describe("attachment section composition (Issue #797)", () => {
     expect(out).toContain("path=\"evil'.txt\"");
   });
 
+  it("guards the name attribute against quote breakout (Issue #872)", () => {
+    const out = composeTextAttachmentSections([t("body", 'evil".txt')]);
+    // The basename feeds the name attribute and must not break out either.
+    expect(out).not.toContain('name="evil"');
+    expect(out).toContain("name=\"evil'.txt\"");
+  });
+
   it("joins multiple sections in order", () => {
     const out = composeTextAttachmentSections([t("first", "a.txt"), t("second", "b.txt")]);
     expect(out.indexOf("first")).toBeLessThan(out.indexOf("second"));

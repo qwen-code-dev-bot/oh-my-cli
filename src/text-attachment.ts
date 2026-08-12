@@ -124,16 +124,17 @@ export function loadMixedAttachments(
 }
 
 // Compose the delimited, path-labeled sections that carry attached text into
-// the next turn's user message. The content is attached verbatim; only the
-// path attribute is guarded (quotes collapsed) so a hostile path cannot break
-// out of the label.
+// the next turn's user message. The content is attached verbatim; both the
+// path and name attributes are guarded (quotes collapsed) so neither can break
+// out of its attribute (Issue #872: the basename can contain a double-quote).
 export function composeTextAttachmentSections(
   texts: readonly LoadedTextAttachment[],
 ): string {
   return texts
     .map((t) => {
       const label = t.rawPath.replace(/"/g, "'");
-      return `<attached-file path="${label}" name="${t.name}">\n${t.content}\n</attached-file>`;
+      const name = t.name.replace(/"/g, "'");
+      return `<attached-file path="${label}" name="${name}">\n${t.content}\n</attached-file>`;
     })
     .join("\n\n");
 }
