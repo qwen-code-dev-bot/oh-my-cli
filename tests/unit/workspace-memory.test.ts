@@ -223,4 +223,22 @@ describe("workspace memory rendering (Issue #570)", () => {
     expect(rec.entries[0].head).toBe("f".repeat(40));
     expect(rec.entries[0].recordedAt).toBe(new Date(NOW).toISOString());
   });
+
+  it("does not orphan a surrogate when truncating stored memory text (Issue #868)", () => {
+    const text = "a".repeat(MEMORY_MAX_TEXT_CHARS - 1) + "🚀 tail";
+    const result = addWorkspaceMemory(ws, text, opts(memoryDir));
+    expect(result.ok).toBe(true);
+    const load = loadWorkspaceMemory(ws, opts(memoryDir));
+    const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    expect(load.entries[0].text).not.toMatch(LONE);
+  });
+
+  it("does not orphan a surrogate when truncating the displayed memory text (Issue #868)", () => {
+    const text = "a".repeat(499) + "🚀" + "a".repeat(100);
+    const result = addWorkspaceMemory(ws, text, opts(memoryDir));
+    expect(result.ok).toBe(true);
+    const rendered = formatMemoryList(ws, opts(memoryDir)).join("\n");
+    const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    expect(rendered).not.toMatch(LONE);
+  });
 });

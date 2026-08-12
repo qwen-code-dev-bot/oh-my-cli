@@ -25,7 +25,9 @@ function safeObjective(value: string): string {
     .replace(/\s+/g, " ")
     .trim();
   const redacted = redactSecrets(terminalSafe).text;
-  return redacted.length <= 500 ? redacted : `${redacted.slice(0, 499)}…`;
+  // Issue #868: cut via safeCutEnd so an astral character straddling the bound
+  // is dropped whole rather than orphaned before the ellipsis (mirrors safeTitle).
+  return redacted.length <= 500 ? redacted : `${redacted.slice(0, safeCutEnd(redacted, 499))}…`;
 }
 
 /**
