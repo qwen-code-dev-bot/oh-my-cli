@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -147,5 +147,35 @@ describe("bundleSession / restoreSessionBundle (Issue #704)", () => {
       fs.readFileSync(store.filePath(sessionId).replace(/\.jsonl$/, ".turn.json"), "utf-8"),
     );
     expect(restored.checkpoints[0].sessionId).toBe(sessionId);
+  });
+});
+
+describe("restoreSessionBundle atomicity (Issue #865)", () => {
+  let dir: string;
+  let store: SessionStore;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "omc-865u-store-"));
+    store = new SessionStore(dir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("throws and leaves no session materialized when the final rename fails", () => {
+    const spy = vi.spyOn(fs, "renameSync").mockImplementation(() => {
+      throw new Error("simulated crash during rename");
+    });
+    try {
+      expect(() => restoreSessionBundle(store, baseBundle())).toThrow(
+        "simulated crash during rename",
+      );
+      // The new session id was allocated but no file may have materialized:
+      // the interrupted atomic write leaves the store listing unchanged.
+      expect(store.listIds()).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

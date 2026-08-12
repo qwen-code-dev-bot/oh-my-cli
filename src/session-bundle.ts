@@ -15,6 +15,7 @@
 import fs from "node:fs";
 import type { SessionStore } from "./session.js";
 import { notesPath } from "./session-notes.js";
+import { atomicWriteFile } from "./atomic-write.js";
 
 export const SESSION_BUNDLE_SCHEMA = "oh-my-cli.session-bundle" as const;
 export const SESSION_BUNDLE_VERSION = 1 as const;
@@ -123,13 +124,15 @@ export function restoreSessionBundle(
   const sessionId = store.newId();
   const transcript =
     bundle.transcriptLines.length > 0 ? bundle.transcriptLines.join("\n") + "\n" : "";
-  fs.writeFileSync(store.filePath(sessionId), transcript);
+  // Issue #865: atomic writes (temp + rename) so an interrupted restore never
+  // leaves a torn session; each file appears fully or not at all.
+  atomicWriteFile(store.filePath(sessionId), transcript);
   const { name, goal, notes, pinned, archived, turn } = bundle.sidecars;
-  if (name !== undefined) fs.writeFileSync(store.namePath(sessionId), name);
-  if (goal !== undefined) fs.writeFileSync(store.goalPath(sessionId), goal);
-  if (notes !== undefined) fs.writeFileSync(notesPath(store, sessionId), notes);
-  if (pinned !== undefined) fs.writeFileSync(store.pinnedPath(sessionId), pinned);
-  if (archived !== undefined) fs.writeFileSync(store.archivedPath(sessionId), archived);
+  if (name !== undefined) atomicWriteFile(store.namePath(sessionId), name);
+  if (goal !== undefined) atomicWriteFile(store.goalPath(sessionId), goal);
+  if (notes !== undefined) atomicWriteFile(notesPath(store, sessionId), notes);
+  if (pinned !== undefined) atomicWriteFile(store.pinnedPath(sessionId), pinned);
+  if (archived !== undefined) atomicWriteFile(store.archivedPath(sessionId), archived);
   if (turn !== undefined) {
     // The turn log is the only sidecar that cannot ride along raw: its
     // entries carry the source session id, which must become the new id.
@@ -151,7 +154,7 @@ export function restoreSessionBundle(
     } catch {
       // A torn turn log rides along raw rather than vanishing.
     }
-    fs.writeFileSync(sessionTurnLogPath(store, sessionId), rewritten);
+    atomicWriteFile(sessionTurnLogPath(store, sessionId), rewritten);
   }
   return { sessionId };
 }
