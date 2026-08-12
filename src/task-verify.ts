@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { collectRepoContext } from "./repo-context.js";
 import type { RepoContextSnapshot, CanonicalCommand } from "./repo-context.js";
 import { redactSecrets } from "./permission-impact.js";
+import { safeByteTailStart, safeCutEnd } from "./text-cut.js";
 
 export const VERIFY_SCHEMA = "oh-my-cli.task-verify";
 export const VERIFY_VERSION = 1;
@@ -72,15 +73,18 @@ export function scrubOutput(combined: string, workspace: string): string {
   const redacted = redactSecrets(combined ?? "").text;
   const abs = path.resolve(workspace);
   const scrubbed = redacted.split(abs).join("[workspace]");
-  if (scrubbed.length <= MAX_OUTPUT_BYTES) return scrubbed;
-  return scrubbed.slice(scrubbed.length - MAX_OUTPUT_BYTES);
+  // Issue #860: keep the tail within the byte budget via safeByteTailStart so a
+  // surrogate pair straddling the cut is dropped whole, never orphaned.
+  return scrubbed.slice(safeByteTailStart(scrubbed, MAX_OUTPUT_BYTES));
 }
 
 // Display form of a command: secret-redacted, workspace-path-scrubbed, bounded.
 export function displayCommand(command: string, workspace?: string): string {
   let text = redactSecrets(command ?? "").text;
   if (workspace) text = text.split(path.resolve(workspace)).join("[workspace]");
-  return text.slice(0, MAX_COMMAND_LEN);
+  // Issue #860: cut via safeCutEnd so an astral character at the boundary is
+  // dropped whole rather than orphaned.
+  return text.slice(0, safeCutEnd(text, MAX_COMMAND_LEN));
 }
 
 // Run one canonical command, bounded by timeout and output capture. Only ever

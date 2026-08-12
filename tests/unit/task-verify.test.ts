@@ -241,3 +241,28 @@ describe("formatVerifyReport", () => {
     expect(text).toContain("boom");
   });
 });
+
+describe("Issue #860: surrogate-safe output/command bounding", () => {
+  const UNPAIRED = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+  it("scrubOutput does not orphan a surrogate when multibyte output straddles the tail boundary", () => {
+    // Rocket's low surrogate sits exactly at index (length - MAX_OUTPUT_BYTES).
+    const s = "a".repeat(100) + "🚀" + "a".repeat(8191);
+    const out = scrubOutput(s, tmp());
+    expect(out).not.toMatch(UNPAIRED);
+    expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(8 * 1024);
+  });
+
+  it("scrubOutput honors the byte budget for multibyte output", () => {
+    const s = "🚀".repeat(3000); // 6000 code units, 12000 UTF-8 bytes
+    const out = scrubOutput(s, tmp());
+    expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(8 * 1024);
+    expect(out).not.toMatch(UNPAIRED);
+  });
+
+  it("displayCommand does not orphan a surrogate at the MAX_COMMAND_LEN boundary", () => {
+    const cmd = "a".repeat(119) + "🚀 tail";
+    const out = displayCommand(cmd);
+    expect(out).not.toMatch(UNPAIRED);
+  });
+});

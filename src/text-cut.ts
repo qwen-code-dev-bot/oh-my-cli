@@ -70,3 +70,49 @@ export function clampMarked(text: string, maxChars: number, marker: string): str
   if (text.length <= maxChars) return text;
   return text.slice(0, safeCutEnd(text, maxChars)) + marker;
 }
+
+/**
+ * Return the start index for keeping the trailing `maxChars` UTF-16 code units
+ * of `text` without splitting a surrogate pair (Issue #860). This is the
+ * tail-keeping complement of `safeCutEnd`: callers render `text.slice(result)`.
+ * If the naive cut `text.length - maxChars` lands on a low surrogate — whose
+ * high-surrogate partner sits just before the cut and would be dropped — the
+ * start is advanced one to discard the orphaned low surrogate, so the kept tail
+ * never begins with an unpaired surrogate. Returns `0` when the whole string
+ * already fits, and `text.length` (empty tail) for an empty budget/text.
+ */
+export function safeTailStart(text: string, maxChars: number): number {
+  if (maxChars <= 0 || text === "") return text.length;
+  if (text.length <= maxChars) return 0;
+  const start = text.length - Math.floor(maxChars);
+  const unit = text.charCodeAt(start);
+  // Low surrogate (U+DC00–U+DFFF): its partner is at `start - 1` and is being
+  // cut away, so keeping it would orphan it. Drop it.
+  if (unit >= 0xdc00 && unit <= 0xdfff) return start + 1;
+  return start;
+}
+
+/**
+ * Return the start index for keeping the trailing portion of `text` whose UTF-8
+ * byte length is `<= maxBytes`, without splitting a surrogate pair (Issue #860).
+ * The tail-keeping complement of `safeByteCutEnd`: callers render
+ * `text.slice(result)`. The tail's byte length is monotonic (non-increasing) in
+ * the start index, so this binary-searches the smallest start that honors the
+ * byte budget, then discards a leading orphaned low surrogate if the cut lands
+ * on one. Returns `0` when the whole string already fits, and `text.length`
+ * (empty tail) for an empty budget/text.
+ */
+export function safeByteTailStart(text: string, maxBytes: number): number {
+  if (maxBytes <= 0 || text === "") return text.length;
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return 0;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (Buffer.byteLength(text.slice(mid), "utf8") <= maxBytes) hi = mid;
+    else lo = mid + 1;
+  }
+  const unit = lo < text.length ? text.charCodeAt(lo) : 0;
+  if (unit >= 0xdc00 && unit <= 0xdfff) return lo + 1;
+  return lo;
+}
