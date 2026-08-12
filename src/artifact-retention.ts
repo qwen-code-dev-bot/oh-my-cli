@@ -82,14 +82,22 @@ export function evaluateRetention(
     byRevision.set(artifact.goalRevision, group);
   }
 
+  // Count-based ranking: sort each revision group once (newest first) and
+  // record each artifact's rank. This replaces the previous per-artifact
+  // re-sort + linear indexOf scan with one sort per revision plus an O(1) rank
+  // lookup, turning count evaluation from O(n² log n) into O(n log n) (#852).
+  // Behavior is unchanged: same stable newest-first ordering and ranks.
+  const indexByArtifact = new Map<ArtifactRecord, number>();
+  for (const group of byRevision.values()) {
+    const sorted = [...group].sort((a, b) => b.createdAt - a.createdAt);
+    sorted.forEach((artifact, index) => indexByArtifact.set(artifact, index));
+  }
+
   for (const artifact of artifacts) {
     const ageMs = now - artifact.createdAt;
     const isTooOld = ageMs > maxAgeMs;
 
-    // Count-based: sort by creation time (newest first), keep maxCount.
-    const revisionGroup = byRevision.get(artifact.goalRevision)!;
-    const sorted = [...revisionGroup].sort((a, b) => b.createdAt - a.createdAt);
-    const indexInRevision = sorted.indexOf(artifact);
+    const indexInRevision = indexByArtifact.get(artifact)!;
     const isExcess = indexInRevision >= policy.maxCountPerRevision;
 
     if (isTooOld) {
