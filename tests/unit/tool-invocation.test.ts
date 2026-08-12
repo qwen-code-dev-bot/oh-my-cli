@@ -428,4 +428,56 @@ describe("formatToolInvocation", () => {
       expect(out).not.toContain("should-not-appear");
     });
   });
+
+  it("drops an astral character whole at the one-line display cap instead of orphaning a surrogate (Issue #856)", () => {
+    const settings = writeSettings({
+      tools: { contractVersion: 1, entries: [{ id: "echo", command: NODE_BIN, args: [] }] },
+    });
+    // 239 'a' then a rocket occupying code units 239-240; MAX_DISPLAY_OUTPUT=240 straddles the pair.
+    return invokeTool({
+      settingsPath: settings,
+      workspace: tmpDir(),
+      approvalMode: "yolo",
+      runner: recordingRunner({ exitCode: 0, stdout: "a".repeat(239) + "🚀 tail" }).runner,
+    }).then((report) => {
+      const out = formatToolInvocation(report);
+      const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+      expect(out).not.toMatch(LONE);
+      expect(out).toContain("Stdout:");
+      expect(out).toContain("chars]");
+    });
+  });
+
+  it("does not truncate in-range one-line output (Issue #856)", () => {
+    const settings = writeSettings({
+      tools: { contractVersion: 1, entries: [{ id: "echo", command: NODE_BIN, args: [] }] },
+    });
+    return invokeTool({
+      settingsPath: settings,
+      workspace: tmpDir(),
+      approvalMode: "yolo",
+      runner: recordingRunner({ exitCode: 0, stdout: "short 🚀 output" }).runner,
+    }).then((report) => {
+      const out = formatToolInvocation(report);
+      expect(out).toContain("short 🚀 output");
+      expect(out).not.toContain("chars]");
+    });
+  });
+
+  it("truncates long ASCII one-line output with the marker (Issue #856)", () => {
+    const settings = writeSettings({
+      tools: { contractVersion: 1, entries: [{ id: "echo", command: NODE_BIN, args: [] }] },
+    });
+    return invokeTool({
+      settingsPath: settings,
+      workspace: tmpDir(),
+      approvalMode: "yolo",
+      runner: recordingRunner({ exitCode: 0, stdout: "x".repeat(300) }).runner,
+    }).then((report) => {
+      const out = formatToolInvocation(report);
+      expect(out).toContain("Stdout:");
+      expect(out).toContain("…[+60 chars]");
+      expect(out).toContain("x".repeat(240));
+    });
+  });
 });
