@@ -417,3 +417,13 @@ describe("task-runtime view and durable persistence", () => {
     expect(durable).toContain("[REDACTED]");
   });
 });
+
+describe("task detail truncation surrogate safety (Issue #870)", () => {
+  it("does not orphan a surrogate when a task detail is truncated", () => {
+    const detail = "a".repeat(198) + "🚀 tail";
+    const reg = registerTask(snap(), { type: "shell", label: "build", detail }, 1_000);
+    const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    expect(reg.task!.detail).not.toMatch(LONE);
+    expect(reg.task!.detail!.endsWith("…")).toBe(true);
+  });
+});
