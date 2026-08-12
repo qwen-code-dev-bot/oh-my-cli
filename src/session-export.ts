@@ -24,6 +24,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import type { SessionStore, SessionMessage } from "./session.js";
 import { readSessionNotes } from "./session-notes.js";
 
@@ -150,7 +151,11 @@ function redact(text: string): string {
 
 function clamp(text: string, max: number): string {
   if (text.length <= max) return text;
-  return `${text.slice(0, max)} …[+${text.length - max} chars truncated]`;
+  // Issue #854: cut via safeCutEnd so an astral character straddling the cap
+  // is dropped whole instead of orphaning an unpaired surrogate in the export.
+  // The truncation count reflects the actual safe cut point.
+  const cut = safeCutEnd(text, max);
+  return `${text.slice(0, cut)} …[+${text.length - cut} chars truncated]`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
