@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   evaluateRetention,
   formatRetentionReport,
+  formatBytes,
   DEFAULT_RETENTION_POLICY,
   type ArtifactRecord,
   type RetentionPolicy,
@@ -141,5 +142,37 @@ describe("formatRetentionReport", () => {
     const a = formatRetentionReport(evaluation);
     const b = formatRetentionReport(evaluation);
     expect(a).toBe(b);
+  });
+});
+
+// --- formatBytes unit tiers (Issue #850) ------------------------------------
+
+describe("formatBytes", () => {
+  it("renders sub-KB values as raw bytes", () => {
+    expect(formatBytes(0)).toBe("0B");
+    expect(formatBytes(1023)).toBe("1023B");
+  });
+
+  it("renders KB values (unchanged behavior)", () => {
+    expect(formatBytes(1024)).toBe("1.0KB");
+    expect(formatBytes(1536)).toBe("1.5KB");
+  });
+
+  it("renders MB values (unchanged behavior)", () => {
+    expect(formatBytes(1024 ** 2)).toBe("1.0MB");
+    expect(formatBytes(2.5 * 1024 ** 2)).toBe("2.5MB");
+  });
+
+  it("renders GB values with a GB unit instead of thousands of MB (Issue #850)", () => {
+    expect(formatBytes(1024 ** 3)).toBe("1.0GB");
+    expect(formatBytes(2.5 * 1024 ** 3)).toBe("2.5GB");
+    // Just under 1 GB stays in the MB tier.
+    expect(formatBytes(1000 * 1024 ** 2)).toBe("1000.0MB");
+  });
+
+  it("renders TB values with a TB unit instead of millions of MB (Issue #850)", () => {
+    expect(formatBytes(1024 ** 4)).toBe("1.0TB");
+    // Just under 1 TB stays in the GB tier.
+    expect(formatBytes(1000 * 1024 ** 3)).toBe("1000.0GB");
   });
 });
