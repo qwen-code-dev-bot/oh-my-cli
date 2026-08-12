@@ -17,6 +17,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const REPO_CONTEXT_SCHEMA = "oh-my-cli.repo-context";
 export const REPO_CONTEXT_VERSION = 1;
@@ -120,7 +121,10 @@ function redactName(text: string): string {
 }
 
 function redactCommand(text: string): string {
-  return redactSecrets(text).text.slice(0, MAX_COMMAND_LEN);
+  const t = redactSecrets(text).text;
+  // Issue #874: safeCutEnd drops an astral char straddling the bound whole
+  // rather than orphaning a surrogate.
+  return t.slice(0, safeCutEnd(t, MAX_COMMAND_LEN));
 }
 
 // A locale-independent comparator (UTF-16 code-unit order) so ordering is

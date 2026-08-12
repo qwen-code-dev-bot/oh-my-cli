@@ -141,6 +141,21 @@ describe("redaction and bounding", () => {
     expect(plan.objective.length).toBe(500);
   });
 
+  it("does not orphan a surrogate when bounding the objective (Issue #874)", () => {
+    const dir = tmp();
+    const plan = planTask({ task: "a".repeat(499) + "🚀 tail", workspace: dir });
+    const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    expect(plan.objective).not.toMatch(LONE);
+  });
+
+  it("does not orphan a surrogate when bounding a derived verify command (Issue #874)", () => {
+    const dir = tmp();
+    write(dir, "package.json", JSON.stringify({ scripts: { test: "a".repeat(119) + "🚀 tail" } }));
+    const plan = planTask({ task: "fix", workspace: dir });
+    const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    expect(plan.verifyCommands[0]).not.toMatch(LONE);
+  });
+
   it("never leaks the workspace path", () => {
     const dir = tmp();
     write(dir, "src/index.ts", "");

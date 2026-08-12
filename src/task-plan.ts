@@ -15,6 +15,7 @@
 import { collectRepoContext } from "./repo-context.js";
 import type { RepoContextSnapshot, CanonicalCommand } from "./repo-context.js";
 import { redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const PLAN_SCHEMA = "oh-my-cli.plan";
 export const PLAN_VERSION = 1;
@@ -60,7 +61,10 @@ export interface TaskPlanOptions {
 }
 
 function redactObjective(task: string): string {
-  return redactSecrets(task ?? "").text.trim().slice(0, MAX_OBJECTIVE);
+  const trimmed = redactSecrets(task ?? "").text.trim();
+  // Issue #874: safeCutEnd drops an astral char straddling the bound whole
+  // rather than orphaning a surrogate.
+  return trimmed.slice(0, safeCutEnd(trimmed, MAX_OBJECTIVE));
 }
 
 // Derive the ordered verify commands from a repository-context snapshot, in
@@ -70,7 +74,12 @@ export function deriveVerifyCommands(snapshot: RepoContextSnapshot): string[] {
   const commands: string[] = [];
   for (const key of CANONICAL_ORDER) {
     const ref = snapshot.commands[key];
-    if (ref) commands.push(redactSecrets(ref.command).text.slice(0, MAX_COMMAND_LEN));
+    if (ref) {
+      const text = redactSecrets(ref.command).text;
+      // Issue #874: safeCutEnd drops an astral char straddling the bound whole
+      // rather than orphaning a surrogate.
+      commands.push(text.slice(0, safeCutEnd(text, MAX_COMMAND_LEN)));
+    }
     if (commands.length >= MAX_COMMANDS) break;
   }
   return commands;
