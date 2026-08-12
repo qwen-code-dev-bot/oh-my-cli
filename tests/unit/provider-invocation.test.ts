@@ -457,4 +457,65 @@ describe("formatProviderInvocation", () => {
     expect(out).not.toContain("should-not-appear");
     expect(out).not.toContain("sk-test");
   });
+
+  it("drops an astral character whole at the display cap instead of orphaning a surrogate (Issue #858)", async () => {
+    const settings = writeSettings({
+      providers: {
+        contractVersion: 1,
+        entries: [{ id: "p", model: "ok", apiKeyEnv: "TEST_PROVIDER_KEY" }],
+      },
+    });
+    // 239 'a' then a rocket occupying code units 239-240; MAX_DISPLAY_OUTPUT=240 straddles the pair.
+    const report = await invokeProvider({
+      settingsPath: settings,
+      env: { TEST_PROVIDER_KEY: "sk-test" },
+      workspace: tmpDir(),
+      approvalMode: "yolo",
+      runner: recordingRunner({ outcome: "called", text: "a".repeat(239) + "🚀 tail" }).runner,
+    });
+    const out = formatProviderInvocation(report);
+    const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    expect(out).not.toMatch(LONE);
+    expect(out).toContain("Result:");
+    expect(out).toContain("chars]");
+  });
+
+  it("does not truncate in-range provider output (Issue #858)", async () => {
+    const settings = writeSettings({
+      providers: {
+        contractVersion: 1,
+        entries: [{ id: "p", model: "ok", apiKeyEnv: "TEST_PROVIDER_KEY" }],
+      },
+    });
+    const report = await invokeProvider({
+      settingsPath: settings,
+      env: { TEST_PROVIDER_KEY: "sk-test" },
+      workspace: tmpDir(),
+      approvalMode: "yolo",
+      runner: recordingRunner({ outcome: "called", text: "short 🚀 output" }).runner,
+    });
+    const out = formatProviderInvocation(report);
+    expect(out).toContain("short 🚀 output");
+    expect(out).not.toContain("chars]");
+  });
+
+  it("truncates long ASCII provider output with the marker (Issue #858)", async () => {
+    const settings = writeSettings({
+      providers: {
+        contractVersion: 1,
+        entries: [{ id: "p", model: "ok", apiKeyEnv: "TEST_PROVIDER_KEY" }],
+      },
+    });
+    const report = await invokeProvider({
+      settingsPath: settings,
+      env: { TEST_PROVIDER_KEY: "sk-test" },
+      workspace: tmpDir(),
+      approvalMode: "yolo",
+      runner: recordingRunner({ outcome: "called", text: "x".repeat(300) }).runner,
+    });
+    const out = formatProviderInvocation(report);
+    expect(out).toContain("Result:");
+    expect(out).toContain("…[+60 chars]");
+    expect(out).toContain("x".repeat(240));
+  });
 });

@@ -405,4 +405,53 @@ describe("formatMcpInvocation", () => {
       expect(out).not.toContain("should-not-appear");
     });
   });
+
+  it("drops an astral character whole at the display cap instead of orphaning a surrogate (Issue #858)", async () => {
+    const settings = writeSettings({
+      mcp: { contractVersion: 1, entries: [{ id: "s", command: NODE_BIN, args: fixtureArgs("echo") }] },
+    });
+    // 239 'a' then a rocket occupying code units 239-240; MAX_DISPLAY_OUTPUT=240 straddles the pair.
+    const report = await invokeMcpServer({
+      settingsPath: settings,
+      workspace: tmpDir(),
+      approvalMode: "yolo",
+      runner: recordingRunner({ outcome: "called", content: "a".repeat(239) + "🚀 tail" }).runner,
+    });
+    const out = formatMcpInvocation(report);
+    const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    expect(out).not.toMatch(LONE);
+    expect(out).toContain("Result:");
+    expect(out).toContain("chars]");
+  });
+
+  it("does not truncate in-range MCP tool output (Issue #858)", async () => {
+    const settings = writeSettings({
+      mcp: { contractVersion: 1, entries: [{ id: "s", command: NODE_BIN, args: fixtureArgs("echo") }] },
+    });
+    const report = await invokeMcpServer({
+      settingsPath: settings,
+      workspace: tmpDir(),
+      approvalMode: "yolo",
+      runner: recordingRunner({ outcome: "called", content: "short 🚀 output" }).runner,
+    });
+    const out = formatMcpInvocation(report);
+    expect(out).toContain("short 🚀 output");
+    expect(out).not.toContain("chars]");
+  });
+
+  it("truncates long ASCII MCP tool output with the marker (Issue #858)", async () => {
+    const settings = writeSettings({
+      mcp: { contractVersion: 1, entries: [{ id: "s", command: NODE_BIN, args: fixtureArgs("echo") }] },
+    });
+    const report = await invokeMcpServer({
+      settingsPath: settings,
+      workspace: tmpDir(),
+      approvalMode: "yolo",
+      runner: recordingRunner({ outcome: "called", content: "x".repeat(300) }).runner,
+    });
+    const out = formatMcpInvocation(report);
+    expect(out).toContain("Result:");
+    expect(out).toContain("…[+60 chars]");
+    expect(out).toContain("x".repeat(240));
+  });
 });
