@@ -184,3 +184,35 @@ describe("failure receipts rendering (Issue #574)", () => {
     expect(formatFailures(record).join("\n")).toBe(text);
   });
 });
+
+describe("Issue #860: surrogate-safe output tails", () => {
+  let homeDir: string;
+  let store: SessionStore;
+  let sessionId: string;
+
+  beforeEach(() => {
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "omc-860-"));
+    store = new SessionStore(homeDir);
+    sessionId = store.newId();
+    store.writeMeta(sessionId, { model: "m", workspace: "/tmp/ws", createdAt: 1 });
+    store.append(sessionId, { role: "user", content: "hi" });
+  });
+  afterEach(() => {
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it("does not orphan a surrogate when an output tail straddles a pair", () => {
+    // Rocket's low surrogate sits exactly at index (length - FAILURE_OUTPUT_TAIL_CHARS).
+    const stdout = "a".repeat(10) + "🚀" + "a".repeat(FAILURE_OUTPUT_TAIL_CHARS - 1);
+    appendFailureReceipt(
+      store,
+      sessionId,
+      { command: "make test", status: 3, timedOut: false, stdout, stderr: "boom", cwd: "/tmp/ws" },
+      { now: () => NOW },
+    );
+    const r = loadFailureLog(store, sessionId).receipts[0];
+    const UNPAIRED = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    expect(r.stdoutTail).not.toMatch(UNPAIRED);
+    expect(r.stdoutTail.startsWith("…")).toBe(true);
+  });
+});

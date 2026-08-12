@@ -12,6 +12,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
+import { safeTailStart } from "./text-cut.js";
 import type { SessionStore } from "./session.js";
 import type { ShellFailureDetail } from "./tools.js";
 
@@ -96,7 +97,10 @@ export function loadFailureLog(store: SessionStore, sessionId: string): FailureL
 }
 
 function tail(text: string, maxChars: number): string {
-  return text.length <= maxChars ? text : `…${text.slice(text.length - maxChars)}`;
+  if (text.length <= maxChars) return text;
+  // Issue #860: cut via safeTailStart so a surrogate pair straddling the tail
+  // boundary is dropped whole instead of orphaning a low surrogate after the `…`.
+  return `…${text.slice(safeTailStart(text, maxChars))}`;
 }
 
 function redactBounded(text: string, maxChars: number): string {
