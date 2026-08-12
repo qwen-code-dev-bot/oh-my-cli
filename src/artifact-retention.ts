@@ -146,5 +146,10 @@ export function formatRetentionReport(evaluation: RetentionEvaluation): string {
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  // Issue #850: scale past MB as well, so multi-gigabyte footprints (session
+  // stores, retention totals) render as GB/TB instead of thousands/millions of
+  // MB (a 1 TB store previously printed "1048576.0MB").
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  if (bytes < 1024 * 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
+  return `${(bytes / (1024 * 1024 * 1024 * 1024)).toFixed(1)}TB`;
 }
