@@ -23,6 +23,7 @@
 
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import { atomicWriteFile } from "./atomic-write.js";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
 import type { RunSummary } from "./run-summary.js";
 import type { RecoveryCheckpoint } from "./run-recovery.js";
@@ -263,7 +264,9 @@ export function serializeEvidenceBundle(bundle: EvidenceBundle): string {
 
 /** Serialize and write a bundle to `filePath` (deterministic bytes, trailing newline). */
 export function writeEvidenceBundle(filePath: string, bundle: EvidenceBundle): void {
-  fs.writeFileSync(filePath, serializeEvidenceBundle(bundle), "utf8");
+  // Issue #862: atomic write (temp + rename) so an interrupted write cannot tear
+  // the evidence bundle; a torn bundle fails verification and loses provenance.
+  atomicWriteFile(filePath, serializeEvidenceBundle(bundle));
 }
 
 // --- parse / read ------------------------------------------------------------

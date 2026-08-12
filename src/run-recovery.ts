@@ -16,6 +16,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import { atomicWriteFile } from "./atomic-write.js";
 import { redactSecrets } from "./permission-impact.js";
 
 export const RECOVERY_SCHEMA = "oh-my-cli.recovery";
@@ -100,7 +101,9 @@ export function writeRecoveryCheckpoint(filePath: string, checkpoint: RecoveryCh
     repoHead: checkpoint.repoHead,
     steps: checkpoint.steps.map((s) => ({ id: redact(s.id), digest: s.digest })),
   };
-  fs.writeFileSync(filePath, JSON.stringify(safe, null, 2) + "\n", "utf8");
+  // Issue #862: atomic write (temp + rename) so an interrupted write cannot tear
+  // the checkpoint; load fails closed and would lose the recovery point.
+  atomicWriteFile(filePath, JSON.stringify(safe, null, 2) + "\n");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

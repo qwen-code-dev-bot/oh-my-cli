@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   decideFolderTrust,
   detectSandbox,
@@ -216,5 +216,22 @@ describe("folderTrustDenialMessage", () => {
     expect(msg).toMatch(/fail closed/i);
     expect(msg).toContain("--trust");
     expect(msg).not.toMatch(/\/home|\/root|password|secret/i);
+  });
+});
+
+describe("saveTrustStore atomicity (Issue #862)", () => {
+  it("throws and preserves prior content when the final rename fails", () => {
+    const target = storePath();
+    fs.writeFileSync(target, '{"prior":true}\n', "utf-8");
+    const spy = vi.spyOn(fs, "renameSync").mockImplementation(() => {
+      throw new Error("simulated crash during rename");
+    });
+    try {
+      expect(() => saveTrustStore(target, emptyTrustStore())).toThrow("simulated crash during rename");
+      expect(fs.readFileSync(target, "utf-8")).toBe('{"prior":true}\n');
+      expect(fs.readdirSync(tmpDir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

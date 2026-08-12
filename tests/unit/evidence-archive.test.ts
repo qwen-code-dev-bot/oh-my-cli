@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -354,5 +354,23 @@ describe("formatting", () => {
     const out = formatEvidenceVerification(verifyEvidenceBundle(bundle));
     expect(out).toContain("result:    invalid");
     expect(out).toContain("MISMATCH");
+  });
+});
+
+describe("writeEvidenceBundle atomicity (Issue #862)", () => {
+  it("throws and preserves prior content when the final rename fails", () => {
+    const dir = tmp();
+    const file = path.join(dir, "bundle.evidence");
+    fs.writeFileSync(file, '{"prior":true}\n', "utf-8");
+    const spy = vi.spyOn(fs, "renameSync").mockImplementation(() => {
+      throw new Error("simulated crash during rename");
+    });
+    try {
+      expect(() => writeEvidenceBundle(file, buildEvidenceBundle(fullInput()))).toThrow("simulated crash during rename");
+      expect(fs.readFileSync(file, "utf-8")).toBe('{"prior":true}\n');
+      expect(fs.readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

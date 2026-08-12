@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -60,5 +60,32 @@ describe("atomicWriteFile", () => {
     atomicWriteFile(target, big);
     expect(fs.readFileSync(target, "utf-8")).toBe(big);
     expect(fs.readdirSync(tmpDir)).toEqual(["big.txt"]);
+  });
+});
+
+describe("atomicWriteFile rename failure (Issue #862)", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "oh-my-cli-atomic-862-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("throws and preserves prior content when the final rename fails", () => {
+    const target = path.join(dir, "store.json");
+    fs.writeFileSync(target, '{"prior":true}\n', "utf-8");
+    const spy = vi.spyOn(fs, "renameSync").mockImplementation(() => {
+      throw new Error("simulated crash during rename");
+    });
+    try {
+      expect(() => atomicWriteFile(target, '{"next":true}\n')).toThrow("simulated crash during rename");
+      expect(fs.readFileSync(target, "utf-8")).toBe('{"prior":true}\n');
+      expect(fs.readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

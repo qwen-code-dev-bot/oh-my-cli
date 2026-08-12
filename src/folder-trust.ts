@@ -26,6 +26,7 @@ import os from "node:os";
 import path from "node:path";
 import { workspaceIdentity } from "./workspace-guard.js";
 import { redactHomePath } from "./permission-impact.js";
+import { atomicWriteFile } from "./atomic-write.js";
 
 export const FOLDER_TRUST_SCHEMA = "oh-my-cli.folder-trust";
 export const FOLDER_TRUST_VERSION = 1;
@@ -101,8 +102,9 @@ export function addTrusted(store: TrustStore, key: string): TrustStore {
 }
 
 export function saveTrustStore(storePath: string, store: TrustStore): void {
-  fs.mkdirSync(path.dirname(storePath), { recursive: true });
-  fs.writeFileSync(storePath, JSON.stringify(store, null, 2) + "\n", "utf-8");
+  // Issue #862: atomic write (temp + rename) so an interrupted write cannot tear
+  // the trust store; loadTrustStore fails closed and would drop all persisted trust.
+  atomicWriteFile(storePath, JSON.stringify(store, null, 2) + "\n");
 }
 
 // Canonical workspace key: collapses symlink aliases and linked git worktrees to
