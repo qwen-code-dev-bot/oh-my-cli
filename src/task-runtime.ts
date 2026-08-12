@@ -31,6 +31,7 @@
 
 import { createHash } from "node:crypto";
 import { redactSecrets, redactHomePath } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 
 export const TASK_RUNTIME_SCHEMA = "oh-my-cli.tasks";
 export const TASK_RUNTIME_VERSION = 1;
@@ -774,7 +775,9 @@ function safeText(input: string | undefined, max: number): string {
   const { text } = redactSecrets(input);
   const trimmed = text.trim();
   if (trimmed.length <= max) return trimmed;
-  return trimmed.slice(0, Math.max(0, max - 1)) + "…";
+  // Issue #870: cut via safeCutEnd so an astral char straddling the bound is
+  // dropped whole rather than orphaned before the ellipsis.
+  return trimmed.slice(0, safeCutEnd(trimmed, Math.max(0, max - 1))) + "…";
 }
 
 function safeDetail(input: string | undefined): string | null {

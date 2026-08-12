@@ -503,7 +503,9 @@ function redactReason(reason: string | undefined): string | undefined {
 // argument cannot stall the hook's stdin while keeping the JSON valid.
 function boundForHook(value: unknown, maxLen: number): unknown {
   if (typeof value === "string") {
-    return value.length <= maxLen ? value : `${value.slice(0, maxLen)}…`;
+    // Issue #870: cut via safeCutEnd so an astral char straddling the bound is
+    // dropped whole rather than orphaned before the ellipsis (mirrors :499).
+    return value.length <= maxLen ? value : `${value.slice(0, safeCutEnd(value, maxLen))}…`;
   }
   if (Array.isArray(value)) return value.map((v) => boundForHook(v, maxLen));
   if (value && typeof value === "object") {

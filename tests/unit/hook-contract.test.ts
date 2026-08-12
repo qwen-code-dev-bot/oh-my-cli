@@ -471,3 +471,25 @@ describe("spawnHookRunner: reassembles split-chunk multi-byte output (Issue #836
     expect(result.stdout.length).toBe(count);
   });
 });
+
+describe("boundForHook surrogate safety (Issue #870)", () => {
+  it("bounds long tool-input strings without orphaning a surrogate", async () => {
+    const cwd = tmpDir();
+    let captured: HookRunOptions | null = null;
+    const runner: HookRunner = async (opts) => {
+      captured = opts;
+      return { exitCode: 0, timedOut: false, outputCapped: false, stdout: "", stderr: "" };
+    };
+    const longCommand = "a".repeat(2047) + "🚀 tail";
+    await evaluatePreToolUseHooks(
+      [SHELL_HOOK],
+      { toolName: "shell", toolInput: { command: longCommand } },
+      { cwd, runner },
+    );
+    expect(captured).not.toBeNull();
+    const input = JSON.parse(captured!.input);
+    const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    expect(input.tool_input.command).not.toMatch(LONE);
+    expect(input.tool_input.command.endsWith("…")).toBe(true);
+  });
+});
