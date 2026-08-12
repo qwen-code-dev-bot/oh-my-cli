@@ -91,6 +91,28 @@ describe("count-based eligibility", () => {
     expect(evaluation.retained).toHaveLength(6);
     expect(evaluation.eligibleForCleanup).toHaveLength(4);
   });
+
+  it("ranks excess newest-first with correct 1-based count reasons (Issue #852)", () => {
+    // 12 artifacts in one revision with distinct createdAt (a0 oldest … a11
+    // newest), all well within max age so only the count rule applies. With
+    // maxCountPerRevision = 10, the two oldest (a0, a1) are excess at ranks 12
+    // and 11 in the newest-first ordering.
+    const policy: RetentionPolicy = { maxAgeDays: 1000, maxCountPerRevision: 10 };
+    const artifacts = Array.from({ length: 12 }, (_, i) => ({
+      id: `a${i}`,
+      type: "audit-event" as const,
+      createdAt: NOW - (12 - i) * 1000,
+      sizeBytes: 100,
+      goalRevision: 1,
+    }));
+    const evaluation = evaluateRetention(artifacts, policy, NOW);
+
+    expect(evaluation.retained).toHaveLength(10);
+    expect(evaluation.eligibleForCleanup).toHaveLength(2);
+    expect(evaluation.eligibleForCleanup.map((a) => a.id).sort()).toEqual(["a0", "a1"]);
+    expect(evaluation.cleanupReasons.get("a0")).toContain("Count 12");
+    expect(evaluation.cleanupReasons.get("a1")).toContain("Count 11");
+  });
 });
 
 // --- size tracking ----------------------------------------------------------
