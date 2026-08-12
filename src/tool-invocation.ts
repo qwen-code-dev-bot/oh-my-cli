@@ -23,6 +23,7 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { redactHomePath, redactSecrets } from "./permission-impact.js";
+import { safeCutEnd } from "./text-cut.js";
 import { evaluateCommandPolicy, policyDenialMessage } from "./command-policy.js";
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
@@ -421,5 +422,8 @@ const MAX_DISPLAY_OUTPUT = 240;
 function collapse(text: string): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
   if (oneLine.length <= MAX_DISPLAY_OUTPUT) return oneLine;
-  return `${oneLine.slice(0, MAX_DISPLAY_OUTPUT)} …[+${oneLine.length - MAX_DISPLAY_OUTPUT} chars]`;
+  // Issue #856: cut via safeCutEnd so an astral character straddling the cap
+  // is dropped whole instead of orphaning an unpaired surrogate in the report.
+  const cut = safeCutEnd(oneLine, MAX_DISPLAY_OUTPUT);
+  return `${oneLine.slice(0, cut)} …[+${oneLine.length - cut} chars]`;
 }

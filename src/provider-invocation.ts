@@ -28,7 +28,7 @@ import OpenAI from "openai";
 import type { Config } from "./config.js";
 import { isQuotaExhausted, quotaExhaustedGuidance } from "./provider.js";
 import { redactHomePath, redactSecrets, redactEndpointHost } from "./permission-impact.js";
-import { safeByteCutEnd } from "./text-cut.js";
+import { safeByteCutEnd, safeCutEnd } from "./text-cut.js";
 import type { ApprovalMode } from "./approval.js";
 import { needsApproval, promptApproval } from "./approval.js";
 import {
@@ -513,5 +513,8 @@ const MAX_DISPLAY_OUTPUT = 240;
 function collapse(text: string): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
   if (oneLine.length <= MAX_DISPLAY_OUTPUT) return oneLine;
-  return `${oneLine.slice(0, MAX_DISPLAY_OUTPUT)} …[+${oneLine.length - MAX_DISPLAY_OUTPUT} chars]`;
+  // Issue #856: cut via safeCutEnd so an astral character straddling the cap
+  // is dropped whole instead of orphaning an unpaired surrogate in the report.
+  const cut = safeCutEnd(oneLine, MAX_DISPLAY_OUTPUT);
+  return `${oneLine.slice(0, cut)} …[+${oneLine.length - cut} chars]`;
 }
