@@ -200,6 +200,42 @@ describe("renderSessionMarkdown", () => {
     expect(a).toBe(b);
     expect(a.endsWith("\n")).toBe(true);
   });
+
+  it("drops an astral character whole at the content truncation boundary instead of orphaning a surrogate (Issue #854)", () => {
+    const { store: s } = store();
+    const id = "sess-md-surrogate";
+    // 7999 'a' then a 🚀 occupying code units 7999-8000; MAX_CONTENT=8000
+    // straddles the pair, so the old raw slice orphaned the high surrogate.
+    seed(s, id, [{ role: "assistant", content: "a".repeat(7999) + "🚀" }]);
+    const built = buildSessionManifest(s, id);
+    if ("error" in built) throw new Error(built.error);
+    const md = renderSessionMarkdown(built.manifest, built.messages);
+
+    const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    expect(md).not.toMatch(LONE);
+    expect(md).toContain("chars truncated]");
+  });
+
+  it("drops an astral character whole in truncated tool arguments (Issue #854)", () => {
+    const { store: s } = store();
+    const id = "sess-md-surrogate-args";
+    // MAX_ARGS=2000 straddles the 🚀 at code units 1999-2000.
+    seed(s, id, [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "c1", type: "function", function: { name: "shell", arguments: "a".repeat(1999) + "🚀" } },
+        ],
+      },
+    ]);
+    const built = buildSessionManifest(s, id);
+    if ("error" in built) throw new Error(built.error);
+    const md = renderSessionMarkdown(built.manifest, built.messages);
+
+    const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    expect(md).not.toMatch(LONE);
+  });
 });
 
 describe("exportSession", () => {
