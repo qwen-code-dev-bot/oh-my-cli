@@ -239,6 +239,25 @@ describe("structure outline", () => {
     expect(snap.structure.length).toBe(200);
     expect(snap.structureOverflow).toBe(5);
   });
+
+  it("does not orphan a surrogate when truncating a structure name (Issue #876)", () => {
+    const dir = tmp();
+    // 199 ASCII chars + an astral character (2 UTF-16 units) straddles MAX_NAME_LEN=200.
+    write(dir, "a".repeat(199) + "🚀tail", "");
+    const snap = collectRepoContext({ workspace: dir });
+    const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    expect(snap.structure).toHaveLength(1);
+    expect(snap.structure[0].name).not.toMatch(LONE);
+    expect(snap.structure[0].name.length).toBeLessThanOrEqual(200);
+  });
+
+  it("keeps in-range names, including emoji, unchanged (Issue #876)", () => {
+    const dir = tmp();
+    write(dir, "README.md", "");
+    write(dir, "🚀notes.md", "");
+    const snap = collectRepoContext({ workspace: dir });
+    expect(snap.structure.map((e) => e.name)).toEqual(["README.md", "🚀notes.md"]);
+  });
 });
 
 describe("VCS state", () => {

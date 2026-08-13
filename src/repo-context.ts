@@ -117,7 +117,10 @@ function redact(text: string): string {
 }
 
 function redactName(text: string): string {
-  return redactSecrets(text).text.slice(0, MAX_NAME_LEN);
+  const t = redactSecrets(text).text;
+  // Issue #876: safeCutEnd drops an astral char straddling the bound whole
+  // rather than orphaning a surrogate.
+  return t.slice(0, safeCutEnd(t, MAX_NAME_LEN));
 }
 
 function redactCommand(text: string): string {
